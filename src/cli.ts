@@ -108,7 +108,7 @@ async function main() {
     }
 
     if (messages.length === 0) {
-      const sys: ChatMessage = { role: 'system', content: config.systemPrompt.replace('{cwd}', process.cwd()) };
+      const sys: ChatMessage = { role: 'system', content: config.systemPrompt.replace('{cwd}', process.cwd()).replace('{tools}', config.tools.join(', ')) };
       messages.push(sys);
       saveMessage(sessionPath, sys);
     }

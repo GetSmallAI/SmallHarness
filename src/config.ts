@@ -4,6 +4,15 @@ import { isBackendName, isProfileName, type BackendName, type ProfileName } from
 
 export type ApprovalPolicy = 'always' | 'never' | 'dangerous-only';
 
+export const ALL_TOOL_NAMES = [
+  'file_read', 'file_write', 'file_edit', 'glob', 'grep', 'list_dir', 'shell',
+] as const;
+export type ToolName = typeof ALL_TOOL_NAMES[number];
+
+export function isToolName(s: string): s is ToolName {
+  return (ALL_TOOL_NAMES as readonly string[]).includes(s);
+}
+
 export interface DisplayConfig {
   toolDisplay: 'emoji' | 'grouped' | 'minimal' | 'hidden';
   inputStyle: 'block' | 'bordered' | 'plain';
@@ -21,6 +30,7 @@ export interface AgentConfig {
   maxSteps: number;
   sessionDir: string;
   approvalPolicy: ApprovalPolicy;
+  tools: ToolName[];
   display: DisplayConfig;
   slashCommands: boolean;
 }
@@ -28,16 +38,15 @@ export interface AgentConfig {
 const SYSTEM_PROMPT = [
   'You are a coding assistant running on the user\'s local machine via a small open-weight LLM.',
   '',
-  'Available tools: file_read, file_write, file_edit, glob, grep, list_dir, shell.',
+  'Available tools: {tools}.',
   '',
   'When to use tools vs answer directly:',
   '- For greetings, casual chat, or questions you can answer from general knowledge, respond in plain text. Do NOT call a tool.',
-  '- Only call a tool when the user\'s request actually needs filesystem or shell access.',
+  '- Only call a tool when the user\'s request actually needs filesystem access.',
   '- When you do call a tool, emit a real tool call — not a JSON description in your text response.',
   '',
   'When working with code:',
   '- Make minimal targeted edits consistent with existing style.',
-  '- Prefer grep and glob over shell for file search.',
   '- Be concise. The user can read the diff.',
   '',
   'Current working directory: {cwd}',
@@ -50,6 +59,7 @@ const DEFAULTS: AgentConfig = {
   maxSteps: 20,
   sessionDir: '.sessions',
   approvalPolicy: 'always',
+  tools: ['file_read', 'file_edit', 'grep', 'list_dir'],
   display: {
     toolDisplay: 'grouped',
     inputStyle: 'bordered',
@@ -86,6 +96,12 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 
   const envApproval = process.env.APPROVAL_POLICY;
   if (envApproval && isApprovalPolicy(envApproval)) config.approvalPolicy = envApproval;
+
+  if (process.env.AGENT_TOOLS) {
+    const requested = process.env.AGENT_TOOLS.split(',').map((s) => s.trim()).filter(Boolean);
+    const valid = requested.filter(isToolName);
+    if (valid.length) config.tools = valid;
+  }
 
   if (overrides.display) config.display = { ...config.display, ...overrides.display };
   config = { ...config, ...overrides, display: config.display };

@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import { plainReadLine } from './input-styles.js';
 import { BACKENDS, buildClient, isBackendName, isProfileName } from './backends.js';
 import type { BackendName, ProfileName } from './backends.js';
-import type { AgentConfig } from './config.js';
+import { ALL_TOOL_NAMES, isToolName, type AgentConfig, type ToolName } from './config.js';
 import type { ChatMessage } from './agent.js';
 
 const RESET = '\x1b[0m';
@@ -182,6 +182,27 @@ register({
 });
 
 register({
+  name: '/tools',
+  description: 'Show or set enabled tools (comma-separated names)',
+  execute: async (args, ctx) => {
+    if (!args) {
+      console.log(`  ${DIM}available${RESET}  ${ALL_TOOL_NAMES.join(', ')}`);
+      console.log(`  ${DIM}enabled${RESET}    ${CYAN}${ctx.config.tools.join(', ')}${RESET}`);
+      console.log(`  ${DIM}usage${RESET}      /tools file_read,grep,list_dir`);
+      return;
+    }
+    const requested = args.split(',').map((s) => s.trim()).filter(Boolean);
+    const invalid = requested.filter((n) => !isToolName(n));
+    if (invalid.length) {
+      console.log(`  ${RED}✗${RESET} ${DIM}unknown tools: ${invalid.join(', ')}${RESET}`);
+      return;
+    }
+    ctx.config.tools = requested as ToolName[];
+    console.log(`  ${GREEN}✓${RESET} ${DIM}tools →${RESET} ${CYAN}${ctx.config.tools.join(', ')}${RESET}`);
+  },
+});
+
+register({
   name: '/compare',
   description: 'Run the last user prompt against the OpenRouter cloud (requires OPENROUTER_API_KEY)',
   execute: async (args, ctx) => {
@@ -203,7 +224,7 @@ register({
     try {
       const stream = await cloudClient.chat.completions.create({
         model: cloudModel,
-        messages: [{ role: 'system', content: ctx.config.systemPrompt.replace('{cwd}', process.cwd()) }, { role: 'user', content: userText }],
+        messages: [{ role: 'system', content: ctx.config.systemPrompt.replace('{cwd}', process.cwd()).replace('{tools}', ctx.config.tools.join(', ')) }, { role: 'user', content: userText }],
         stream: true,
       });
       for await (const chunk of stream) {
