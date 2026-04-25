@@ -38,6 +38,8 @@ export interface AgentConfig {
 const SYSTEM_PROMPT = [
   'You are a coding assistant running on the user\'s local machine via a small open-weight LLM.',
   '',
+  'Always respond in English unless the user writes to you in another language.',
+  '',
   'Available tools: {tools}.',
   '',
   'When to use tools vs answer directly:',
