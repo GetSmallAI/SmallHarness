@@ -38,6 +38,31 @@ function toOpenAITools(tools: Tool[]): ChatCompletionTool[] {
   }));
 }
 
+// Some local models (e.g. qwen2.5-coder via Ollama) emit tool-shaped JSON as
+// plain content instead of using the API's tool_calls field. We detect that
+// pattern and synthesize a real tool call so the harness still works.
+function tryParseInlineToolCall(
+  text: string,
+  toolNames: Set<string>,
+): { name: string; args: Record<string, unknown> } | null {
+  const trimmed = text.trim().replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed.name === 'string' && toolNames.has(parsed.name)) {
+      const args = parsed.arguments ?? parsed.parameters ?? parsed.args ?? {};
+      if (args && typeof args === 'object') {
+        return { name: parsed.name, args: args as Record<string, unknown> };
+      }
+    }
+  } catch { /* not valid JSON */ }
+  return null;
+}
+
+function looksLikeStartOfToolCall(text: string): boolean {
+  return /^\s*(?:```(?:json)?\s*)?\{\s*"?name"?\s*:/.test(text);
+}
+
 export async function runAgent(
   client: OpenAI,
   model: string,
@@ -52,6 +77,7 @@ export async function runAgent(
 
   let inputTokens = 0;
   let outputTokens = 0;
+  const toolNames = new Set(tools.map((t) => t.name));
 
   for (let step = 0; step < maxSteps; step++) {
     if (options.signal?.aborted) break;
@@ -65,14 +91,19 @@ export async function runAgent(
     });
 
     let assistantText = '';
+    let bufferingInline = false; // suspect inline tool-call JSON; defer streaming
     const toolCalls = new Map<number, { id: string; name: string; args: string }>();
 
     for await (const chunk of stream) {
       if (options.signal?.aborted) break;
       const choice = chunk.choices?.[0];
       if (choice?.delta?.content) {
+        const wasEmpty = assistantText === '';
         assistantText += choice.delta.content;
-        options.onEvent?.({ type: 'text', delta: choice.delta.content });
+        if (wasEmpty && looksLikeStartOfToolCall(assistantText)) bufferingInline = true;
+        if (!bufferingInline) {
+          options.onEvent?.({ type: 'text', delta: choice.delta.content });
+        }
       }
       if (choice?.delta?.tool_calls) {
         for (const tc of choice.delta.tool_calls) {
@@ -97,6 +128,21 @@ export async function runAgent(
         type: 'function' as const,
         function: { name: tc.name, arguments: tc.args || '{}' },
       }));
+
+    if (finalToolCalls.length === 0 && bufferingInline) {
+      const inline = tryParseInlineToolCall(assistantText, toolNames);
+      if (inline) {
+        finalToolCalls.push({
+          id: `inline-${step}-${Date.now()}`,
+          type: 'function' as const,
+          function: { name: inline.name, arguments: JSON.stringify(inline.args) },
+        });
+        assistantText = ''; // the JSON wasn't real assistant text
+      } else {
+        // Buffered but not a real tool call — flush the text now
+        options.onEvent?.({ type: 'text', delta: assistantText });
+      }
+    }
 
     messages.push({
       role: 'assistant',
