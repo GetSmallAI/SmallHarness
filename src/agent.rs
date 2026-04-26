@@ -97,6 +97,56 @@ fn try_parse_inline_tool_call(text: &str, tool_names: &HashSet<String>) -> Optio
     Some((name, args))
 }
 
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str("…[truncated]");
+    out
+}
+
+fn compact_tool_output(name: &str, output: &str) -> String {
+    const MAX_TOOL_OUTPUT_CHARS: usize = 4000;
+    if output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return output.to_string();
+    }
+    if let Ok(mut parsed) = serde_json::from_str::<Value>(output) {
+        if let Some(obj) = parsed.as_object_mut() {
+            for key in ["content", "output", "diff"] {
+                if let Some(Value::String(s)) = obj.get_mut(key) {
+                    *s = truncate_chars(s, MAX_TOOL_OUTPUT_CHARS);
+                    obj.insert("compacted".into(), Value::Bool(true));
+                    obj.insert(
+                        "summary".into(),
+                        Value::String(format!("{name} output compacted for model context")),
+                    );
+                    return serde_json::to_string(&parsed)
+                        .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS));
+                }
+            }
+            for key in ["matches", "entries"] {
+                if let Some(Value::Array(items)) = obj.get_mut(key) {
+                    let original = items.len();
+                    items.truncate(50);
+                    let kept = items.len();
+                    obj.insert("compacted".into(), Value::Bool(true));
+                    obj.insert(
+                        "summary".into(),
+                        Value::String(format!(
+                            "{name} returned {original} items; kept first {}",
+                            kept
+                        )),
+                    );
+                    return serde_json::to_string(&parsed)
+                        .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS));
+                }
+            }
+        }
+    }
+    truncate_chars(output, MAX_TOOL_OUTPUT_CHARS)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent<F>(
     http: &reqwest::Client,
@@ -291,13 +341,7 @@ where
                 .unwrap()
             };
 
-            let trimmed = if output_str.len() > 8000 {
-                let mut s: String = output_str.chars().take(8000).collect();
-                s.push_str("…[truncated]");
-                s
-            } else {
-                output_str
-            };
+            let trimmed = compact_tool_output(&tc.function.name, &output_str);
             on_event(AgentEvent::ToolResult {
                 name: tc.function.name.clone(),
                 call_id: tc.id.clone(),
@@ -421,5 +465,30 @@ mod tests {
         let n = names();
         let (_, args) = try_parse_inline_tool_call(r#"{"name":"shell"}"#, &n).unwrap();
         assert!(args.is_object());
+    }
+
+    #[test]
+    fn compacts_large_json_content_field() {
+        let output = serde_json::json!({
+            "content": "x".repeat(5000),
+            "totalLines": 1
+        })
+        .to_string();
+        let compacted = compact_tool_output("file_read", &output);
+        let parsed: Value = serde_json::from_str(&compacted).unwrap();
+        assert_eq!(parsed["compacted"].as_bool(), Some(true));
+        assert!(parsed["content"].as_str().unwrap().contains("[truncated]"));
+    }
+
+    #[test]
+    fn compacts_large_match_arrays() {
+        let matches: Vec<Value> = (0..1000)
+            .map(|i| serde_json::json!({ "line": i }))
+            .collect();
+        let output = serde_json::json!({ "matches": matches, "count": 1000 }).to_string();
+        let compacted = compact_tool_output("grep", &output);
+        let parsed: Value = serde_json::from_str(&compacted).unwrap();
+        assert_eq!(parsed["compacted"].as_bool(), Some(true));
+        assert_eq!(parsed["matches"].as_array().unwrap().len(), 50);
     }
 }

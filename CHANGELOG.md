@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/doctor --deep [all]` capability probing for model listing, streaming chat,
   usage chunks, native tool calls, inline JSON fallback, llama.cpp `--jinja`
   warnings, and saved JSON/Markdown reports under `.sessions/doctor/`.
+- Efficiency mode with adaptive tool-schema selection (`toolSelection:
+  "auto"` or `/tools auto`), prompt-budget breakdowns in `/context`, prompt
+  budget warnings, prompt-cache re-warm fingerprints, and compacted large tool
+  outputs.
 - `.env` and `.env.local` config loading with process environment variables
   remaining highest priority.
 - Workspace path policy (`workspaceRoot`, `outsideWorkspace`) for file tools

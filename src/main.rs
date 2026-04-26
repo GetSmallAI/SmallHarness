@@ -2,6 +2,7 @@ mod agent;
 mod approval;
 mod backends;
 mod banner;
+mod budget;
 mod cancel;
 mod commands;
 mod config;
@@ -13,12 +14,14 @@ mod session;
 mod tools;
 mod warmup;
 
+use std::hash::{Hash, Hasher};
 use std::io::IsTerminal;
 
 use crate::agent::{run_agent, AgentEvent, ApprovalProvider};
 use crate::approval::ApprovalCache;
 use crate::backends::{backend, default_model, validate, BackendDescriptor};
 use crate::banner::{print_banner, BannerInfo};
+use crate::budget::{format_bytes, measure_prompt_budget};
 use crate::cancel::CancellationToken;
 use crate::commands::{dispatch, AppState};
 use crate::config::{load_config, InputStyle};
@@ -27,7 +30,7 @@ use crate::loader::Loader;
 use crate::openai::{build_http_client, list_models, ChatMessage};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, new_session_path, save_message};
-use crate::tools::build_tools;
+use crate::tools::{build_tools_for_names, select_tool_names};
 use crate::warmup::warmup;
 
 const RESET: &str = "\x1b[0m";
@@ -42,6 +45,52 @@ fn format_tokens(n: u32) -> String {
         format!("{:.1}k", n as f32 / 1000.0)
     } else {
         n.to_string()
+    }
+}
+
+fn prompt_fingerprint(
+    backend: &BackendDescriptor,
+    model: &str,
+    system_prompt: &str,
+    tool_names: &[String],
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    backend.name.hash(&mut hasher);
+    backend.base_url.hash(&mut hasher);
+    model.hash(&mut hasher);
+    system_prompt.hash(&mut hasher);
+    tool_names.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn set_system_message(messages: &mut Vec<ChatMessage>, system_prompt: String) -> bool {
+    if let Some(ChatMessage::System { content }) = messages.first_mut() {
+        *content = system_prompt;
+        false
+    } else {
+        messages.insert(
+            0,
+            ChatMessage::System {
+                content: system_prompt,
+            },
+        );
+        true
+    }
+}
+
+fn print_budget_warning(total_bytes: usize, max_bytes: Option<usize>) {
+    let warn = max_bytes
+        .map(|max| total_bytes >= max.saturating_mul(3) / 4)
+        .unwrap_or(total_bytes >= 64 * 1024);
+    if warn {
+        let limit = max_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "64.0 KB".into());
+        println!(
+            "  {YELLOW}!{RESET} {DIM}prompt budget is {} (warning threshold {}){RESET}",
+            format_bytes(total_bytes),
+            limit
+        );
     }
 }
 
@@ -100,14 +149,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let mut warmed_fingerprint = None;
     let probe = probe_backend(&http, &backend_desc).await;
     if let Err(hint) = probe {
         println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {hint}{RESET}");
         println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
-        let warmup_tools_vec = build_tools(&config);
+        let warmup_tool_names = select_tool_names(&config, "");
+        let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
-        let warmup_prompt = config.render_system_prompt();
+        let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
         let loader = Loader::start("Warming up".into(), config.display.loader_style);
         match warmup(
             &http,
@@ -119,6 +170,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         {
             Ok(ms) => {
+                warmed_fingerprint = Some(prompt_fingerprint(
+                    &backend_desc,
+                    &model,
+                    &warmup_prompt,
+                    &warmup_tool_names,
+                ));
                 loader.stop();
                 println!(
                     "  {DIM}warmed up in {:.1}s — first prompt should be fast{RESET}",
@@ -198,12 +255,14 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        if state.messages.is_empty() {
-            let sys = ChatMessage::System {
-                content: state.config.render_system_prompt(),
-            };
-            state.messages.push(sys.clone());
-            let _ = save_message(&state.session_path, &sys);
+        let active_tool_names = select_tool_names(&state.config, trimmed);
+        let system_prompt = state
+            .config
+            .render_system_prompt_for_tools(&active_tool_names);
+        if set_system_message(&mut state.messages, system_prompt.clone()) {
+            if let Some(sys) = state.messages.first() {
+                let _ = save_message(&state.session_path, sys);
+            }
         }
         let user_msg = ChatMessage::User {
             content: trimmed.to_string(),
@@ -211,7 +270,36 @@ async fn main() -> anyhow::Result<()> {
         state.messages.push(user_msg.clone());
         let _ = save_message(&state.session_path, &user_msg);
 
-        let tools = build_tools(&state.config);
+        let tools = build_tools_for_names(&state.config, &active_tool_names);
+        let tool_defs = crate::agent::to_openai_tools(&tools);
+        let budget = measure_prompt_budget(&system_prompt, &state.messages, &tool_defs);
+        print_budget_warning(budget.total_bytes, state.config.context.max_bytes);
+        let fingerprint = prompt_fingerprint(
+            &state.backend,
+            &state.model,
+            &system_prompt,
+            &active_tool_names,
+        );
+        if std::env::var("WARMUP").as_deref() != Ok("false")
+            && warmed_fingerprint != Some(fingerprint)
+        {
+            let loader = Loader::start(
+                "Warming prompt cache".into(),
+                state.config.display.loader_style,
+            );
+            let warm_result = warmup(
+                &state.http,
+                &state.backend,
+                &state.model,
+                &system_prompt,
+                &tool_defs,
+            )
+            .await;
+            loader.stop();
+            if warm_result.is_ok() {
+                warmed_fingerprint = Some(fingerprint);
+            }
+        }
         let initial = state.messages.clone();
         let max_steps = state.config.max_steps;
         let model = state.model.clone();

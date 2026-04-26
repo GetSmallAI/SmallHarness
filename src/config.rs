@@ -72,6 +72,30 @@ pub enum LoaderStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ToolSelection {
+    Auto,
+    Fixed,
+}
+
+impl ToolSelection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolSelection::Auto => "auto",
+            ToolSelection::Fixed => "fixed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "fixed" => Some(Self::Fixed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutsideWorkspace {
     Prompt,
     Deny,
@@ -196,6 +220,7 @@ pub struct AgentConfig {
     pub outside_workspace: OutsideWorkspace,
     pub approval_policy: ApprovalPolicy,
     pub tools: Vec<String>,
+    pub tool_selection: ToolSelection,
     pub display: DisplayConfig,
     pub slash_commands: bool,
     pub context: ContextConfig,
@@ -243,6 +268,7 @@ impl Default for AgentConfig {
                 "grep".into(),
                 "list_dir".into(),
             ],
+            tool_selection: ToolSelection::Auto,
             display: DisplayConfig::default(),
             slash_commands: true,
             context: ContextConfig::default(),
@@ -271,6 +297,8 @@ struct FileConfig {
     #[serde(rename = "approvalPolicy")]
     approval_policy: Option<String>,
     tools: Option<Vec<String>>,
+    #[serde(rename = "toolSelection")]
+    tool_selection: Option<String>,
     display: Option<DisplayConfig>,
     #[serde(rename = "slashCommands")]
     slash_commands: Option<bool>,
@@ -281,12 +309,21 @@ struct FileConfig {
 
 impl AgentConfig {
     pub fn render_system_prompt(&self) -> String {
+        self.render_system_prompt_for_tools(&self.tools)
+    }
+
+    pub fn render_system_prompt_for_tools(&self, tools: &[String]) -> String {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let tool_list = if tools.is_empty() {
+            "none".to_string()
+        } else {
+            tools.join(", ")
+        };
         self.system_prompt
             .replace("{cwd}", &cwd)
-            .replace("{tools}", &self.tools.join(", "))
+            .replace("{tools}", &tool_list)
     }
 
     pub fn history_path(&self) -> String {
@@ -388,6 +425,13 @@ pub fn load_config() -> AgentConfig {
                         config.tools = valid;
                     }
                 }
+                if let Some(s) = file
+                    .tool_selection
+                    .as_deref()
+                    .and_then(ToolSelection::parse)
+                {
+                    config.tool_selection = s;
+                }
                 if let Some(d) = file.display {
                     config.display = d;
                 }
@@ -436,6 +480,11 @@ pub fn load_config() -> AgentConfig {
             .collect();
         if !requested.is_empty() {
             config.tools = requested;
+        }
+    }
+    if let Some(s) = layered_env(&dotenv, "AGENT_TOOL_SELECTION") {
+        if let Some(selection) = ToolSelection::parse(&s) {
+            config.tool_selection = selection;
         }
     }
     if let Some(s) = layered_env(&dotenv, "WORKSPACE_ROOT") {

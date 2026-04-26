@@ -9,7 +9,8 @@ use crate::agent::to_openai_tools;
 use crate::backends::{
     backend, default_model, validate, BackendDescriptor, BackendName, ProfileName,
 };
-use crate::config::{is_tool_name, AgentConfig, ALL_TOOL_NAMES};
+use crate::budget::{format_bytes, measure_prompt_budget};
+use crate::config::{is_tool_name, AgentConfig, ToolSelection, ALL_TOOL_NAMES};
 use crate::input::plain_read_line;
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
@@ -18,7 +19,7 @@ use crate::session::{
     list_sessions, load_messages, load_session, render_markdown, resolve_session_path,
     save_message, SessionEntry,
 };
-use crate::tools::build_tools;
+use crate::tools::{build_tools, build_tools_for_names, select_tool_names};
 use crate::warmup::warmup;
 
 const RESET: &str = "\x1b[0m";
@@ -180,6 +181,10 @@ fn cmd_config(state: &AppState) {
     println!(
         "  {DIM}tools{RESET}            {}",
         state.config.tools.join(", ")
+    );
+    println!(
+        "  {DIM}toolSelection{RESET}    {}",
+        state.config.tool_selection.as_str()
     );
     println!(
         "  {DIM}slashCommands{RESET}    {}",
@@ -503,10 +508,33 @@ fn cmd_tools(args: &str, state: &mut AppState) {
             "  {DIM}enabled{RESET}    {CYAN}{}{RESET}",
             state.config.tools.join(", ")
         );
-        println!("  {DIM}usage{RESET}      /tools file_read,grep,list_dir");
+        println!(
+            "  {DIM}mode{RESET}       {CYAN}{}{RESET}",
+            state.config.tool_selection.as_str()
+        );
+        println!(
+            "  {DIM}usage{RESET}      /tools auto · /tools fixed · /tools file_read,grep,list_dir"
+        );
         return;
     }
-    let requested: Vec<String> = args
+
+    let (mode, list) = if args == "auto" {
+        state.config.tool_selection = ToolSelection::Auto;
+        println!("  {GREEN}✓{RESET} {DIM}tool selection →{RESET} {CYAN}auto{RESET}");
+        return;
+    } else if args == "fixed" {
+        state.config.tool_selection = ToolSelection::Fixed;
+        println!("  {GREEN}✓{RESET} {DIM}tool selection →{RESET} {CYAN}fixed{RESET}");
+        return;
+    } else if let Some(rest) = args.strip_prefix("auto ") {
+        (ToolSelection::Auto, rest)
+    } else if let Some(rest) = args.strip_prefix("fixed ") {
+        (ToolSelection::Fixed, rest)
+    } else {
+        (ToolSelection::Fixed, args)
+    };
+
+    let requested: Vec<String> = list
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -521,9 +549,11 @@ fn cmd_tools(args: &str, state: &mut AppState) {
         return;
     }
     state.config.tools = requested;
+    state.config.tool_selection = mode;
     println!(
-        "  {GREEN}✓{RESET} {DIM}tools →{RESET} {CYAN}{}{RESET}",
-        state.config.tools.join(", ")
+        "  {GREEN}✓{RESET} {DIM}tools →{RESET} {CYAN}{}{RESET} {DIM}· mode →{RESET} {CYAN}{}{RESET}",
+        state.config.tools.join(", "),
+        state.config.tool_selection.as_str()
     );
 }
 
@@ -610,10 +640,42 @@ fn cmd_context(args: &str, state: &mut AppState) {
             }
         }
     }
+    let last_prompt = last_user_prompt(state).unwrap_or_default();
+    let active_tool_names = select_tool_names(&state.config, &last_prompt);
+    let system_prompt = state
+        .config
+        .render_system_prompt_for_tools(&active_tool_names);
+    let tools = build_tools_for_names(&state.config, &active_tool_names);
+    let tool_defs = to_openai_tools(&tools);
+    let budget = measure_prompt_budget(&system_prompt, &state.messages, &tool_defs);
     println!("  {DIM}messages{RESET}  {}", state.messages.len());
+    println!(
+        "  {DIM}mode{RESET}      {}",
+        state.config.tool_selection.as_str()
+    );
+    println!(
+        "  {DIM}tools{RESET}     {}",
+        if active_tool_names.is_empty() {
+            "none".to_string()
+        } else {
+            active_tool_names.join(", ")
+        }
+    );
     println!(
         "  {DIM}bytes{RESET}     {}",
         transcript_bytes(&state.messages)
+    );
+    println!(
+        "  {DIM}budget{RESET}    total={} (~{} tokens)",
+        format_bytes(budget.total_bytes),
+        budget.estimated_tokens
+    );
+    println!(
+        "  {DIM}breakdown{RESET} system={} transcript={} toolSchemas={} toolResults={}",
+        format_bytes(budget.system_bytes),
+        format_bytes(budget.transcript_bytes),
+        format_bytes(budget.tool_schema_bytes),
+        format_bytes(budget.tool_result_bytes)
     );
     println!(
         "  {DIM}limits{RESET}    maxMessages={:?} maxBytes={:?}",

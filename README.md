@@ -53,6 +53,7 @@ backend so you can start running without picking weights out of a long list.
 | Approval gates | Per-tool prompts with diff previews, allow-once / allow-this-session / always-allow caching |
 | Robust parsing | Inline JSON-shaped tool-call detector for small models whose templates skip the `tool_calls` field |
 | Pre-warm at startup | Sends a 1-token request with the full system prompt + tools so the cache is hot before your first prompt |
+| Efficiency mode | Auto-selects tool schemas per prompt, shows prompt-budget breakdowns, and compacts large tool outputs |
 | Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
 | Session persistence | JSONL append-only session logs with list, resume, and export commands |
 | Slash commands | `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/eval`, `/new`, `/help` |
@@ -113,7 +114,7 @@ input box opens, type a question:
 /backend llamacpp         switch to llama.cpp
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
-/tools                    show enabled tools, set with /tools file_read,grep
+/tools                    show enabled tools and auto/fixed selection mode
 /compare                  run the same prompt against OpenRouter cloud
 /sessions                 list saved JSONL sessions
 /resume latest            resume the newest saved session
@@ -123,13 +124,17 @@ input box opens, type a question:
 
 ### 4. Adjust the tool set for speed
 
-Each tool definition costs ~100 tokens of prompt-eval per turn. On a 7B
-quantized model that's roughly 2 seconds per tool you keep around. The
-default set is intentionally slim — pare it further for chat, expand for
-coding sessions:
+Each tool definition costs prompt-eval time on small local models. Small
+Harness defaults to `toolSelection: "auto"`, so ordinary chat sends no tool
+schemas, file/code questions send read/search/list schemas, edit requests add
+edit/patch schemas, and shell-ish prompts add `shell` when it is enabled.
+The `tools` list is the allowed pool:
 
 ```
+/tools auto                    adaptive tool selection (default)
+/tools fixed                   always send every enabled tool schema
 /tools file_read,grep,list_dir
+/tools auto file_read,grep,list_dir
 ```
 
 Or set persistently in `agent.config.json`:
@@ -205,9 +210,9 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/backend [name]` | Switch backend (`ollama`, `lm-studio`, `mlx`, `llamacpp`, `openrouter`) |
 | `/profile [name]` | Switch hardware profile (`mac-mini-16gb`, `mac-studio-32gb`) |
 | `/model [id]` | List models from the current backend and pick one, or set directly |
-| `/tools [list]` | Show enabled tools or set them: `/tools file_read,grep,list_dir` |
+| `/tools [auto\|fixed\|list]` | Show enabled tools, switch adaptive mode, or set the enabled pool: `/tools auto file_read,grep,list_dir` |
 | `/compare [model]` | Re-send the last user message to OpenRouter cloud for A/B |
-| `/context [maxMessages=N maxBytes=N]` | Show or adjust context limits |
+| `/context [maxMessages=N maxBytes=N]` | Show prompt budget, active adaptive tools, byte/token estimate, and context limits |
 | `/compact [keep]` | Summarize older turns into a compact continuation session |
 | `/doctor` | Check backend reachability, model list, `rg`, config, and session storage |
 | `/doctor --deep [all]` | Probe OpenAI-compatible streaming, usage chunks, native tool calls, and inline JSON fallback, then save JSON/Markdown reports under `.sessions/doctor/` |
@@ -283,6 +288,9 @@ APPROVAL_POLICY=always
 # Active tools, comma-separated. Default: file_read,file_edit,grep,list_dir
 AGENT_TOOLS=file_read,file_edit,grep,list_dir
 
+# Tool schema selection: auto (default) or fixed
+AGENT_TOOL_SELECTION=auto
+
 # Pre-warm the model at startup (default: on)
 WARMUP=true
 
@@ -311,6 +319,7 @@ put here can be overridden by env vars or slash commands at runtime.
   "profile": "mac-mini-16gb",
   "approvalPolicy": "dangerous-only",
   "tools": ["file_read", "file_edit", "grep", "list_dir"],
+  "toolSelection": "auto",
   "maxSteps": 20,
   "workspaceRoot": "/path/to/project",
   "outsideWorkspace": "prompt",
