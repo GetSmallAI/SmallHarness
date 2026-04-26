@@ -187,7 +187,7 @@ impl TuiRenderer {
     fn end_streaming(&mut self) {
         if self.streaming {
             let mut out = std::io::stdout();
-            let _ = write!(out, "{RESET}\n");
+            let _ = writeln!(out, "{RESET}");
             let _ = out.flush();
             self.streaming = false;
         }

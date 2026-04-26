@@ -36,7 +36,7 @@ fn summarize(name: &str, args: &Value) -> String {
             let bytes = args
                 .get("content")
                 .and_then(Value::as_str)
-                .map(|s| s.as_bytes().len())
+                .map(|s| s.len())
                 .unwrap_or(0);
             format!("{path} ({bytes} bytes)")
         }

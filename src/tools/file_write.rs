@@ -52,7 +52,7 @@ impl Tool for FileWriteTool {
             Ok(_) => json!({
                 "written": true,
                 "path": args.path,
-                "bytes": args.content.as_bytes().len(),
+                "bytes": args.content.len(),
             }),
             Err(e) => json!({ "error": e.to_string() }),
         }

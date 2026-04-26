@@ -33,18 +33,16 @@ fn read_plain(prompt: &str) -> Result<String> {
                 }
                 match code {
                     KeyCode::Enter => {
-                        write!(out, "\n")?;
+                        writeln!(out)?;
                         out.flush()?;
                         return Ok(line);
                     }
-                    KeyCode::Backspace => {
-                        if line.pop().is_some() {
-                            write!(out, "\x08 \x08")?;
-                            out.flush()?;
-                        }
+                    KeyCode::Backspace if line.pop().is_some() => {
+                        write!(out, "\x08 \x08")?;
+                        out.flush()?;
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        write!(out, "\n")?;
+                        writeln!(out)?;
                         out.flush()?;
                         crossterm::terminal::disable_raw_mode().ok();
                         std::process::exit(0);
@@ -72,7 +70,7 @@ fn read_bordered() -> Result<String> {
     let mut line = String::new();
 
     write!(out, "\n{border}\n")?;
-    write!(out, "› {line}\n")?;
+    writeln!(out, "› {line}")?;
     write!(out, "{border}\x1b[1A\r\x1b[{}G", 3 + line.chars().count())?;
     out.flush()?;
 
@@ -105,7 +103,7 @@ fn read_bordered() -> Result<String> {
                         out.flush()?;
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        write!(out, "{RESET}\n")?;
+                        writeln!(out, "{RESET}")?;
                         out.flush()?;
                         crossterm::terminal::disable_raw_mode().ok();
                         std::process::exit(0);
