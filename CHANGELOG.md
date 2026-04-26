@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `llamacpp` backend support for `llama-server` OpenAI-compatible endpoints,
+  including `LLAMACPP_BASE_URL`, optional `LLAMACPP_API_KEY`, backend switching,
+  docs, and startup troubleshooting hints.
 - `.env` and `.env.local` config loading with process environment variables
   remaining highest priority.
 - Workspace path policy (`workspaceRoot`, `outsideWorkspace`) for file tools

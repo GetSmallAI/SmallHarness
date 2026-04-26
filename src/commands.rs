@@ -69,7 +69,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/export", "Export a session to markdown or json"),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, openrouter)",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter)",
     ),
     (
         "/profile",

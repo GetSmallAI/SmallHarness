@@ -59,6 +59,9 @@ async fn probe_backend(http: &reqwest::Client, b: &BackendDescriptor) -> Result<
                 crate::backends::BackendName::Mlx => {
                     "Start an MLX OpenAI-compatible server (e.g. `mlx_lm.server`). Default port is 8080."
                 }
+                crate::backends::BackendName::LlamaCpp => {
+                    "Start `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080`. Use `--jinja` for native tool calls."
+                }
                 crate::backends::BackendName::Openrouter => "Check OPENROUTER_API_KEY.",
             };
             Err(format!("{e}. {hint}"))

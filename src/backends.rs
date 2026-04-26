@@ -8,6 +8,7 @@ pub enum BackendName {
     Ollama,
     LmStudio,
     Mlx,
+    LlamaCpp,
     Openrouter,
 }
 
@@ -17,6 +18,7 @@ impl BackendName {
             BackendName::Ollama => "ollama",
             BackendName::LmStudio => "lm-studio",
             BackendName::Mlx => "mlx",
+            BackendName::LlamaCpp => "llamacpp",
             BackendName::Openrouter => "openrouter",
         }
     }
@@ -25,12 +27,19 @@ impl BackendName {
             "ollama" => Some(Self::Ollama),
             "lm-studio" => Some(Self::LmStudio),
             "mlx" => Some(Self::Mlx),
+            "llamacpp" | "llama-cpp" | "llama.cpp" => Some(Self::LlamaCpp),
             "openrouter" => Some(Self::Openrouter),
             _ => None,
         }
     }
     pub fn all() -> &'static [BackendName] {
-        &[Self::Ollama, Self::LmStudio, Self::Mlx, Self::Openrouter]
+        &[
+            Self::Ollama,
+            Self::LmStudio,
+            Self::Mlx,
+            Self::LlamaCpp,
+            Self::Openrouter,
+        ]
     }
 }
 
@@ -85,6 +94,14 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             api_key: "mlx".into(),
             is_local: true,
         },
+        BackendName::LlamaCpp => BackendDescriptor {
+            name,
+            base_url: std::env::var("LLAMACPP_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:8080/v1".into()),
+            api_key: std::env::var("LLAMACPP_API_KEY")
+                .unwrap_or_else(|_| "sk-no-key-required".into()),
+            is_local: true,
+        },
         BackendName::Openrouter => BackendDescriptor {
             name,
             base_url: "https://openrouter.ai/api/v1".into(),
@@ -115,6 +132,7 @@ pub fn default_model(
         (BackendName::LmStudio, "mac-studio-32gb") => "qwen2.5-coder-14b-instruct",
         (BackendName::Mlx, "mac-mini-16gb") => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
         (BackendName::Mlx, "mac-studio-32gb") => "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+        (BackendName::LlamaCpp, _) => "gpt-3.5-turbo",
         (BackendName::Openrouter, _) => "qwen/qwen-2.5-coder-32b-instruct",
         (BackendName::Ollama, _) => "qwen2.5-coder:7b",
         (BackendName::LmStudio, _) => "qwen2.5-coder-7b-instruct",
@@ -130,4 +148,42 @@ pub fn validate(b: &BackendDescriptor) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(name: BackendName) -> BackendDescriptor {
+        BackendDescriptor {
+            name,
+            base_url: String::new(),
+            api_key: String::new(),
+            is_local: true,
+        }
+    }
+
+    #[test]
+    fn parses_llamacpp_aliases() {
+        assert_eq!(BackendName::parse("llamacpp"), Some(BackendName::LlamaCpp));
+        assert_eq!(BackendName::parse("llama-cpp"), Some(BackendName::LlamaCpp));
+        assert_eq!(BackendName::parse("llama.cpp"), Some(BackendName::LlamaCpp));
+    }
+
+    #[test]
+    fn lists_llamacpp_as_switchable_backend() {
+        assert!(BackendName::all().contains(&BackendName::LlamaCpp));
+    }
+
+    #[test]
+    fn defaults_llamacpp_to_openai_example_model() {
+        let profiles = BTreeMap::new();
+        let model = default_model(
+            &descriptor(BackendName::LlamaCpp),
+            "mac-mini-16gb",
+            None,
+            &profiles,
+        );
+        assert_eq!(model, "gpt-3.5-turbo");
+    }
 }

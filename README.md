@@ -22,7 +22,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20OpenRouter-2563eb">
+  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
@@ -30,11 +30,12 @@
 ## What Is Small Harness?
 
 Small Harness is a terminal-based agent harness for running small open-weight
-LLMs locally on consumer Macs. It points the same TUI at four different
-inference backends — [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai),
-MLX, or [OpenRouter](https://openrouter.ai) cloud — gives the model a focused
-set of filesystem and shell tools, and gates dangerous operations behind an
-approval prompt.
+LLMs locally on consumer Macs. It points the same TUI at five different
+inference backends: [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai),
+MLX, [llama.cpp](https://github.com/ggml-org/llama.cpp), or
+[OpenRouter](https://openrouter.ai) cloud. The harness gives the model a
+focused set of filesystem and shell tools, and gates dangerous operations
+behind an approval prompt.
 
 It is built for developers who want to use a 7B–14B model as an interactive
 coding assistant without depending on a cloud API. Hardware profiles for the
@@ -45,7 +46,7 @@ backend so you can start running without picking weights out of a long list.
 
 | Area | What you get |
 | --- | --- |
-| Local-first | OpenAI-compatible chat completions against Ollama, LM Studio, or MLX, all selectable at runtime |
+| Local-first | OpenAI-compatible chat completions against Ollama, LM Studio, MLX, or llama.cpp, all selectable at runtime |
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
 | Configurable tools | File read/write/edit, apply-patch, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
@@ -72,8 +73,9 @@ Build a standalone binary with `cargo build --release` — it lands at
 `target/release/small-harness` (~5 MB).
 
 By default Small Harness talks to Ollama at `http://localhost:11434/v1`. To
-target LM Studio or MLX instead, set `BACKEND=lm-studio` or `BACKEND=mlx`
-before running, or use `/backend` once the harness is running.
+target LM Studio, MLX, or llama.cpp instead, set `BACKEND=lm-studio`,
+`BACKEND=mlx`, or `BACKEND=llamacpp` before running, or use `/backend` once
+the harness is running.
 
 ## Getting Started
 
@@ -87,7 +89,7 @@ brew services start ollama
 ollama pull qwen2.5-coder:7b
 ```
 
-LM Studio (already installed) and MLX are also supported. See
+LM Studio (already installed), MLX, and llama.cpp are also supported. See
 [Backends](#backends) for ports and setup notes.
 
 ### 2. Run the harness
@@ -108,6 +110,7 @@ input box opens, type a question:
 
 ```
 /backend lm-studio        switch to LM Studio
+/backend llamacpp         switch to llama.cpp
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools, set with /tools file_read,grep
@@ -141,18 +144,20 @@ Or set persistently in `agent.config.json`:
 | `ollama` | `http://localhost:11434/v1` | OpenAI-compatible | Easiest setup; mature tool-call templates; CLI model management |
 | `lm-studio` | `http://localhost:1234/v1` | OpenAI-compatible | GUI model browser; explicit load/unload controls |
 | `mlx` | `http://localhost:8080/v1` | OpenAI-compatible (via `mlx_lm.server`) | Fastest inference on Apple Silicon |
+| `llamacpp` | `http://localhost:8080/v1` | OpenAI-compatible (via `llama-server`) | Direct GGUF serving; fastest path if you already use llama.cpp |
 | `openrouter` | `https://openrouter.ai/api/v1` | OpenAI-compatible | Cloud A/B comparison; access to larger frontier models |
 
-Override URLs with `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, or `MLX_BASE_URL`.
-`openrouter` requires `OPENROUTER_API_KEY`.
+Override URLs with `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`,
+or `LLAMACPP_BASE_URL`. `openrouter` requires `OPENROUTER_API_KEY`.
+`llamacpp` uses `LLAMACPP_API_KEY` only if your `llama-server` enforces one.
 
 ### Why not OpenRouter's Responses API?
 
 The official `@openrouter/agent` SDK speaks OpenRouter's newer `/responses`
-endpoint. Local backends only expose `/v1/chat/completions`. Small Harness
-uses a hand-rolled `reqwest` + SSE client pointed at each backend's `baseURL`
-so a single client shape works everywhere — local servers and OpenRouter
-cloud — at the cost of not using the Responses API.
+endpoint. Small Harness uses a hand-rolled `reqwest` + SSE client pointed at
+each backend's `baseURL` because `/v1/chat/completions` is the common shape
+across the supported local servers and OpenRouter cloud, even when a backend
+also exposes newer endpoints.
 
 ## Tools
 
@@ -196,7 +201,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/sessions` | List saved sessions under `.sessions/` |
 | `/resume latest\|<id>` | Resume a saved session |
 | `/export current\|<id> [markdown\|json] [path]` | Export a session transcript |
-| `/backend [name]` | Switch backend (`ollama`, `lm-studio`, `mlx`, `openrouter`) |
+| `/backend [name]` | Switch backend (`ollama`, `lm-studio`, `mlx`, `llamacpp`, `openrouter`) |
 | `/profile [name]` | Switch hardware profile (`mac-mini-16gb`, `mac-studio-32gb`) |
 | `/model [id]` | List models from the current backend and pick one, or set directly |
 | `/tools [list]` | Show enabled tools or set them: `/tools file_read,grep,list_dir` |
@@ -213,19 +218,23 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 The profile drives the default model per backend. You can always override
 with `AGENT_MODEL` or `/model`.
 
-| Profile | Default Ollama model | Default LM Studio model | Default MLX model |
-| --- | --- | --- | --- |
-| `mac-mini-16gb` | `qwen2.5-coder:7b` | `qwen2.5-coder-7b-instruct` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` |
-| `mac-studio-32gb` | `qwen2.5-coder:14b` | `qwen2.5-coder-14b-instruct` | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` |
+| Profile | Default Ollama model | Default LM Studio model | Default MLX model | Default llama.cpp model |
+| --- | --- | --- | --- | --- |
+| `mac-mini-16gb` | `qwen2.5-coder:7b` | `qwen2.5-coder-7b-instruct` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | `gpt-3.5-turbo` |
+| `mac-studio-32gb` | `qwen2.5-coder:14b` | `qwen2.5-coder-14b-instruct` | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | `gpt-3.5-turbo` |
 
 The OpenRouter cloud default for both profiles is
-`qwen/qwen-2.5-coder-32b-instruct`.
+`qwen/qwen-2.5-coder-32b-instruct`. The llama.cpp default mirrors the
+`llama-server` OpenAI-compatible examples; use `/model` or start
+`llama-server` with `--alias` if you want the loaded GGUF to advertise a
+specific model id.
 
 ## Warmup
 
-llama.cpp (Ollama's engine) caches the prompt-eval result for any prefix it
-has already seen. At startup, Small Harness sends a tiny chat-completions
-request with the full system prompt + tool definitions and `max_tokens: 1`.
+llama.cpp and llama.cpp-derived engines cache the prompt-eval result for any
+prefix they have already seen. At startup, Small Harness sends a tiny
+chat-completions request with the full system prompt + tool definitions and
+`max_tokens: 1`.
 That populates the cache, so your first real prompt only has to evaluate
 the new user tokens — typically dropping first-prompt latency from ~12 s to
 ~2 s on a 7B q4 model.
@@ -241,7 +250,7 @@ The next prompt after a switch will pay the prompt-eval cost again.
 ### Environment variables
 
 ```bash
-# Backend selection: ollama (default), lm-studio, mlx, openrouter
+# Backend selection: ollama (default), lm-studio, mlx, llamacpp, openrouter
 BACKEND=ollama
 
 # Hardware profile: mac-mini-16gb (default) or mac-studio-32gb
@@ -254,6 +263,10 @@ AGENT_MODEL=qwen2.5-coder:14b
 OLLAMA_BASE_URL=http://localhost:11434/v1
 LM_STUDIO_BASE_URL=http://localhost:1234/v1
 MLX_BASE_URL=http://localhost:8080/v1
+LLAMACPP_BASE_URL=http://localhost:8080/v1
+
+# Optional if llama-server was started with API-key enforcement
+LLAMACPP_API_KEY=sk-no-key-required
 
 # Required when BACKEND=openrouter or you want /compare
 OPENROUTER_API_KEY=sk-or-...
@@ -306,6 +319,7 @@ put here can be overridden by env vars or slash commands at runtime.
   "profiles": {
     "mac-studio-fast": {
       "ollama": "qwen2.5-coder:14b",
+      "llamacpp": "gpt-3.5-turbo",
       "openrouter": "qwen/qwen-2.5-coder-32b-instruct"
     }
   },
@@ -347,7 +361,8 @@ put here can be overridden by env vars or slash commands at runtime.
                 +-------------------------+
                 |     backends.rs         |
                 |  Ollama / LM Studio /   |
-                |  MLX / OpenRouter       |
+                |  MLX / llama.cpp /      |
+                |  OpenRouter             |
                 +-------------------------+
                              |
                              v
@@ -372,7 +387,7 @@ Project layout:
 src/
   main.rs             entry — input loop, loader, approval wiring, warmup
   agent.rs            chat/completions runner with tool calls + streaming
-  backends.rs         Ollama / LM Studio / MLX / OpenRouter — endpoint + per-profile defaults
+  backends.rs         Ollama / LM Studio / MLX / llama.cpp / OpenRouter endpoints + defaults
   config.rs           dotenv + agent.config.json loader, workspace/context/history config
   approval.rs         y/n/always/session-allow prompt with diff previews
   session.rs          JSONL conversation log, listing, resume, export helpers
@@ -407,6 +422,8 @@ named backend is not listening on the expected port. Suggestions:
 - **LM Studio**: open the app, go to "Local Server", click Start. Default
   port 1234.
 - **MLX**: start `mlx_lm.server --port 8080` against an MLX-format model.
+- **llama.cpp**: start `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080`.
+  Add `--jinja` when you want native OpenAI-style tool calls.
 - **OpenRouter**: set `OPENROUTER_API_KEY` in `.env`.
 
 ### First prompt is slow even with warmup
