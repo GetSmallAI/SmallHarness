@@ -27,7 +27,7 @@ export interface RunResult {
   usage: { inputTokens: number; outputTokens: number };
 }
 
-function toOpenAITools(tools: Tool[]): ChatCompletionTool[] {
+export function toOpenAITools(tools: Tool[]): ChatCompletionTool[] {
   return tools.map((t) => ({
     type: 'function',
     function: {

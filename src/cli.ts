@@ -1,8 +1,9 @@
 import OpenAI from 'openai';
 import { loadConfig } from './config.js';
 import { BACKENDS, buildClient, defaultModel } from './backends.js';
-import { runAgent, type AgentEvent, type ChatMessage } from './agent.js';
+import { runAgent, toOpenAITools, type AgentEvent, type ChatMessage } from './agent.js';
 import { buildTools } from './tools/index.js';
+import { warmup } from './warmup.js';
 import { TuiRenderer } from './renderer.js';
 import { Loader } from './loader.js';
 import { printBanner } from './banner.js';
@@ -60,6 +61,26 @@ async function main() {
   if (!probe.ok) {
     console.log(`  ${YELLOW}!${RESET} ${DIM}Backend not reachable: ${probe.hint}${RESET}`);
     console.log(`  ${DIM}You can still type /backend to switch, or fix and retry.${RESET}`);
+  } else if (process.env.WARMUP !== 'false') {
+    const warmupTools = toOpenAITools(buildTools(config));
+    const warmupSystemPrompt = config.systemPrompt
+      .replace('{cwd}', process.cwd())
+      .replace('{tools}', config.tools.join(', '));
+    const warmLoader = new Loader('Warming up', config.display.loaderStyle);
+    warmLoader.start();
+    try {
+      const { ms } = await warmup({
+        client: ctxState.client,
+        model: ctxState.model,
+        systemPrompt: warmupSystemPrompt,
+        tools: warmupTools,
+      });
+      warmLoader.stop();
+      console.log(`  ${DIM}warmed up in ${(ms / 1000).toFixed(1)}s — first prompt should be fast${RESET}`);
+    } catch (err) {
+      warmLoader.stop();
+      console.log(`  ${DIM}warmup skipped: ${(err as Error).message}${RESET}`);
+    }
   }
 
   initSessionDir(config.sessionDir);
