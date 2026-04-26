@@ -118,6 +118,7 @@ input box opens, type a question:
 /sessions                 list saved JSONL sessions
 /resume latest            resume the newest saved session
 /doctor                   check backend, config, rg, and session storage
+/doctor --deep            probe stream, usage, and tool-call capabilities
 ```
 
 ### 4. Adjust the tool set for speed
@@ -209,9 +210,14 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/context [maxMessages=N maxBytes=N]` | Show or adjust context limits |
 | `/compact [keep]` | Summarize older turns into a compact continuation session |
 | `/doctor` | Check backend reachability, model list, `rg`, config, and session storage |
+| `/doctor --deep [all]` | Probe OpenAI-compatible streaming, usage chunks, native tool calls, and inline JSON fallback, then save JSON/Markdown reports under `.sessions/doctor/` |
 | `/bench [model]` | Measure warmup, first-token, total latency, and output rate |
 | `/eval [prompt-file] [models]` | Run saved prompts against one or more models with tools off/on |
 | `exit` | Quit |
+
+`/doctor --deep` checks the active backend. Add `all` to probe every configured
+backend with short timeouts; unreachable backends show as failed rows in the
+capability table.
 
 ## Hardware Profiles
 
@@ -425,6 +431,11 @@ named backend is not listening on the expected port. Suggestions:
 - **llama.cpp**: start `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080`.
   Add `--jinja` when you want native OpenAI-style tool calls.
 - **OpenRouter**: set `OPENROUTER_API_KEY` in `.env`.
+
+For backend-specific capability problems, run `/doctor --deep`. It exercises
+`/v1/models`, streaming chat completions, usage chunks, a harmless tool-call
+schema, and Small Harness' inline JSON fallback detector. Reports are saved to
+`.sessions/doctor/` for sharing or comparison.
 
 ### First prompt is slow even with warmup
 

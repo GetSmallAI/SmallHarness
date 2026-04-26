@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::to_openai_tools;
 use crate::backends::{
@@ -10,7 +11,9 @@ use crate::backends::{
 };
 use crate::config::{is_tool_name, AgentConfig, ALL_TOOL_NAMES};
 use crate::input::plain_read_line;
-use crate::openai::{list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions};
+use crate::openai::{
+    list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
+};
 use crate::session::{
     list_sessions, load_messages, load_session, render_markdown, resolve_session_path,
     save_message, SessionEntry,
@@ -123,7 +126,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/compare" => cmd_compare(&args, state).await?,
         "/context" => cmd_context(&args, state),
         "/compact" => cmd_compact(&args, state).await?,
-        "/doctor" => cmd_doctor(state).await?,
+        "/doctor" => cmd_doctor(&args, state).await?,
         "/bench" => cmd_bench(&args, state).await?,
         "/eval" => cmd_eval(&args, state).await?,
         other => {
@@ -690,7 +693,15 @@ async fn cmd_compact(args: &str, state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_doctor(state: &AppState) -> Result<()> {
+async fn cmd_doctor(args: &str, state: &AppState) -> Result<()> {
+    let deep = args
+        .split_whitespace()
+        .any(|arg| arg == "--deep" || arg == "deep");
+    let all = args.split_whitespace().any(|arg| arg == "all");
+    if deep {
+        return cmd_doctor_deep(state, all).await;
+    }
+
     println!("  {BOLD}Small Harness doctor{RESET}");
     println!(
         "  {DIM}backend{RESET} {} · {}",
@@ -725,6 +736,439 @@ async fn cmd_doctor(state: &AppState) -> Result<()> {
         "  {DIM}workspace{RESET} {} ({})",
         state.config.workspace_root,
         state.config.outside_workspace.as_str()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCapabilityReport {
+    generated_at: String,
+    active_backend: String,
+    rows: Vec<DoctorCapabilityRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCapabilityRow {
+    backend: String,
+    base_url: String,
+    model: String,
+    models: ProbeStatus,
+    streaming: ProbeStatus,
+    usage_chunks: ProbeStatus,
+    tool_calls: ProbeStatus,
+    inline_tool_json: ProbeStatus,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProbeStatus {
+    ok: bool,
+    detail: String,
+}
+
+impl ProbeStatus {
+    fn ok(detail: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            detail: detail.into(),
+        }
+    }
+
+    fn fail(detail: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+async fn with_probe_timeout<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    match tokio::time::timeout(Duration::from_secs(8), future).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("timed out after 8s")),
+    }
+}
+
+fn doctor_backend_model(
+    backend_desc: &BackendDescriptor,
+    listed_models: &[String],
+    state: &AppState,
+) -> String {
+    if backend_desc.name == state.backend.name {
+        return state.model.clone();
+    }
+    listed_models.first().cloned().unwrap_or_else(|| {
+        default_model(
+            backend_desc,
+            &state.config.profile,
+            None,
+            &state.config.profiles,
+        )
+    })
+}
+
+async fn probe_streaming(
+    state: &AppState,
+    backend_desc: &BackendDescriptor,
+    model: &str,
+) -> (ProbeStatus, ProbeStatus) {
+    let messages = vec![ChatMessage::User {
+        content: "Reply with exactly: ok".into(),
+    }];
+    let req = ChatRequest {
+        model,
+        messages: &messages,
+        tools: None,
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: true,
+        }),
+        max_tokens: Some(8),
+    };
+    let mut chunks = 0usize;
+    let mut content = String::new();
+    let mut saw_usage = false;
+    let result = with_probe_timeout(stream_chat(
+        &state.http,
+        backend_desc,
+        &req,
+        None,
+        |chunk| {
+            chunks += 1;
+            if chunk.usage.is_some() {
+                saw_usage = true;
+            }
+            if let Some(choice) = chunk.choices.first() {
+                if let Some(delta) = &choice.delta.content {
+                    content.push_str(delta);
+                }
+            }
+        },
+    ))
+    .await;
+    match result {
+        Ok(_) => (
+            ProbeStatus::ok(format!("{chunks} chunks, {:?}", content.trim())),
+            if saw_usage {
+                ProbeStatus::ok("usage chunk observed")
+            } else {
+                ProbeStatus::fail("no usage chunk observed")
+            },
+        ),
+        Err(e) => (
+            ProbeStatus::fail(e.to_string()),
+            ProbeStatus::fail("streaming probe failed"),
+        ),
+    }
+}
+
+fn doctor_noop_tool() -> Vec<ToolDef> {
+    vec![ToolDef {
+        kind: "function",
+        function: ToolDefFunction {
+            name: "doctor_noop".into(),
+            description: "Harmless diagnostic tool. Call this when asked.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" }
+                },
+                "required": ["ok"]
+            }),
+        },
+    }]
+}
+
+fn looks_like_inline_tool_json(content: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content.trim()) else {
+        return false;
+    };
+    parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|name| name == "doctor_noop")
+        .unwrap_or(false)
+}
+
+async fn probe_tool_calls(
+    state: &AppState,
+    backend_desc: &BackendDescriptor,
+    model: &str,
+) -> (ProbeStatus, ProbeStatus) {
+    let messages = vec![ChatMessage::User {
+        content: "Call the doctor_noop tool with ok=true. Do not answer in prose.".into(),
+    }];
+    let tools = doctor_noop_tool();
+    let req = ChatRequest {
+        model,
+        messages: &messages,
+        tools: Some(&tools),
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: false,
+        }),
+        max_tokens: Some(128),
+    };
+    let mut content = String::new();
+    let mut tool_name = String::new();
+    let mut tool_args = String::new();
+    let result = with_probe_timeout(stream_chat(
+        &state.http,
+        backend_desc,
+        &req,
+        None,
+        |chunk| {
+            if let Some(choice) = chunk.choices.first() {
+                if let Some(delta) = &choice.delta.content {
+                    content.push_str(delta);
+                }
+                if let Some(tool_calls) = &choice.delta.tool_calls {
+                    for call in tool_calls {
+                        if let Some(function) = &call.function {
+                            if let Some(name) = &function.name {
+                                tool_name.push_str(name);
+                            }
+                            if let Some(args) = &function.arguments {
+                                tool_args.push_str(args);
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    ))
+    .await;
+    match result {
+        Ok(_) => {
+            let native_ok = tool_name == "doctor_noop";
+            let inline_ok = looks_like_inline_tool_json(&content);
+            let native_detail = if native_ok {
+                let args = if tool_args.is_empty() {
+                    "{}"
+                } else {
+                    tool_args.as_str()
+                };
+                format!("native tool_calls: {args}")
+            } else if inline_ok {
+                "no native tool_calls; model emitted inline JSON".into()
+            } else if content.trim().is_empty() {
+                "no tool call or content observed".into()
+            } else {
+                format!("no native tool_calls; content {:?}", content.trim())
+            };
+            (
+                ProbeStatus {
+                    ok: native_ok,
+                    detail: native_detail,
+                },
+                ProbeStatus {
+                    ok: inline_ok,
+                    detail: if inline_ok {
+                        "inline JSON fallback likely usable".into()
+                    } else {
+                        "inline JSON fallback not observed".into()
+                    },
+                },
+            )
+        }
+        Err(e) => (
+            ProbeStatus::fail(e.to_string()),
+            ProbeStatus::fail("tool probe failed"),
+        ),
+    }
+}
+
+fn doctor_warning(row: &DoctorCapabilityRow) -> Option<String> {
+    if row.backend == "llamacpp" && row.streaming.ok && !row.tool_calls.ok {
+        return Some(
+            "llama.cpp is reachable but native tool_calls were not observed; start llama-server with --jinja for native tool calls".into(),
+        );
+    }
+    if row.streaming.ok && !row.usage_chunks.ok {
+        return Some("streaming works, but usage chunks are not reported by this backend".into());
+    }
+    None
+}
+
+async fn probe_backend_capabilities(
+    state: &AppState,
+    backend_desc: BackendDescriptor,
+) -> DoctorCapabilityRow {
+    let mut listed_models = Vec::new();
+    let models = match validate(&backend_desc) {
+        Ok(()) => match with_probe_timeout(list_models(&state.http, &backend_desc)).await {
+            Ok(models) => {
+                listed_models = models;
+                ProbeStatus::ok(format!("{} model(s)", listed_models.len()))
+            }
+            Err(e) => ProbeStatus::fail(e.to_string()),
+        },
+        Err(e) => ProbeStatus::fail(e.to_string()),
+    };
+    let model = doctor_backend_model(&backend_desc, &listed_models, state);
+    let (streaming, usage_chunks, tool_calls, inline_tool_json) = if models.ok {
+        let (streaming, usage_chunks) = probe_streaming(state, &backend_desc, &model).await;
+        let (tool_calls, inline_tool_json) = if streaming.ok {
+            probe_tool_calls(state, &backend_desc, &model).await
+        } else {
+            (
+                ProbeStatus::fail("skipped because streaming failed"),
+                ProbeStatus::fail("skipped because streaming failed"),
+            )
+        };
+        (streaming, usage_chunks, tool_calls, inline_tool_json)
+    } else {
+        (
+            ProbeStatus::fail("skipped because /models failed"),
+            ProbeStatus::fail("skipped because /models failed"),
+            ProbeStatus::fail("skipped because /models failed"),
+            ProbeStatus::fail("skipped because /models failed"),
+        )
+    };
+    let mut row = DoctorCapabilityRow {
+        backend: backend_desc.name.as_str().into(),
+        base_url: backend_desc.base_url,
+        model,
+        models,
+        streaming,
+        usage_chunks,
+        tool_calls,
+        inline_tool_json,
+        warning: None,
+    };
+    row.warning = doctor_warning(&row);
+    row
+}
+
+fn mark(status: &ProbeStatus) -> &'static str {
+    if status.ok {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn print_capability_table(rows: &[DoctorCapabilityRow]) {
+    println!();
+    println!(
+        "  {BOLD}{:<11}{RESET} {:<7} {:<9} {:<6} {:<10} warning",
+        "backend", "models", "stream", "usage", "toolcalls"
+    );
+    for row in rows {
+        println!(
+            "  {CYAN}{:<11}{RESET} {:<7} {:<9} {:<6} {:<10} {}",
+            row.backend,
+            mark(&row.models),
+            mark(&row.streaming),
+            mark(&row.usage_chunks),
+            mark(&row.tool_calls),
+            row.warning.as_deref().unwrap_or("")
+        );
+    }
+    println!();
+    for row in rows {
+        println!(
+            "  {BOLD}{}{RESET} {DIM}{} · {}{RESET}",
+            row.backend, row.base_url, row.model
+        );
+        println!("    {DIM}models:{RESET} {}", row.models.detail);
+        println!("    {DIM}streaming:{RESET} {}", row.streaming.detail);
+        println!("    {DIM}usage:{RESET} {}", row.usage_chunks.detail);
+        println!("    {DIM}tool_calls:{RESET} {}", row.tool_calls.detail);
+        println!(
+            "    {DIM}inline_json:{RESET} {}",
+            row.inline_tool_json.detail
+        );
+    }
+}
+
+fn render_doctor_markdown(report: &DoctorCapabilityReport) -> String {
+    let mut out = format!(
+        "# Small Harness Doctor Report\n\nGenerated: `{}`\n\nActive backend: `{}`\n\n",
+        report.generated_at, report.active_backend
+    );
+    out.push_str("| Backend | Models | Streaming | Usage | Tool Calls | Warning |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for row in &report.rows {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} |\n",
+            row.backend,
+            mark(&row.models),
+            mark(&row.streaming),
+            mark(&row.usage_chunks),
+            mark(&row.tool_calls),
+            row.warning.as_deref().unwrap_or("")
+        ));
+    }
+    out.push('\n');
+    for row in &report.rows {
+        out.push_str(&format!("## `{}`\n\n", row.backend));
+        out.push_str(&format!("- Base URL: `{}`\n", row.base_url));
+        out.push_str(&format!("- Model: `{}`\n", row.model));
+        out.push_str(&format!("- Models: {}\n", row.models.detail));
+        out.push_str(&format!("- Streaming: {}\n", row.streaming.detail));
+        out.push_str(&format!("- Usage chunks: {}\n", row.usage_chunks.detail));
+        out.push_str(&format!("- Tool calls: {}\n", row.tool_calls.detail));
+        out.push_str(&format!(
+            "- Inline JSON fallback: {}\n\n",
+            row.inline_tool_json.detail
+        ));
+    }
+    out
+}
+
+fn save_doctor_report(
+    state: &AppState,
+    report: &DoctorCapabilityReport,
+) -> Result<(PathBuf, PathBuf)> {
+    let dir = Path::new(&state.session_dir).join("doctor");
+    fs::create_dir_all(&dir)?;
+    let id = Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ").to_string();
+    let json_path = dir.join(format!("{id}.json"));
+    let md_path = dir.join(format!("{id}.md"));
+    fs::write(&json_path, serde_json::to_string_pretty(report)?)?;
+    fs::write(&md_path, render_doctor_markdown(report))?;
+    Ok((json_path, md_path))
+}
+
+async fn cmd_doctor_deep(state: &AppState, all: bool) -> Result<()> {
+    println!("  {BOLD}Small Harness doctor --deep{RESET}");
+    println!(
+        "  {DIM}probing OpenAI-compatible model, stream, usage, and tool-call behavior{RESET}"
+    );
+    let backends: Vec<BackendName> = if all {
+        BackendName::all().to_vec()
+    } else {
+        vec![state.config.backend]
+    };
+    let mut rows = Vec::new();
+    for name in backends {
+        let backend_desc = if name == state.backend.name {
+            state.backend.clone()
+        } else {
+            backend(name)
+        };
+        println!(
+            "  {DIM}probing {} at {}…{RESET}",
+            backend_desc.name.as_str(),
+            backend_desc.base_url
+        );
+        rows.push(probe_backend_capabilities(state, backend_desc).await);
+    }
+    print_capability_table(&rows);
+    let report = DoctorCapabilityReport {
+        generated_at: Utc::now().to_rfc3339(),
+        active_backend: state.config.backend.as_str().into(),
+        rows,
+    };
+    let (json_path, md_path) = save_doctor_report(state, &report)?;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}doctor report saved → {} and {}{RESET}",
+        json_path.display(),
+        md_path.display()
     );
     Ok(())
 }
@@ -923,4 +1367,36 @@ async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
         md_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_inline_tool_json_for_doctor_noop() {
+        assert!(looks_like_inline_tool_json(
+            r#"{"name":"doctor_noop","arguments":{"ok":true}}"#
+        ));
+        assert!(!looks_like_inline_tool_json(
+            r#"{"name":"other_tool","arguments":{"ok":true}}"#
+        ));
+        assert!(!looks_like_inline_tool_json("plain text"));
+    }
+
+    #[test]
+    fn llama_cpp_warning_mentions_jinja_when_tool_calls_missing() {
+        let row = DoctorCapabilityRow {
+            backend: "llamacpp".into(),
+            base_url: "http://localhost:8080/v1".into(),
+            model: "gpt-3.5-turbo".into(),
+            models: ProbeStatus::ok("1 model"),
+            streaming: ProbeStatus::ok("stream ok"),
+            usage_chunks: ProbeStatus::ok("usage ok"),
+            tool_calls: ProbeStatus::fail("missing"),
+            inline_tool_json: ProbeStatus::fail("missing"),
+            warning: None,
+        };
+        assert!(doctor_warning(&row).unwrap().contains("--jinja"));
+    }
 }
