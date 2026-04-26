@@ -170,7 +170,7 @@ mod tests {
             }))
             .await;
 
-        assert_eq!(result["edited"].as_bool().unwrap(), true);
+        assert!(result["edited"].as_bool().unwrap());
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "alpha\nBETA\ngamma");
     }
@@ -221,7 +221,7 @@ mod tests {
             }))
             .await;
 
-        assert_eq!(result["edited"].as_bool().unwrap(), true);
+        assert!(result["edited"].as_bool().unwrap());
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "ONE two THREE");
     }

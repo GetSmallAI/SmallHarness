@@ -182,7 +182,7 @@ mod tests {
             .await;
 
         assert_eq!(result["content"].as_str().unwrap(), "2\n3");
-        assert_eq!(result["truncated"].as_bool().unwrap(), true);
+        assert!(result["truncated"].as_bool().unwrap());
         assert_eq!(result["nextOffset"].as_u64().unwrap(), 4);
     }
 

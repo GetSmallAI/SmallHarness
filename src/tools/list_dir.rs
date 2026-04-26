@@ -89,7 +89,7 @@ mod tests {
             .collect();
         assert_eq!(entries, vec!["a.txt", "b.txt", "subdir/"]);
         assert_eq!(result["count"].as_u64().unwrap(), 3);
-        assert_eq!(result["truncated"].as_bool().unwrap(), false);
+        assert!(!result["truncated"].as_bool().unwrap());
     }
 
     #[tokio::test]

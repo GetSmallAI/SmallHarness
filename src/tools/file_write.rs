@@ -73,7 +73,7 @@ mod tests {
                 "content": "hello"
             }))
             .await;
-        assert_eq!(result["written"].as_bool().unwrap(), true);
+        assert!(result["written"].as_bool().unwrap());
         assert_eq!(result["bytes"].as_u64().unwrap(), 5);
         let read = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(read, "hello");
@@ -89,7 +89,7 @@ mod tests {
                 "content": "deep"
             }))
             .await;
-        assert_eq!(result["written"].as_bool().unwrap(), true);
+        assert!(result["written"].as_bool().unwrap());
         let read = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(read, "deep");
     }
