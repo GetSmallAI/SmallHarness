@@ -178,6 +178,71 @@ pub async fn chat_oneshot(
     Ok(())
 }
 
+/// One event surfaced by [`SseParser`].
+#[derive(Debug)]
+pub enum SseEvent {
+    Chunk(StreamChunk),
+    Done,
+}
+
+/// Incremental parser for OpenAI-compatible SSE chat-completion streams.
+///
+/// Feed it bytes as they arrive; it accumulates `data:` lines per event and
+/// emits a [`StreamChunk`] for each complete event, or [`SseEvent::Done`] for
+/// the `data: [DONE]` terminator. Malformed JSON inside an event is silently
+/// dropped (matches the TS implementation).
+#[derive(Default)]
+pub struct SseParser {
+    buf: Vec<u8>,
+    data: String,
+}
+
+impl SseParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line_str = std::str::from_utf8(&line)
+                .map_err(|e| anyhow!("non-utf8 SSE line: {e}"))?
+                .trim_end_matches(['\r', '\n']);
+            if line_str.is_empty() {
+                if !self.data.is_empty() {
+                    if self.data.trim() == "[DONE]" {
+                        out.push(SseEvent::Done);
+                    } else if let Ok(c) = serde_json::from_str::<StreamChunk>(&self.data) {
+                        out.push(SseEvent::Chunk(c));
+                    }
+                    self.data.clear();
+                }
+            } else if let Some(rest) = line_str.strip_prefix("data:") {
+                let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(rest);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Drain any trailing data left without a terminating blank line.
+    pub fn finalize(&mut self) -> Vec<SseEvent> {
+        let mut out = Vec::new();
+        if !self.data.is_empty() && self.data.trim() != "[DONE]" {
+            if let Ok(c) = serde_json::from_str::<StreamChunk>(&self.data) {
+                out.push(SseEvent::Chunk(c));
+            }
+        }
+        self.data.clear();
+        out
+    }
+}
+
 pub async fn stream_chat<F>(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
@@ -203,39 +268,142 @@ where
         return Err(anyhow!("HTTP {}: {}", status, body.trim()));
     }
     let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut data = String::new();
+    let mut parser = SseParser::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        buf.extend_from_slice(&chunk);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
-            let line_str = std::str::from_utf8(&line)
-                .map_err(|e| anyhow!("non-utf8 SSE line: {e}"))?
-                .trim_end_matches(['\r', '\n']);
-            if line_str.is_empty() {
-                if !data.is_empty() {
-                    if data.trim() == "[DONE]" {
-                        return Ok(());
-                    }
-                    if let Ok(c) = serde_json::from_str::<StreamChunk>(&data) {
-                        on_chunk(c);
-                    }
-                    data.clear();
-                }
-            } else if let Some(rest) = line_str.strip_prefix("data:") {
-                let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest);
+        for ev in parser.feed(&chunk)? {
+            match ev {
+                SseEvent::Chunk(c) => on_chunk(c),
+                SseEvent::Done => return Ok(()),
             }
         }
     }
-    if !data.is_empty() && data.trim() != "[DONE]" {
-        if let Ok(c) = serde_json::from_str::<StreamChunk>(&data) {
+    for ev in parser.finalize() {
+        if let SseEvent::Chunk(c) = ev {
             on_chunk(c);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn content_of(ev: &SseEvent) -> Option<&str> {
+        match ev {
+            SseEvent::Chunk(c) => c.choices.first()?.delta.content.as_deref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parses_single_chunk() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let events = p.feed(bytes).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(content_of(&events[0]), Some("hi"));
+    }
+
+    #[test]
+    fn parses_chunks_split_across_feeds() {
+        let mut p = SseParser::new();
+        assert!(p
+            .feed(b"data: {\"choices\":[{\"delta\":")
+            .unwrap()
+            .is_empty());
+        assert!(p.feed(b"{\"content\":\"a\"}}]}").unwrap().is_empty());
+        let events = p.feed(b"\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(content_of(&events[0]), Some("a"));
+    }
+
+    #[test]
+    fn parses_multiple_chunks_in_one_feed() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n";
+        let events = p.feed(bytes).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(content_of(&events[0]), Some("a"));
+        assert_eq!(content_of(&events[1]), Some("b"));
+    }
+
+    #[test]
+    fn emits_done_marker() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data: [DONE]\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], SseEvent::Done));
+    }
+
+    #[test]
+    fn ignores_other_sse_fields() {
+        let mut p = SseParser::new();
+        let bytes = b"event: ping\nid: 1\n\ndata: {\"choices\":[]}\n\n";
+        let events = p.feed(bytes).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn handles_crlf_line_endings() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\r\n\r\n";
+        let events = p.feed(bytes).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(content_of(&events[0]), Some("x"));
+    }
+
+    #[test]
+    fn accepts_data_without_space_after_colon() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data:{\"choices\":[]}\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn invalid_json_is_skipped() {
+        let mut p = SseParser::new();
+        let events = p.feed(b"data: not json\n\n").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parses_byte_at_a_time() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[{\"delta\":{\"content\":\"slow\"}}]}\n\n";
+        let mut total = 0;
+        for b in bytes {
+            total += p.feed(&[*b]).unwrap().len();
+        }
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn finalize_drains_unterminated_event() {
+        let mut p = SseParser::new();
+        // No trailing blank line — event is still in data buffer.
+        let _ = p.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"y\"}}]}\n");
+        let events = p.finalize();
+        assert_eq!(events.len(), 1);
+        assert_eq!(content_of(&events[0]), Some("y"));
+    }
+
+    #[test]
+    fn usage_chunk_carries_token_counts() {
+        let mut p = SseParser::new();
+        let bytes =
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7}}\n\n";
+        let events = p.feed(bytes).unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Chunk(c) => {
+                let u = c.usage.as_ref().unwrap();
+                assert_eq!(u.prompt_tokens, 42);
+                assert_eq!(u.completion_tokens, 7);
+            }
+            _ => panic!("expected chunk"),
+        }
+    }
 }
