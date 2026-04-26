@@ -1,5 +1,4 @@
-node_modules/
-dist/
+target/
 .sessions/
 .env
 .env.local

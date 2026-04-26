@@ -20,8 +20,7 @@
 </p>
 
 <p align="center">
-  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178c6">
-  <img alt="Node 18+" src="https://img.shields.io/badge/Node-18%2B-339933">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -59,15 +58,17 @@ backend so you can start running without picking weights out of a long list.
 
 ## Quick Install
 
-You will need Node 18+ and one local-inference backend running.
+You will need Rust (stable, 1.75+) and one local-inference backend running.
 
 ```bash
 git clone https://github.com/morganlinton/SmallHarness.git
 cd SmallHarness
-npm install
 cp .env.example .env
-npm start
+cargo run --release
 ```
+
+Build a standalone binary with `cargo build --release` — it lands at
+`target/release/small-harness` (~5 MB).
 
 By default Small Harness talks to Ollama at `http://localhost:11434/v1`. To
 target LM Studio or MLX instead, set `BACKEND=lm-studio` or `BACKEND=mlx`
@@ -91,7 +92,7 @@ LM Studio (already installed) and MLX are also supported. See
 ### 2. Run the harness
 
 ```bash
-npm start
+cargo run --release
 ```
 
 You will see the banner, a backend probe, and a "Warming up" spinner that
@@ -145,9 +146,9 @@ Override URLs with `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, or `MLX_BASE_URL`.
 
 The official `@openrouter/agent` SDK speaks OpenRouter's newer `/responses`
 endpoint. Local backends only expose `/v1/chat/completions`. Small Harness
-uses the `openai` SDK pointed at each backend's `baseURL` so a single client
-shape works everywhere — local servers and OpenRouter cloud — at the cost of
-not using the Responses API.
+uses a hand-rolled `reqwest` + SSE client pointed at each backend's `baseURL`
+so a single client shape works everywhere — local servers and OpenRouter
+cloud — at the cost of not using the Responses API.
 
 ## Tools
 
@@ -286,28 +287,28 @@ put here can be overridden by env vars or slash commands at runtime.
 
 ```text
                 +-------------------------+
-                |        cli.ts           |
+                |        main.rs          |
                 |  banner / input loop /  |
                 |  warmup / approval      |
                 +------------+------------+
                              |
                              v
 +--------------+    +-------------------------+    +-------------------+
-|  config.ts   |--->|        agent.ts         |<-->|   tools/*.ts      |
-|  env + JSON  |    |  chat/completions loop  |    |  zod-typed,       |
+|  config.rs   |--->|        agent.rs         |<-->|   tools/*.rs      |
+|  env + JSON  |    |  chat/completions loop  |    |  serde-typed,     |
 |  + profiles  |    |  streaming + tool calls |    |  approval-gated   |
 +--------------+    +------------+------------+    +-------------------+
                                  |
                                  v
                 +-------------------------+
-                |     backends.ts         |
+                |     backends.rs         |
                 |  Ollama / LM Studio /   |
                 |  MLX / OpenRouter       |
                 +-------------------------+
                              |
                              v
                 +-------------------------+
-                |   session.ts            |
+                |   session.rs            |
                 |  JSONL append-only log  |
                 +-------------------------+
 ```
@@ -315,37 +316,40 @@ put here can be overridden by env vars or slash commands at runtime.
 ## Development
 
 ```bash
-npm run typecheck          # tsc --noEmit
-npm start                  # tsx src/cli.ts
-npm run dev                # tsx watch src/cli.ts
+cargo check                # type-check without producing a binary
+cargo run                  # debug build + run (faster compile, slower runtime)
+cargo run --release        # optimized build + run
+cargo build --release      # produce target/release/small-harness
 ```
 
 Project layout:
 
 ```text
 src/
-  cli.ts              entry — input loop, loader, approval wiring, warmup
-  agent.ts            chat/completions runner with tool calls + streaming
-  backends.ts         Ollama / LM Studio / MLX / OpenRouter — endpoint + per-profile defaults
-  config.ts           env + agent.config.json loader
-  approval.ts         y/n/always/session-allow prompt
-  session.ts          JSONL append-only conversation log
-  warmup.ts           pre-warm the prompt-eval cache at startup
-  commands.ts         /help /new /clear /session /backend /profile /model /tools /compare
-  renderer.ts         grouped tool display
-  loader.ts           spinner / gradient / minimal loaders
-  banner.ts           ASCII banner + dynamic backend/profile/model line
-  input-styles.ts     bordered + plain readers
-  tools/              file_read, file_write, file_edit, glob, grep, list_dir, shell
+  main.rs             entry — input loop, loader, approval wiring, warmup
+  agent.rs            chat/completions runner with tool calls + streaming
+  backends.rs         Ollama / LM Studio / MLX / OpenRouter — endpoint + per-profile defaults
+  config.rs           env + agent.config.json loader
+  approval.rs         y/n/always/session-allow prompt
+  session.rs          JSONL append-only conversation log
+  warmup.rs           pre-warm the prompt-eval cache at startup
+  commands.rs         /help /new /clear /session /backend /profile /model /tools /compare
+  renderer.rs         grouped tool display
+  loader.rs           spinner / gradient / minimal loaders
+  banner.rs           ASCII banner + dynamic backend/profile/model line
+  input.rs            bordered + plain readers
+  openai.rs           wire types + SSE streaming for chat completions
+  tools/              file_read, file_write, file_edit, glob_tool, grep, list_dir, shell
 ```
 
 Quality expectations:
 
-- Type-check (`npm run typecheck`) must pass.
-- Tools that mutate filesystem state require `requireApproval` in their
-  definition (or a function returning `true` for dangerous arg shapes).
+- `cargo check` must pass cleanly.
+- Tools that mutate filesystem state implement `require_approval` on the
+  `Tool` trait (returning `true`, or computing it from the args for
+  dangerous shapes — see `shell.rs`).
 - New backends should expose an OpenAI-compatible `/v1/chat/completions`
-  endpoint and add a profile-default model map in `backends.ts`.
+  endpoint and add a profile-default model map in `backends.rs`.
 
 ## Troubleshooting
 
@@ -381,11 +385,11 @@ it.
 Some bilingual models (notably the qwen family) drift into Chinese on short
 greetings. The system prompt now includes an explicit language directive,
 but you can strengthen it further by editing `SYSTEM_PROMPT` in
-`src/config.ts`.
+`src/config.rs`.
 
-### `tsx: command not found`
+### `cargo: command not found`
 
-Run `npm install` from the repo root to fetch the dev dependencies.
+Install Rust via [rustup](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`.
 
 ## License
 
