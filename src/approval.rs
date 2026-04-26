@@ -69,7 +69,9 @@ impl ApprovalProvider for ApprovalCache {
         }
         let summary = summarize(name, args);
         println!();
-        println!("  {YELLOW}▲{RESET} {BOLD}Approval required{RESET} {DIM}for{RESET} {BOLD}{name}{RESET}");
+        println!(
+            "  {YELLOW}▲{RESET} {BOLD}Approval required{RESET} {DIM}for{RESET} {BOLD}{name}{RESET}"
+        );
         println!("    {DIM}{summary}{RESET}");
         println!(
             "    {DIM}[y]es · [n]o · [a]lways for {name} · [s]ession-allow this exact call{RESET}"

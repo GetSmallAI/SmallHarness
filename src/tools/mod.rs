@@ -37,8 +37,12 @@ pub fn build_tools(config: &AgentConfig) -> Vec<Arc<dyn Tool>> {
     for name in &config.tools {
         let t: Option<Arc<dyn Tool>> = match name.as_str() {
             "file_read" => Some(Arc::new(FileReadTool)),
-            "file_write" => Some(Arc::new(FileWriteTool { approve: approve_writes })),
-            "file_edit" => Some(Arc::new(FileEditTool { approve: approve_writes })),
+            "file_write" => Some(Arc::new(FileWriteTool {
+                approve: approve_writes,
+            })),
+            "file_edit" => Some(Arc::new(FileEditTool {
+                approve: approve_writes,
+            })),
             "glob" => Some(Arc::new(GlobTool)),
             "grep" => Some(Arc::new(GrepTool)),
             "list_dir" => Some(Arc::new(ListDirTool)),

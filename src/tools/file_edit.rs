@@ -32,15 +32,11 @@ fn unified_diff(old_text: &str, new_text: &str, path: &str) -> String {
             continue;
         }
         out.push(format!("@@ -{} +{} @@", i + 1, j + 1));
-        while i < old_lines.len()
-            && (j >= new_lines.len() || old_lines[i] != new_lines[j])
-        {
+        while i < old_lines.len() && (j >= new_lines.len() || old_lines[i] != new_lines[j]) {
             out.push(format!("-{}", old_lines[i]));
             i += 1;
         }
-        while j < new_lines.len()
-            && (i >= old_lines.len() || old_lines[i] != new_lines[j])
-        {
+        while j < new_lines.len() && (i >= old_lines.len() || old_lines[i] != new_lines[j]) {
             out.push(format!("+{}", new_lines[j]));
             j += 1;
         }

@@ -224,12 +224,15 @@ pub fn load_config() -> AgentConfig {
                 if let Some(d) = file.session_dir {
                     config.session_dir = d;
                 }
-                if let Some(a) = file.approval_policy.as_deref().and_then(ApprovalPolicy::parse) {
+                if let Some(a) = file
+                    .approval_policy
+                    .as_deref()
+                    .and_then(ApprovalPolicy::parse)
+                {
                     config.approval_policy = a;
                 }
                 if let Some(t) = file.tools {
-                    let valid: Vec<String> =
-                        t.into_iter().filter(|n| is_tool_name(n)).collect();
+                    let valid: Vec<String> = t.into_iter().filter(|n| is_tool_name(n)).collect();
                     if !valid.is_empty() {
                         config.tools = valid;
                     }

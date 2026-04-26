@@ -44,11 +44,7 @@ impl Tool for ListDirTool {
         let mut entries: Vec<String> = Vec::new();
         while let Ok(Some(entry)) = rd.next_entry().await {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = entry
-                .file_type()
-                .await
-                .map(|t| t.is_dir())
-                .unwrap_or(false);
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             entries.push(if is_dir { format!("{name}/") } else { name });
         }
         entries.sort();

@@ -43,10 +43,7 @@ fn format_tokens(n: u32) -> String {
     }
 }
 
-async fn probe_backend(
-    http: &reqwest::Client,
-    b: &BackendDescriptor,
-) -> Result<(), String> {
+async fn probe_backend(http: &reqwest::Client, b: &BackendDescriptor) -> Result<(), String> {
     match list_models(http, b).await {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -70,7 +67,9 @@ async fn probe_backend(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() {
-        eprintln!("small-harness requires an interactive TTY (run it directly in a terminal, not piped).");
+        eprintln!(
+            "small-harness requires an interactive TTY (run it directly in a terminal, not piped)."
+        );
         std::process::exit(1);
     }
     let config = load_config();

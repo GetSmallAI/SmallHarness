@@ -8,9 +8,7 @@ use crate::config::LoaderStyle;
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
-const SPINNER_FRAMES: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const GRADIENT_COLORS: &[&str] = &[
     "\x1b[38;5;240m",
     "\x1b[38;5;245m",

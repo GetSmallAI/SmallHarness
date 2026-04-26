@@ -29,10 +29,7 @@ fn trunc(s: &str, max: usize) -> String {
 fn formatter_for(name: &str, args: &Value) -> String {
     match name {
         "shell" => {
-            let s = args
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let s = args.get("command").and_then(Value::as_str).unwrap_or("");
             format!("command={}", trunc(s, 50))
         }
         "file_read" | "file_write" | "file_edit" => {
@@ -120,7 +117,11 @@ fn summarize_output(output: &str) -> String {
             return "edited".to_string();
         }
         if let Some(code) = parsed.get("exitCode").and_then(Value::as_i64) {
-            let to = if parsed.get("timedOut").and_then(Value::as_bool).unwrap_or(false) {
+            let to = if parsed
+                .get("timedOut")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 " (timeout)"
             } else {
                 ""

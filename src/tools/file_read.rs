@@ -29,8 +29,7 @@ fn image_ext(path: &str) -> Option<&'static str> {
 }
 
 fn b64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
     let mut chunks = input.chunks_exact(3);
     for chunk in &mut chunks {
@@ -97,12 +96,12 @@ impl Tool for FileReadTool {
         };
         let lines: Vec<&str> = content.split('\n').collect();
         let total = lines.len();
-        let start = args.offset.map(|o| o.saturating_sub(1)).unwrap_or(0).min(total);
-        let end = args
-            .limit
-            .map(|l| start + l)
-            .unwrap_or(total)
+        let start = args
+            .offset
+            .map(|o| o.saturating_sub(1))
+            .unwrap_or(0)
             .min(total);
+        let end = args.limit.map(|l| start + l).unwrap_or(total).min(total);
         let slice = &lines[start..end];
         let mut obj = serde_json::Map::new();
         obj.insert("content".into(), json!(slice.join("\n")));

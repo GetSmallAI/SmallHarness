@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::backends::{backend, default_model, validate, BackendDescriptor, BackendName, ProfileName};
+use crate::backends::{
+    backend, default_model, validate, BackendDescriptor, BackendName, ProfileName,
+};
 use crate::config::{is_tool_name, AgentConfig, ALL_TOOL_NAMES};
 use crate::input::plain_read_line;
 use crate::openai::{list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions};
@@ -50,10 +52,22 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a fresh conversation"),
     ("/clear", "Clear the screen"),
     ("/session", "Show session info and token usage"),
-    ("/backend", "Switch backend (ollama, lm-studio, mlx, openrouter)"),
-    ("/profile", "Switch hardware profile (mac-mini-16gb, mac-studio-32gb)"),
-    ("/model", "List models from the current backend and pick one"),
-    ("/tools", "Show or set enabled tools (comma-separated names)"),
+    (
+        "/backend",
+        "Switch backend (ollama, lm-studio, mlx, openrouter)",
+    ),
+    (
+        "/profile",
+        "Switch hardware profile (mac-mini-16gb, mac-studio-32gb)",
+    ),
+    (
+        "/model",
+        "List models from the current backend and pick one",
+    ),
+    (
+        "/tools",
+        "Show or set enabled tools (comma-separated names)",
+    ),
     (
         "/compare",
         "Run the last user prompt against the OpenRouter cloud (requires OPENROUTER_API_KEY)",
@@ -124,10 +138,7 @@ fn session_info(state: &AppState) {
         "  {DIM}approval{RESET}  {CYAN}{}{RESET}",
         state.config.approval_policy.as_str()
     );
-    println!(
-        "  {DIM}session{RESET}   {}",
-        state.session_path.display()
-    );
+    println!("  {DIM}session{RESET}   {}", state.session_path.display());
     println!("  {DIM}messages{RESET}  {}", state.messages.len());
     println!(
         "  {DIM}tokens{RESET}    {} in · {} out",
@@ -147,10 +158,7 @@ async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
         for (i, b) in BackendName::all().iter().enumerate() {
             println!("  {DIM}{}){RESET} {}", i + 1, b.as_str());
         }
-        let prompt = format!(
-            "  {DIM}Select (1-{}):{RESET} ",
-            BackendName::all().len()
-        );
+        let prompt = format!("  {DIM}Select (1-{}):{RESET} ", BackendName::all().len());
         let pick = plain_read_line(prompt).await?.trim().to_string();
         pick.parse::<usize>()
             .ok()
@@ -188,10 +196,7 @@ async fn cmd_profile(args: &str, state: &mut AppState) -> Result<()> {
         for (i, p) in ProfileName::all().iter().enumerate() {
             println!("  {DIM}{}){RESET} {}", i + 1, p.as_str());
         }
-        let prompt = format!(
-            "  {DIM}Select (1-{}):{RESET} ",
-            ProfileName::all().len()
-        );
+        let prompt = format!("  {DIM}Select (1-{}):{RESET} ", ProfileName::all().len());
         let pick = plain_read_line(prompt).await?.trim().to_string();
         pick.parse::<usize>()
             .ok()
@@ -264,10 +269,7 @@ async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         println!("  {DIM}{:>2}){RESET} {}", i + 1, m);
     }
     if total > shown.len() {
-        println!(
-            "  {DIM}…and {} more{RESET}",
-            total - shown.len()
-        );
+        println!("  {DIM}…and {} more{RESET}", total - shown.len());
     }
     let prompt = format!("  {DIM}Select (1-{}):{RESET} ", shown.len());
     let pick = plain_read_line(prompt).await?.trim().to_string();
@@ -288,10 +290,7 @@ async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
 
 fn cmd_tools(args: &str, state: &mut AppState) {
     if args.is_empty() {
-        println!(
-            "  {DIM}available{RESET}  {}",
-            ALL_TOOL_NAMES.join(", ")
-        );
+        println!("  {DIM}available{RESET}  {}", ALL_TOOL_NAMES.join(", "));
         println!(
             "  {DIM}enabled{RESET}    {CYAN}{}{RESET}",
             state.config.tools.join(", ")
@@ -353,7 +352,9 @@ async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
         messages: &messages,
         tools: None,
         stream: true,
-        stream_options: Some(StreamOptions { include_usage: false }),
+        stream_options: Some(StreamOptions {
+            include_usage: false,
+        }),
         max_tokens: None,
     };
     let mut out = std::io::stdout();

@@ -139,11 +139,7 @@ pub async fn list_models(
     backend: &BackendDescriptor,
 ) -> Result<Vec<String>> {
     let url = format!("{}/models", backend.base_url.trim_end_matches('/'));
-    let resp = client
-        .get(url)
-        .bearer_auth(&backend.api_key)
-        .send()
-        .await?;
+    let resp = client.get(url).bearer_auth(&backend.api_key).send().await?;
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP {}", resp.status()));
     }
@@ -164,7 +160,10 @@ pub async fn chat_oneshot(
     backend: &BackendDescriptor,
     req: &ChatRequest<'_>,
 ) -> Result<()> {
-    let url = format!("{}/chat/completions", backend.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        backend.base_url.trim_end_matches('/')
+    );
     let resp = client
         .post(url)
         .bearer_auth(&backend.api_key)
@@ -188,7 +187,10 @@ pub async fn stream_chat<F>(
 where
     F: FnMut(StreamChunk),
 {
-    let url = format!("{}/chat/completions", backend.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        backend.base_url.trim_end_matches('/')
+    );
     let resp = client
         .post(url)
         .bearer_auth(&backend.api_key)

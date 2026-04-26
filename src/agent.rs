@@ -158,8 +158,9 @@ where
                 if let Some(tcs) = &choice.delta.tool_calls {
                     for tc in tcs {
                         let idx = tc.index.unwrap_or(0);
-                        let entry =
-                            tool_calls.entry(idx).or_insert_with(|| (String::new(), String::new(), String::new()));
+                        let entry = tool_calls
+                            .entry(idx)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
                         if let Some(id) = &tc.id {
                             if !id.is_empty() {
                                 entry.0 = id.clone();
@@ -251,9 +252,10 @@ where
                     }
                 }
                 if denied {
-                    let denied_str =
-                        serde_json::to_string(&serde_json::json!({"error": "User denied execution."}))
-                            .unwrap();
+                    let denied_str = serde_json::to_string(
+                        &serde_json::json!({"error": "User denied execution."}),
+                    )
+                    .unwrap();
                     on_event(AgentEvent::ToolResult {
                         name: tc.function.name.clone(),
                         call_id: tc.id.clone(),
