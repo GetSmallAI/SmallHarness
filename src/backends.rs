@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,13 +46,6 @@ impl ProfileName {
         match self {
             ProfileName::MacMini16gb => "mac-mini-16gb",
             ProfileName::MacStudio32gb => "mac-studio-32gb",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "mac-mini-16gb" => Some(Self::MacMini16gb),
-            "mac-studio-32gb" => Some(Self::MacStudio32gb),
-            _ => None,
         }
     }
     pub fn all() -> &'static [ProfileName] {
@@ -100,22 +94,31 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
     }
 }
 
-pub fn default_model(b: &BackendDescriptor, p: ProfileName, override_: Option<&str>) -> String {
+pub fn default_model(
+    b: &BackendDescriptor,
+    profile: &str,
+    override_: Option<&str>,
+    custom_profiles: &BTreeMap<String, BTreeMap<String, String>>,
+) -> String {
     if let Some(m) = override_ {
         return m.to_string();
     }
-    match (b.name, p) {
-        (BackendName::Ollama, ProfileName::MacMini16gb) => "qwen2.5-coder:7b",
-        (BackendName::Ollama, ProfileName::MacStudio32gb) => "qwen2.5-coder:14b",
-        (BackendName::LmStudio, ProfileName::MacMini16gb) => "qwen2.5-coder-7b-instruct",
-        (BackendName::LmStudio, ProfileName::MacStudio32gb) => "qwen2.5-coder-14b-instruct",
-        (BackendName::Mlx, ProfileName::MacMini16gb) => {
-            "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+    if let Some(models) = custom_profiles.get(profile) {
+        if let Some(model) = models.get(b.name.as_str()) {
+            return model.clone();
         }
-        (BackendName::Mlx, ProfileName::MacStudio32gb) => {
-            "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
-        }
+    }
+    match (b.name, profile) {
+        (BackendName::Ollama, "mac-mini-16gb") => "qwen2.5-coder:7b",
+        (BackendName::Ollama, "mac-studio-32gb") => "qwen2.5-coder:14b",
+        (BackendName::LmStudio, "mac-mini-16gb") => "qwen2.5-coder-7b-instruct",
+        (BackendName::LmStudio, "mac-studio-32gb") => "qwen2.5-coder-14b-instruct",
+        (BackendName::Mlx, "mac-mini-16gb") => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+        (BackendName::Mlx, "mac-studio-32gb") => "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
         (BackendName::Openrouter, _) => "qwen/qwen-2.5-coder-32b-instruct",
+        (BackendName::Ollama, _) => "qwen2.5-coder:7b",
+        (BackendName::LmStudio, _) => "qwen2.5-coder-7b-instruct",
+        (BackendName::Mlx, _) => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
     }
     .to_string()
 }

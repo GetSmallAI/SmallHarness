@@ -3,9 +3,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-use super::Tool;
+use super::{PathPolicy, Tool};
 
-pub struct GlobTool;
+pub struct GlobTool {
+    pub path_policy: PathPolicy,
+}
 
 #[derive(Deserialize)]
 struct Args {
@@ -45,6 +47,12 @@ impl Tool for GlobTool {
             "required": ["pattern"]
         })
     }
+    fn require_approval(&self, args: &Value) -> bool {
+        args.get("path")
+            .and_then(Value::as_str)
+            .map(|p| self.path_policy.require_prompt_for_path(p))
+            .unwrap_or(false)
+    }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -57,10 +65,11 @@ impl Tool for GlobTool {
             Ok(g) => g.compile_matcher(),
             Err(e) => return json!({ "error": e.to_string() }),
         };
-        let root: PathBuf = args
-            .path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let requested = args.path.unwrap_or_else(|| ".".into());
+        if let Some(error) = self.path_policy.deny_path(&requested) {
+            return json!({ "error": error });
+        }
+        let root: PathBuf = self.path_policy.resolve(&requested).normalized;
 
         let pattern = args.pattern.clone();
         let root_for_walk = root.clone();

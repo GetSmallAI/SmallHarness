@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use crate::agent::ApprovalProvider;
 use crate::input::plain_read_line;
+use crate::tools::ToolPreview;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -56,7 +57,7 @@ fn summarize(name: &str, args: &Value) -> String {
 
 #[async_trait]
 impl ApprovalProvider for ApprovalCache {
-    async fn approve(&mut self, name: &str, args: &Value) -> bool {
+    async fn approve(&mut self, name: &str, args: &Value, preview: Option<&ToolPreview>) -> bool {
         let cache_key = format!(
             "{name}:{}",
             args.get("command")
@@ -67,12 +68,29 @@ impl ApprovalProvider for ApprovalCache {
         if self.always_allow.contains(name) || self.always_allow.contains(&cache_key) {
             return true;
         }
-        let summary = summarize(name, args);
+        let summary = preview
+            .map(|p| p.summary.clone())
+            .unwrap_or_else(|| summarize(name, args));
         println!();
         println!(
             "  {YELLOW}▲{RESET} {BOLD}Approval required{RESET} {DIM}for{RESET} {BOLD}{name}{RESET}"
         );
         println!("    {DIM}{summary}{RESET}");
+        if let Some(preview) = preview {
+            if let Some(risk) = &preview.risk {
+                println!("    {RED}risk:{RESET} {DIM}{risk}{RESET}");
+            }
+            if let Some(diff) = &preview.diff {
+                println!();
+                for line in diff.lines().take(80) {
+                    println!("    {DIM}{line}{RESET}");
+                }
+                if diff.lines().count() > 80 {
+                    println!("    {DIM}…diff truncated for display{RESET}");
+                }
+                println!();
+            }
+        }
         println!(
             "    {DIM}[y]es · [n]o · [a]lways for {name} · [s]ession-allow this exact call{RESET}"
         );

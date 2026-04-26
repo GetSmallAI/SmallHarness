@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::Tool;
+use super::{PathPolicy, Tool};
 
-pub struct ListDirTool;
+pub struct ListDirTool {
+    pub path_policy: PathPolicy,
+}
 
 #[derive(Deserialize)]
 struct Args {
@@ -28,13 +30,24 @@ impl Tool for ListDirTool {
             }
         })
     }
+    fn require_approval(&self, args: &Value) -> bool {
+        args.get("path")
+            .and_then(Value::as_str)
+            .map(|p| self.path_policy.require_prompt_for_path(p))
+            .unwrap_or(false)
+    }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return json!({ "error": format!("invalid args: {e}") }),
         };
-        let path = args.path.unwrap_or_else(|| ".".into());
-        let mut rd = match tokio::fs::read_dir(&path).await {
+        let requested = args.path.unwrap_or_else(|| ".".into());
+        if let Some(error) = self.path_policy.deny_path(&requested) {
+            return json!({ "error": error });
+        }
+        let resolved = self.path_policy.resolve(&requested);
+        let path = resolved.normalized.display().to_string();
+        let mut rd = match tokio::fs::read_dir(&resolved.normalized).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return json!({ "error": format!("Directory not found: {path}") });
@@ -77,9 +90,11 @@ mod tests {
             .await
             .unwrap();
 
-        let result = ListDirTool
-            .execute(json!({ "path": dir.path().to_str().unwrap() }))
-            .await;
+        let result = ListDirTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "path": dir.path().to_str().unwrap() }))
+        .await;
 
         let entries: Vec<&str> = result["entries"]
             .as_array()
@@ -94,9 +109,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_dir_returns_error() {
-        let result = ListDirTool
-            .execute(json!({ "path": "/totally/missing/dir/abc-xyz" }))
-            .await;
+        let result = ListDirTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "path": "/totally/missing/dir/abc-xyz" }))
+        .await;
         assert!(result["error"].as_str().unwrap().contains("not found"));
     }
 }

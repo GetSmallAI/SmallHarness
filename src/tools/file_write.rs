@@ -1,12 +1,11 @@
+use super::{diff::unified_diff, PathPolicy, Tool, ToolPreview};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::Path;
-
-use super::Tool;
 
 pub struct FileWriteTool {
     pub approve: bool,
+    pub path_policy: PathPolicy,
 }
 
 #[derive(Deserialize)]
@@ -35,23 +34,53 @@ impl Tool for FileWriteTool {
     }
     fn require_approval(&self, _args: &Value) -> bool {
         self.approve
+            || _args
+                .get("path")
+                .and_then(Value::as_str)
+                .map(|p| self.path_policy.require_prompt_for_path(p))
+                .unwrap_or(false)
+    }
+    async fn preview(&self, args: &Value) -> Option<ToolPreview> {
+        let args: Args = serde_json::from_value(args.clone()).ok()?;
+        let resolved = self.path_policy.resolve(&args.path);
+        let old = tokio::fs::read_to_string(&resolved.normalized)
+            .await
+            .unwrap_or_default();
+        let mut risk = None;
+        if resolved.outside_workspace {
+            risk = Some(format!(
+                "outside workspace root {}",
+                self.path_policy.root().display()
+            ));
+        }
+        let path = resolved.normalized.display().to_string();
+        Some(ToolPreview {
+            summary: format!("Write {path} ({} bytes)", args.content.len()),
+            diff: Some(unified_diff(&old, &args.content, &path)),
+            risk,
+        })
     }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return json!({ "error": format!("invalid args: {e}") }),
         };
-        if let Some(parent) = Path::new(&args.path).parent() {
+        if let Some(error) = self.path_policy.deny_path(&args.path) {
+            return json!({ "error": error });
+        }
+        let resolved = self.path_policy.resolve(&args.path);
+        let path = resolved.normalized.display().to_string();
+        if let Some(parent) = resolved.normalized.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     return json!({ "error": e.to_string() });
                 }
             }
         }
-        match tokio::fs::write(&args.path, args.content.as_bytes()).await {
+        match tokio::fs::write(&resolved.normalized, args.content.as_bytes()).await {
             Ok(_) => json!({
                 "written": true,
-                "path": args.path,
+                "path": path,
                 "bytes": args.content.len(),
             }),
             Err(e) => json!({ "error": e.to_string() }),
@@ -67,12 +96,15 @@ mod tests {
     async fn writes_file_to_existing_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.txt");
-        let result = FileWriteTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "content": "hello"
-            }))
-            .await;
+        let result = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "content": "hello"
+        }))
+        .await;
         assert!(result["written"].as_bool().unwrap());
         assert_eq!(result["bytes"].as_u64().unwrap(), 5);
         let read = tokio::fs::read_to_string(&path).await.unwrap();
@@ -83,12 +115,15 @@ mod tests {
     async fn writes_file_creating_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c/file.txt");
-        let result = FileWriteTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "content": "deep"
-            }))
-            .await;
+        let result = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "content": "deep"
+        }))
+        .await;
         assert!(result["written"].as_bool().unwrap());
         let read = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(read, "deep");
@@ -99,20 +134,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("o.txt");
         tokio::fs::write(&path, "old contents").await.unwrap();
-        let _ = FileWriteTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "content": "new"
-            }))
-            .await;
+        let _ = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "content": "new"
+        }))
+        .await;
         let read = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(read, "new");
     }
 
     #[test]
     fn approval_field_drives_require_approval() {
-        let t1 = FileWriteTool { approve: true };
-        let t2 = FileWriteTool { approve: false };
+        let t1 = FileWriteTool {
+            approve: true,
+            path_policy: PathPolicy::default(),
+        };
+        let t2 = FileWriteTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        };
         let v = json!({});
         assert!(t1.require_approval(&v));
         assert!(!t2.require_approval(&v));

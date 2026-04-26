@@ -7,11 +7,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
+use super::PathPolicy;
 use super::Tool;
+use crate::cancel::CancellationToken;
 use crate::config::ApprovalPolicy;
 
 pub struct ShellTool {
     pub policy: ApprovalPolicy,
+    pub path_policy: PathPolicy,
 }
 
 #[derive(Deserialize)]
@@ -53,15 +56,21 @@ impl Tool for ShellTool {
             ApprovalPolicy::Never => false,
             ApprovalPolicy::DangerousOnly => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                dangerous_re().is_match(cmd)
+                dangerous_re().is_match(cmd) || self.path_policy.require_prompt_for_cwd()
             }
         }
     }
     async fn execute(&self, args: Value) -> Value {
+        self.execute_cancelable(args, None).await
+    }
+    async fn execute_cancelable(&self, args: Value, cancel: Option<CancellationToken>) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return json!({ "error": format!("invalid args: {e}") }),
         };
+        if let Some(error) = self.path_policy.deny_cwd() {
+            return json!({ "error": error });
+        }
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
         let timeout = Duration::from_secs(args.timeout.unwrap_or(120));
 
@@ -96,13 +105,33 @@ impl Tool for ShellTool {
             buf
         });
 
-        let (exit_code, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => (status.code().unwrap_or(1), false),
-            Ok(Err(_)) => (1, false),
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                (-1, true)
+        let wait_fut = tokio::time::timeout(timeout, child.wait());
+        let (exit_code, timed_out, cancelled) = if let Some(cancel) = cancel {
+            tokio::select! {
+                result = wait_fut => match result {
+                    Ok(Ok(status)) => (status.code().unwrap_or(1), false, false),
+                    Ok(Err(_)) => (1, false, false),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        (-1, true, false)
+                    }
+                },
+                _ = cancel.cancelled() => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    (-1, false, true)
+                }
+            }
+        } else {
+            match wait_fut.await {
+                Ok(Ok(status)) => (status.code().unwrap_or(1), false, false),
+                Ok(Err(_)) => (1, false, false),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    (-1, true, false)
+                }
             }
         };
 
@@ -148,6 +177,9 @@ impl Tool for ShellTool {
         obj.insert("exitCode".into(), json!(exit_code));
         if timed_out {
             obj.insert("timedOut".into(), json!(true));
+        }
+        if cancelled {
+            obj.insert("cancelled".into(), json!(true));
         }
         if truncated {
             obj.insert("truncated".into(), json!(true));

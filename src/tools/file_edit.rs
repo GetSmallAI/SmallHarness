@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::Tool;
+use super::{diff::unified_diff, PathPolicy, Tool, ToolPreview};
 
 pub struct FileEditTool {
     pub approve: bool,
+    pub path_policy: PathPolicy,
 }
 
 #[derive(Deserialize)]
@@ -18,30 +19,6 @@ struct Args {
 struct Edit {
     old_text: String,
     new_text: String,
-}
-
-fn unified_diff(old_text: &str, new_text: &str, path: &str) -> String {
-    let old_lines: Vec<&str> = old_text.split('\n').collect();
-    let new_lines: Vec<&str> = new_text.split('\n').collect();
-    let mut out: Vec<String> = vec![format!("--- {path}"), format!("+++ {path}")];
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
-            i += 1;
-            j += 1;
-            continue;
-        }
-        out.push(format!("@@ -{} +{} @@", i + 1, j + 1));
-        while i < old_lines.len() && (j >= new_lines.len() || old_lines[i] != new_lines[j]) {
-            out.push(format!("-{}", old_lines[i]));
-            i += 1;
-        }
-        while j < new_lines.len() && (i >= old_lines.len() || old_lines[i] != new_lines[j]) {
-            out.push(format!("+{}", new_lines[j]));
-            j += 1;
-        }
-    }
-    out.join("\n")
 }
 
 #[async_trait]
@@ -75,16 +52,64 @@ impl Tool for FileEditTool {
     }
     fn require_approval(&self, _args: &Value) -> bool {
         self.approve
+            || _args
+                .get("path")
+                .and_then(Value::as_str)
+                .map(|p| self.path_policy.require_prompt_for_path(p))
+                .unwrap_or(false)
+    }
+    async fn preview(&self, args: &Value) -> Option<ToolPreview> {
+        let args: Args = serde_json::from_value(args.clone()).ok()?;
+        let resolved = self.path_policy.resolve(&args.path);
+        let original = tokio::fs::read_to_string(&resolved.normalized).await.ok()?;
+        let mut working = original.clone();
+        for edit in &args.edits {
+            if edit.old_text.is_empty() || working.matches(&edit.old_text).count() != 1 {
+                return Some(ToolPreview {
+                    summary: format!("Edit {}", resolved.normalized.display()),
+                    diff: None,
+                    risk: Some(
+                        "preview unavailable until each old_text matches exactly once".into(),
+                    ),
+                });
+            }
+            working = working.replacen(&edit.old_text, &edit.new_text, 1);
+        }
+        let mut risk = None;
+        if resolved.outside_workspace {
+            risk = Some(format!(
+                "outside workspace root {}",
+                self.path_policy.root().display()
+            ));
+        }
+        Some(ToolPreview {
+            summary: format!(
+                "Edit {} ({} edits)",
+                resolved.normalized.display(),
+                args.edits.len()
+            ),
+            diff: Some(unified_diff(
+                &original,
+                &working,
+                &resolved.normalized.display().to_string(),
+            )),
+            risk,
+        })
     }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return json!({ "error": format!("invalid args: {e}") }),
         };
-        let original = match tokio::fs::read_to_string(&args.path).await {
+        if let Some(error) = self.path_policy.deny_path(&args.path) {
+            return json!({ "error": error });
+        }
+        let resolved = self.path_policy.resolve(&args.path);
+        let path = resolved.normalized.display().to_string();
+        let original = match tokio::fs::read_to_string(&resolved.normalized).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return json!({ "error": format!("File not found: {}", args.path) });
+                return json!({ "error": format!("File not found: {path}") });
             }
             Err(e) => return json!({ "error": e.to_string() }),
         };
@@ -108,13 +133,13 @@ impl Tool for FileEditTool {
             }
             working = working.replacen(&edit.old_text, &edit.new_text, 1);
         }
-        if let Err(e) = tokio::fs::write(&args.path, working.as_bytes()).await {
+        if let Err(e) = tokio::fs::write(&resolved.normalized, working.as_bytes()).await {
             return json!({ "error": e.to_string() });
         }
         json!({
             "edited": true,
-            "path": args.path,
-            "diff": unified_diff(&original, &working, &args.path),
+            "path": path,
+            "diff": unified_diff(&original, &working, &path),
         })
     }
 }
@@ -163,12 +188,15 @@ mod tests {
         let path = dir.path().join("a.txt");
         tokio::fs::write(&path, "alpha\nbeta\ngamma").await.unwrap();
 
-        let result = FileEditTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "edits": [{ "old_text": "beta", "new_text": "BETA" }]
-            }))
-            .await;
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [{ "old_text": "beta", "new_text": "BETA" }]
+        }))
+        .await;
 
         assert!(result["edited"].as_bool().unwrap());
         let content = tokio::fs::read_to_string(&path).await.unwrap();
@@ -181,12 +209,15 @@ mod tests {
         let path = dir.path().join("a.txt");
         tokio::fs::write(&path, "x\nx\nx").await.unwrap();
 
-        let result = FileEditTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "edits": [{ "old_text": "x", "new_text": "y" }]
-            }))
-            .await;
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [{ "old_text": "x", "new_text": "y" }]
+        }))
+        .await;
         assert!(result["error"].as_str().unwrap().contains("3 times"));
     }
 
@@ -196,12 +227,15 @@ mod tests {
         let path = dir.path().join("a.txt");
         tokio::fs::write(&path, "alpha").await.unwrap();
 
-        let result = FileEditTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "edits": [{ "old_text": "missing", "new_text": "x" }]
-            }))
-            .await;
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [{ "old_text": "missing", "new_text": "x" }]
+        }))
+        .await;
         assert!(result["error"].as_str().unwrap().contains("not found"));
     }
 
@@ -211,15 +245,18 @@ mod tests {
         let path = dir.path().join("a.txt");
         tokio::fs::write(&path, "one two three").await.unwrap();
 
-        let result = FileEditTool { approve: false }
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "edits": [
-                    { "old_text": "one", "new_text": "ONE" },
-                    { "old_text": "three", "new_text": "THREE" }
-                ]
-            }))
-            .await;
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [
+                { "old_text": "one", "new_text": "ONE" },
+                { "old_text": "three", "new_text": "THREE" }
+            ]
+        }))
+        .await;
 
         assert!(result["edited"].as_bool().unwrap());
         let content = tokio::fs::read_to_string(&path).await.unwrap();

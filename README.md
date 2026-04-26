@@ -48,14 +48,14 @@ backend so you can start running without picking weights out of a long list.
 | Local-first | OpenAI-compatible chat completions against Ollama, LM Studio, or MLX, all selectable at runtime |
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
-| Configurable tools | File read/write/edit, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
-| Approval gates | Per-tool prompts with allow-once / allow-this-session / always-allow caching |
+| Configurable tools | File read/write/edit, apply-patch, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
+| Approval gates | Per-tool prompts with diff previews, allow-once / allow-this-session / always-allow caching |
 | Robust parsing | Inline JSON-shaped tool-call detector for small models whose templates skip the `tool_calls` field |
 | Pre-warm at startup | Sends a 1-token request with the full system prompt + tools so the cache is hot before your first prompt |
 | Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
-| Session persistence | JSONL append-only session log under `.sessions/` per conversation |
-| Slash commands | `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/new`, `/help` |
-| Bordered TUI | Clean terminal box input, no terminal-background detection required |
+| Session persistence | JSONL append-only session logs with list, resume, and export commands |
+| Slash commands | `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/eval`, `/new`, `/help` |
+| Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
 
@@ -112,6 +112,9 @@ input box opens, type a question:
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools, set with /tools file_read,grep
 /compare                  run the same prompt against OpenRouter cloud
+/sessions                 list saved JSONL sessions
+/resume latest            resume the newest saved session
+/doctor                   check backend, config, rg, and session storage
 ```
 
 ### 4. Adjust the tool set for speed
@@ -155,13 +158,17 @@ cloud — at the cost of not using the Responses API.
 
 | Tool | Default | Approval | What it does |
 | --- | --- | --- | --- |
-| `file_read` | on | no | Read a file (text or image base64) with optional offset/limit |
+| `apply_patch` | off | yes | Validate and apply a unified diff with `git apply --check` |
+| `file_read` | on | no* | Read a file (text or image base64) with optional offset/limit |
 | `file_edit` | on | yes | Search-and-replace edits with unique-match validation, returns unified diff |
 | `grep` | on | no | Regex search file contents (uses ripgrep) |
-| `list_dir` | on | no | List directory entries, alphabetical, capped at 500 |
+| `list_dir` | on | no* | List directory entries, alphabetical, capped at 500 |
 | `file_write` | off | yes | Write/create a file (overwrites) |
-| `glob` | off | no | Find files by glob pattern |
+| `glob` | off | no* | Find files by glob pattern |
 | `shell` | off | yes | Run a shell command, output capped at 256 KB |
+
+`*` Read-only tools prompt when `outsideWorkspace` is `prompt` and the request
+targets a path outside `workspaceRoot`.
 
 Toggle the active set per session with `/tools`, per shell with the
 `AGENT_TOOLS` env var, or persistently in `agent.config.json`.
@@ -182,14 +189,23 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | Command | Description |
 | --- | --- |
 | `/help` | List available commands |
-| `/new` | Start a fresh conversation (resets approval cache and session file) |
+| `/new` | Start a fresh conversation |
 | `/clear` | Clear the screen |
+| `/config` | Show resolved backend, model, workspace, history, display, and context config |
 | `/session` | Show backend, model, approval policy, session path, message count, total tokens |
+| `/sessions` | List saved sessions under `.sessions/` |
+| `/resume latest\|<id>` | Resume a saved session |
+| `/export current\|<id> [markdown\|json] [path]` | Export a session transcript |
 | `/backend [name]` | Switch backend (`ollama`, `lm-studio`, `mlx`, `openrouter`) |
 | `/profile [name]` | Switch hardware profile (`mac-mini-16gb`, `mac-studio-32gb`) |
 | `/model [id]` | List models from the current backend and pick one, or set directly |
 | `/tools [list]` | Show enabled tools or set them: `/tools file_read,grep,list_dir` |
 | `/compare [model]` | Re-send the last user message to OpenRouter cloud for A/B |
+| `/context [maxMessages=N maxBytes=N]` | Show or adjust context limits |
+| `/compact [keep]` | Summarize older turns into a compact continuation session |
+| `/doctor` | Check backend reachability, model list, `rg`, config, and session storage |
+| `/bench [model]` | Measure warmup, first-token, total latency, and output rate |
+| `/eval [prompt-file] [models]` | Run saved prompts against one or more models with tools off/on |
 | `exit` | Quit |
 
 ## Hardware Profiles
@@ -253,6 +269,16 @@ WARMUP=true
 
 # Maximum agent steps per turn
 AGENT_MAX_STEPS=20
+
+# Workspace safety: prompt (default), deny, allow
+WORKSPACE_ROOT=/path/to/project
+OUTSIDE_WORKSPACE=prompt
+
+# Context/history tuning
+AGENT_CONTEXT_MAX_MESSAGES=40
+AGENT_CONTEXT_MAX_BYTES=262144
+AGENT_HISTORY=true
+AGENT_HISTORY_MAX_ENTRIES=200
 ```
 
 ### `agent.config.json`
@@ -267,6 +293,22 @@ put here can be overridden by env vars or slash commands at runtime.
   "approvalPolicy": "dangerous-only",
   "tools": ["file_read", "file_edit", "grep", "list_dir"],
   "maxSteps": 20,
+  "workspaceRoot": "/path/to/project",
+  "outsideWorkspace": "prompt",
+  "context": {
+    "maxMessages": 40,
+    "maxBytes": 262144
+  },
+  "history": {
+    "enabled": true,
+    "maxEntries": 200
+  },
+  "profiles": {
+    "mac-studio-fast": {
+      "ollama": "qwen2.5-coder:14b",
+      "openrouter": "qwen/qwen-2.5-coder-32b-instruct"
+    }
+  },
   "display": {
     "toolDisplay": "grouped",
     "inputStyle": "bordered",
@@ -280,9 +322,10 @@ put here can be overridden by env vars or slash commands at runtime.
 ### Resolution order
 
 1. Slash command overrides at runtime
-2. Environment variables (`BACKEND`, `PROFILE`, `AGENT_MODEL`, `AGENT_TOOLS`, …)
-3. `agent.config.json` in the working directory
-4. Built-in defaults
+2. Process environment variables (`BACKEND`, `PROFILE`, `AGENT_MODEL`, `AGENT_TOOLS`, …)
+3. `.env.local`, then `.env`
+4. `agent.config.json` in the working directory
+5. Built-in defaults
 
 ## Architecture
 
@@ -296,7 +339,7 @@ put here can be overridden by env vars or slash commands at runtime.
                              v
 +--------------+    +-------------------------+    +-------------------+
 |  config.rs   |--->|        agent.rs         |<-->|   tools/*.rs      |
-|  env + JSON  |    |  chat/completions loop  |    |  serde-typed,     |
+|  dotenv+JSON |    |  chat/completions loop  |    |  serde-typed,     |
 |  + profiles  |    |  streaming + tool calls |    |  approval-gated   |
 +--------------+    +------------+------------+    +-------------------+
                                  |
@@ -310,7 +353,7 @@ put here can be overridden by env vars or slash commands at runtime.
                              v
                 +-------------------------+
                 |   session.rs            |
-                |  JSONL append-only log  |
+                |  JSONL sessions/export  |
                 +-------------------------+
 ```
 
@@ -330,17 +373,17 @@ src/
   main.rs             entry — input loop, loader, approval wiring, warmup
   agent.rs            chat/completions runner with tool calls + streaming
   backends.rs         Ollama / LM Studio / MLX / OpenRouter — endpoint + per-profile defaults
-  config.rs           env + agent.config.json loader
-  approval.rs         y/n/always/session-allow prompt
-  session.rs          JSONL append-only conversation log
+  config.rs           dotenv + agent.config.json loader, workspace/context/history config
+  approval.rs         y/n/always/session-allow prompt with diff previews
+  session.rs          JSONL conversation log, listing, resume, export helpers
   warmup.rs           pre-warm the prompt-eval cache at startup
-  commands.rs         /help /new /clear /session /backend /profile /model /tools /compare
+  commands.rs         slash commands for sessions, config, backends, evals, doctor, bench
   renderer.rs         grouped tool display
   loader.rs           spinner / gradient / minimal loaders
   banner.rs           ASCII banner + dynamic backend/profile/model line
-  input.rs            bordered + plain readers
+  input.rs            bordered + plain readers with history and multi-line input
   openai.rs           wire types + SSE streaming for chat completions
-  tools/              file_read, file_write, file_edit, glob_tool, grep, list_dir, shell
+  tools/              apply_patch, file_read, file_write, file_edit, glob_tool, grep, list_dir, shell
 ```
 
 Quality expectations:

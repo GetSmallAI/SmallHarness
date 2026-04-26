@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::Tool;
+use super::{PathPolicy, Tool};
 
-pub struct FileReadTool;
+pub struct FileReadTool {
+    pub path_policy: PathPolicy,
+}
 
 #[derive(Deserialize)]
 struct Args {
@@ -75,24 +77,35 @@ impl Tool for FileReadTool {
             "required": ["path"]
         })
     }
+    fn require_approval(&self, args: &Value) -> bool {
+        args.get("path")
+            .and_then(Value::as_str)
+            .map(|p| self.path_policy.require_prompt_for_path(p))
+            .unwrap_or(false)
+    }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return json!({ "error": format!("invalid args: {e}") }),
         };
-        if let Some(ext) = image_ext(&args.path) {
-            return match tokio::fs::read(&args.path).await {
+        if let Some(error) = self.path_policy.deny_path(&args.path) {
+            return json!({ "error": error });
+        }
+        let resolved = self.path_policy.resolve(&args.path);
+        let path = resolved.normalized.display().to_string();
+        if let Some(ext) = image_ext(&path) {
+            return match tokio::fs::read(&resolved.normalized).await {
                 Ok(bytes) => json!({
                     "type": "image",
                     "mimeType": format!("image/{ext}"),
                     "data": b64_encode(&bytes),
                 }),
-                Err(e) => map_err(&args.path, e),
+                Err(e) => map_err(&path, e),
             };
         }
-        let content = match tokio::fs::read_to_string(&args.path).await {
+        let content = match tokio::fs::read_to_string(&resolved.normalized).await {
             Ok(c) => c,
-            Err(e) => return map_err(&args.path, e),
+            Err(e) => return map_err(&path, e),
         };
         let lines: Vec<&str> = content.split('\n').collect();
         let total = lines.len();
@@ -158,9 +171,11 @@ mod tests {
             .await
             .unwrap();
 
-        let result = FileReadTool
-            .execute(json!({ "path": path.to_str().unwrap() }))
-            .await;
+        let result = FileReadTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "path": path.to_str().unwrap() }))
+        .await;
 
         assert_eq!(result["content"].as_str().unwrap(), "line1\nline2\nline3");
         assert_eq!(result["totalLines"].as_u64().unwrap(), 3);
@@ -173,13 +188,15 @@ mod tests {
         let path = dir.path().join("a.txt");
         tokio::fs::write(&path, "1\n2\n3\n4\n5").await.unwrap();
 
-        let result = FileReadTool
-            .execute(json!({
-                "path": path.to_str().unwrap(),
-                "offset": 2,
-                "limit": 2
-            }))
-            .await;
+        let result = FileReadTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "offset": 2,
+            "limit": 2
+        }))
+        .await;
 
         assert_eq!(result["content"].as_str().unwrap(), "2\n3");
         assert!(result["truncated"].as_bool().unwrap());
@@ -188,9 +205,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_returns_error() {
-        let result = FileReadTool
-            .execute(json!({ "path": "/nonexistent/path/abc.xyz" }))
-            .await;
+        let result = FileReadTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "path": "/nonexistent/path/abc.xyz" }))
+        .await;
         assert!(result["error"].as_str().unwrap().contains("not found"));
     }
 }

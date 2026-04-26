@@ -7,11 +7,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backends::BackendDescriptor;
+use crate::cancel::CancellationToken;
 use crate::openai::{
     stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolCall, ToolDef, ToolDefFunction,
     ToolFunction,
 };
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolPreview};
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -36,7 +37,7 @@ pub enum AgentEvent {
 
 #[async_trait]
 pub trait ApprovalProvider: Send {
-    async fn approve(&mut self, name: &str, args: &Value) -> bool;
+    async fn approve(&mut self, name: &str, args: &Value, preview: Option<&ToolPreview>) -> bool;
 }
 
 pub struct RunResult {
@@ -106,6 +107,7 @@ pub async fn run_agent<F>(
     max_steps: usize,
     mut on_event: F,
     mut approve: Option<&mut dyn ApprovalProvider>,
+    cancel: Option<CancellationToken>,
 ) -> Result<RunResult>
 where
     F: FnMut(AgentEvent),
@@ -122,6 +124,9 @@ where
     let mut total_out: u32 = 0;
 
     for step in 0..max_steps {
+        if cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false) {
+            break;
+        }
         let req = ChatRequest {
             model,
             messages: &messages,
@@ -141,7 +146,7 @@ where
         let mut buffering_inline = false;
         let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
 
-        stream_chat(http, backend, &req, |chunk| {
+        stream_chat(http, backend, &req, cancel.clone(), |chunk| {
             if let Some(choice) = chunk.choices.first() {
                 if let Some(content) = &choice.delta.content {
                     let was_empty = assistant_text.is_empty();
@@ -245,10 +250,16 @@ where
                 let needs_approval = tool.require_approval(&parsed_args);
                 let mut denied = false;
                 if needs_approval {
+                    let preview = tool.preview(&parsed_args).await;
                     if let Some(provider) = approve.as_deref_mut() {
-                        if !provider.approve(&tc.function.name, &parsed_args).await {
+                        if !provider
+                            .approve(&tc.function.name, &parsed_args, preview.as_ref())
+                            .await
+                        {
                             denied = true;
                         }
+                    } else {
+                        denied = true;
                     }
                 }
                 if denied {
@@ -267,7 +278,7 @@ where
                     });
                     continue;
                 }
-                let result = tool.execute(parsed_args).await;
+                let result = tool.execute_cancelable(parsed_args, cancel.clone()).await;
                 if let Some(s) = result.as_str() {
                     s.to_string()
                 } else {

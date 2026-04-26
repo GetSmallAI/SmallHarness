@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.env` and `.env.local` config loading with process environment variables
+  remaining highest priority.
+- Workspace path policy (`workspaceRoot`, `outsideWorkspace`) for file tools
+  and shell execution.
+- Diff-first approval previews for `file_edit`, `file_write`, and the new
+  approval-gated `apply_patch` tool.
+- Session commands: `/sessions`, `/resume`, and `/export`.
+- Input history persisted under `.sessions/history.jsonl`, arrow-key recall,
+  cursor movement, and Ctrl-J multi-line prompts.
+- Ctrl-C cancellation for active model streams and shell commands.
+- Context and operations commands: `/config`, `/context`, `/compact`,
+  `/doctor`, `/bench`, and `/eval`.
+- Custom profile model maps in `agent.config.json`.
+- Unit coverage for dotenv parsing, session loading, history persistence,
+  workspace policy, and patch application.
+
 ## [0.1.0] - 2026-04-25
 
 First Rust release. Full port of the original TypeScript implementation with

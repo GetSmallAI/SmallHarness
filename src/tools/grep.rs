@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::Tool;
+use super::{PathPolicy, Tool};
 
-pub struct GrepTool;
+pub struct GrepTool {
+    pub path_policy: PathPolicy,
+}
 
 #[derive(Deserialize)]
 struct Args {
@@ -37,6 +39,12 @@ impl Tool for GrepTool {
             "required": ["pattern"]
         })
     }
+    fn require_approval(&self, args: &Value) -> bool {
+        args.get("path")
+            .and_then(Value::as_str)
+            .map(|p| self.path_policy.require_prompt_for_path(p))
+            .unwrap_or(false)
+    }
     async fn execute(&self, args: Value) -> Value {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -56,7 +64,12 @@ impl Tool for GrepTool {
             cmd.args(["--glob", g]);
         }
         cmd.arg(&args.pattern);
-        cmd.arg(args.path.as_deref().unwrap_or("."));
+        let requested = args.path.unwrap_or_else(|| ".".into());
+        if let Some(error) = self.path_policy.deny_path(&requested) {
+            return json!({ "error": error });
+        }
+        let resolved = self.path_policy.resolve(&requested);
+        cmd.arg(resolved.normalized);
         let output = match cmd.output().await {
             Ok(o) => o,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

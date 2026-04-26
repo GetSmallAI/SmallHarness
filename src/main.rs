@@ -2,6 +2,7 @@ mod agent;
 mod approval;
 mod backends;
 mod banner;
+mod cancel;
 mod commands;
 mod config;
 mod input;
@@ -18,9 +19,10 @@ use crate::agent::{run_agent, AgentEvent, ApprovalProvider};
 use crate::approval::ApprovalCache;
 use crate::backends::{backend, default_model, validate, BackendDescriptor};
 use crate::banner::{print_banner, BannerInfo};
+use crate::cancel::CancellationToken;
 use crate::commands::{dispatch, AppState};
 use crate::config::{load_config, InputStyle};
-use crate::input::{bordered_read_line, plain_read_line};
+use crate::input::{bordered_read_line, plain_read_line_with_history, InputHistory};
 use crate::loader::Loader;
 use crate::openai::{build_http_client, list_models, ChatMessage};
 use crate::renderer::TuiRenderer;
@@ -81,16 +83,19 @@ async fn main() -> anyhow::Result<()> {
     }
     let model = default_model(
         &backend_desc,
-        config.profile,
+        &config.profile,
         config.model_override.as_deref(),
+        &config.profiles,
     );
 
-    print_banner(BannerInfo {
-        backend: config.backend.as_str(),
-        profile: config.profile.as_str(),
-        model: &model,
-        approval: config.approval_policy.as_str(),
-    });
+    if config.display.show_banner {
+        print_banner(BannerInfo {
+            backend: config.backend.as_str(),
+            profile: config.profile.as_str(),
+            model: &model,
+            approval: config.approval_policy.as_str(),
+        });
+    }
 
     let probe = probe_backend(&http, &backend_desc).await;
     if let Err(hint) = probe {
@@ -125,6 +130,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     init_session_dir(&config.session_dir)?;
+    let mut input_history = InputHistory::load(
+        config.history_path(),
+        config.history.max_entries,
+        config.history.enabled,
+    );
     let session_path = new_session_path(&config.session_dir);
     let session_dir = config.session_dir.clone();
 
@@ -145,13 +155,20 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         let input = match state.config.display.input_style {
-            InputStyle::Bordered => bordered_read_line().await?,
-            _ => plain_read_line(format!("{GREEN}>{RESET} ")).await?,
+            InputStyle::Bordered => bordered_read_line(input_history.entries().to_vec()).await?,
+            _ => {
+                plain_read_line_with_history(
+                    format!("{GREEN}>{RESET} "),
+                    input_history.entries().to_vec(),
+                )
+                .await?
+            }
         };
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
         }
+        let _ = input_history.push(&input);
 
         if matches!(state.config.display.input_style, InputStyle::Bordered) {
             let cwd = std::env::current_dir()
@@ -171,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(0);
         }
 
-        if trimmed.starts_with('/') {
+        if state.config.slash_commands && trimmed.starts_with('/') {
             if let Err(e) = dispatch(trimmed, &mut state).await {
                 println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
             }
@@ -205,6 +222,24 @@ async fn main() -> anyhow::Result<()> {
         let mut loader_opt = Some(loader);
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+        let cancel_for_signal = cancel.clone();
+        let ctrl_task = tokio::spawn(async move {
+            let mut hits = 0usize;
+            loop {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    break;
+                }
+                hits += 1;
+                if hits == 1 {
+                    cancel_for_signal.cancel();
+                    eprintln!("\n  cancelling current turn… press Ctrl-C again to exit");
+                } else {
+                    std::process::exit(130);
+                }
+            }
+        });
 
         let agent_fut = async {
             let on_event = move |e: AgentEvent| {
@@ -219,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
                 max_steps,
                 on_event,
                 Some(&mut approval_cache as &mut dyn ApprovalProvider),
+                Some(cancel_for_agent),
             )
             .await
         };
@@ -234,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
 
         let before = state.messages.len();
         let (result, _) = tokio::join!(agent_fut, drain_fut);
+        ctrl_task.abort();
 
         if let Some(l) = loader_opt.take() {
             l.stop();

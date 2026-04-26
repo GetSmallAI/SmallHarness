@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::backends::BackendDescriptor;
+use crate::cancel::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -247,6 +248,7 @@ pub async fn stream_chat<F>(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
     req: &ChatRequest<'_>,
+    cancel: Option<CancellationToken>,
     mut on_chunk: F,
 ) -> Result<()>
 where
@@ -269,7 +271,18 @@ where
     }
     let mut stream = resp.bytes_stream();
     let mut parser = SseParser::new();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = if let Some(cancel) = cancel.clone() {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(anyhow!("cancelled")),
+                chunk = stream.next() => chunk,
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk?;
         for ev in parser.feed(&chunk)? {
             match ev {
