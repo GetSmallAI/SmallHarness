@@ -118,3 +118,42 @@ impl Tool for FileEditTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_identical_has_no_hunks() {
+        let d = unified_diff("a\nb\nc", "a\nb\nc", "f.txt");
+        assert_eq!(d, "--- f.txt\n+++ f.txt");
+    }
+
+    #[test]
+    fn diff_single_replacement() {
+        let d = unified_diff("a\nb\nc", "a\nB\nc", "f.txt");
+        assert!(d.contains("-b"));
+        assert!(d.contains("+B"));
+        assert!(d.contains("@@ -2 +2 @@"));
+    }
+
+    #[test]
+    fn diff_includes_added_line() {
+        let d = unified_diff("a\nc", "a\nb\nc", "f.txt");
+        assert!(d.contains("+b"));
+        assert!(d.contains("@@ -2 +2 @@"));
+    }
+
+    #[test]
+    fn diff_includes_removed_line() {
+        let d = unified_diff("a\nb\nc", "a\nc", "f.txt");
+        assert!(d.contains("-b"));
+        assert!(d.contains("@@ -2 +2 @@"));
+    }
+
+    #[test]
+    fn diff_header_uses_path() {
+        let d = unified_diff("x", "y", "/abs/path/foo.rs");
+        assert!(d.starts_with("--- /abs/path/foo.rs\n+++ /abs/path/foo.rs"));
+    }
+}

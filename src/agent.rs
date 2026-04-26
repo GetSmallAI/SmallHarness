@@ -305,3 +305,115 @@ where
         output_tokens: total_out,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names() -> HashSet<String> {
+        ["shell", "file_read", "grep"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn looks_like_tool_call_positives() {
+        assert!(looks_like_start_of_tool_call("{\"name\":"));
+        assert!(looks_like_start_of_tool_call("  {\"name\": \"shell\""));
+        assert!(looks_like_start_of_tool_call("```json\n{\"name\":\"shell\""));
+        assert!(looks_like_start_of_tool_call("```\n{\"name\":"));
+        assert!(looks_like_start_of_tool_call("{name: \"shell\""));
+    }
+
+    #[test]
+    fn looks_like_tool_call_negatives() {
+        assert!(!looks_like_start_of_tool_call("Hello, how can I help?"));
+        assert!(!looks_like_start_of_tool_call(""));
+        assert!(!looks_like_start_of_tool_call("Here's the answer:"));
+        assert!(!looks_like_start_of_tool_call("{not_name: 1}"));
+    }
+
+    #[test]
+    fn parse_inline_arguments_field() {
+        let n = names();
+        let (name, args) = try_parse_inline_tool_call(
+            r#"{"name":"shell","arguments":{"command":"ls"}}"#,
+            &n,
+        )
+        .unwrap();
+        assert_eq!(name, "shell");
+        assert_eq!(args.get("command").unwrap().as_str().unwrap(), "ls");
+    }
+
+    #[test]
+    fn parse_inline_parameters_alias() {
+        let n = names();
+        let (_, args) = try_parse_inline_tool_call(
+            r#"{"name":"shell","parameters":{"command":"pwd"}}"#,
+            &n,
+        )
+        .unwrap();
+        assert_eq!(args.get("command").unwrap().as_str().unwrap(), "pwd");
+    }
+
+    #[test]
+    fn parse_inline_args_alias() {
+        let n = names();
+        let (_, args) =
+            try_parse_inline_tool_call(r#"{"name":"grep","args":{"pattern":"foo"}}"#, &n)
+                .unwrap();
+        assert_eq!(args.get("pattern").unwrap().as_str().unwrap(), "foo");
+    }
+
+    #[test]
+    fn parse_inline_with_json_fence() {
+        let n = names();
+        let r = try_parse_inline_tool_call(
+            "```json\n{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}\n```",
+            &n,
+        );
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn parse_inline_with_bare_fence() {
+        let n = names();
+        let r = try_parse_inline_tool_call(
+            "```\n{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}\n```",
+            &n,
+        );
+        assert!(r.is_some());
+    }
+
+    #[test]
+    fn parse_inline_unknown_tool_returns_none() {
+        let n = names();
+        assert!(try_parse_inline_tool_call(
+            r#"{"name":"unknown_tool","arguments":{}}"#,
+            &n
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_inline_invalid_json_returns_none() {
+        let n = names();
+        assert!(try_parse_inline_tool_call("{name", &n).is_none());
+        assert!(try_parse_inline_tool_call("not json at all", &n).is_none());
+        assert!(try_parse_inline_tool_call("", &n).is_none());
+    }
+
+    #[test]
+    fn parse_inline_missing_name_returns_none() {
+        let n = names();
+        assert!(try_parse_inline_tool_call(r#"{"arguments":{}}"#, &n).is_none());
+    }
+
+    #[test]
+    fn parse_inline_no_args_defaults_to_empty_object() {
+        let n = names();
+        let (_, args) = try_parse_inline_tool_call(r#"{"name":"shell"}"#, &n).unwrap();
+        assert!(args.is_object());
+    }
+}

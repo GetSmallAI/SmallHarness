@@ -155,3 +155,33 @@ impl Tool for ShellTool {
         Value::Object(obj)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dangerous_flags_destructive_commands() {
+        let re = dangerous_re();
+        assert!(re.is_match("rm -rf /"));
+        assert!(re.is_match("rm foo"));
+        assert!(re.is_match("sudo apt install something"));
+        assert!(re.is_match("chmod +x foo"));
+        assert!(re.is_match("chown user:group file"));
+        assert!(re.is_match("dd if=/dev/zero of=/dev/sda"));
+        assert!(re.is_match("mkfs.ext4 /dev/sda1"));
+        assert!(re.is_match("mv -rf src dest"));
+        assert!(re.is_match("cargo install --force foo"));
+    }
+
+    #[test]
+    fn dangerous_misses_safe_commands() {
+        let re = dangerous_re();
+        assert!(!re.is_match("ls -la"));
+        assert!(!re.is_match("echo hello world"));
+        assert!(!re.is_match("cat foo.txt"));
+        assert!(!re.is_match("git status"));
+        assert!(!re.is_match("cargo build --release"));
+        assert!(!re.is_match("npm run dev"));
+    }
+}

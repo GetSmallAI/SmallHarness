@@ -122,3 +122,31 @@ fn map_err(path: &str, e: std::io::Error) -> Value {
         _ => json!({ "error": e.to_string() }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn b64_rfc4648_vectors() {
+        assert_eq!(b64_encode(b""), "");
+        assert_eq!(b64_encode(b"f"), "Zg==");
+        assert_eq!(b64_encode(b"fo"), "Zm8=");
+        assert_eq!(b64_encode(b"foo"), "Zm9v");
+        assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(b64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn image_ext_detection() {
+        assert_eq!(image_ext("a.png"), Some("png"));
+        assert_eq!(image_ext("a.PNG"), Some("png"));
+        assert_eq!(image_ext("a.jpg"), Some("jpeg"));
+        assert_eq!(image_ext("a.jpeg"), Some("jpeg"));
+        assert_eq!(image_ext("a.gif"), Some("gif"));
+        assert_eq!(image_ext("a.webp"), Some("webp"));
+        assert_eq!(image_ext("a.txt"), None);
+        assert_eq!(image_ext("foo"), None);
+    }
+}

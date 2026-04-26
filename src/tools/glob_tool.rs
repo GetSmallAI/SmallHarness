@@ -106,3 +106,31 @@ impl Tool for GlobTool {
         json!({ "matches": matches, "count": count, "truncated": truncated })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn ignored_dirs_match_at_any_depth() {
+        assert!(is_ignored(Path::new("node_modules/foo.js")));
+        assert!(is_ignored(Path::new("a/b/node_modules/c.js")));
+        assert!(is_ignored(Path::new(".git/HEAD")));
+        assert!(is_ignored(Path::new("nested/.git/HEAD")));
+        assert!(is_ignored(Path::new("dist/main.js")));
+    }
+
+    #[test]
+    fn normal_paths_not_ignored() {
+        assert!(!is_ignored(Path::new("src/main.rs")));
+        assert!(!is_ignored(Path::new("docs/notes.md")));
+        assert!(!is_ignored(Path::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn similarly_named_dirs_not_ignored() {
+        assert!(!is_ignored(Path::new("src/distance.rs")));
+        assert!(!is_ignored(Path::new("docs/git-tips.md")));
+    }
+}
