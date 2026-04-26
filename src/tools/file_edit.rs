@@ -156,4 +156,73 @@ mod tests {
         let d = unified_diff("x", "y", "/abs/path/foo.rs");
         assert!(d.starts_with("--- /abs/path/foo.rs\n+++ /abs/path/foo.rs"));
     }
+
+    #[tokio::test]
+    async fn applies_unique_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "alpha\nbeta\ngamma").await.unwrap();
+
+        let result = FileEditTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{ "old_text": "beta", "new_text": "BETA" }]
+            }))
+            .await;
+
+        assert_eq!(result["edited"].as_bool().unwrap(), true);
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "alpha\nBETA\ngamma");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_unique_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "x\nx\nx").await.unwrap();
+
+        let result = FileEditTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{ "old_text": "x", "new_text": "y" }]
+            }))
+            .await;
+        assert!(result["error"].as_str().unwrap().contains("3 times"));
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "alpha").await.unwrap();
+
+        let result = FileEditTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "edits": [{ "old_text": "missing", "new_text": "x" }]
+            }))
+            .await;
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn applies_sequential_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "one two three").await.unwrap();
+
+        let result = FileEditTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "edits": [
+                    { "old_text": "one", "new_text": "ONE" },
+                    { "old_text": "three", "new_text": "THREE" }
+                ]
+            }))
+            .await;
+
+        assert_eq!(result["edited"].as_bool().unwrap(), true);
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "ONE two THREE");
+    }
 }

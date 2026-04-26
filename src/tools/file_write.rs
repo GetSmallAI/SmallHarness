@@ -58,3 +58,63 @@ impl Tool for FileWriteTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writes_file_to_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        let result = FileWriteTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "content": "hello"
+            }))
+            .await;
+        assert_eq!(result["written"].as_bool().unwrap(), true);
+        assert_eq!(result["bytes"].as_u64().unwrap(), 5);
+        let read = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(read, "hello");
+    }
+
+    #[tokio::test]
+    async fn writes_file_creating_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/c/file.txt");
+        let result = FileWriteTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "content": "deep"
+            }))
+            .await;
+        assert_eq!(result["written"].as_bool().unwrap(), true);
+        let read = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(read, "deep");
+    }
+
+    #[tokio::test]
+    async fn write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("o.txt");
+        tokio::fs::write(&path, "old contents").await.unwrap();
+        let _ = FileWriteTool { approve: false }
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "content": "new"
+            }))
+            .await;
+        let read = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(read, "new");
+    }
+
+    #[test]
+    fn approval_field_drives_require_approval() {
+        let t1 = FileWriteTool { approve: true };
+        let t2 = FileWriteTool { approve: false };
+        let v = json!({});
+        assert!(t1.require_approval(&v));
+        assert!(!t2.require_approval(&v));
+    }
+}

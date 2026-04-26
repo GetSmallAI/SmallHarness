@@ -59,3 +59,44 @@ impl Tool for ListDirTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lists_entries_alphabetical_with_dir_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(dir.path().join("subdir"))
+            .await
+            .unwrap();
+
+        let result = ListDirTool
+            .execute(json!({ "path": dir.path().to_str().unwrap() }))
+            .await;
+
+        let entries: Vec<&str> = result["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["a.txt", "b.txt", "subdir/"]);
+        assert_eq!(result["count"].as_u64().unwrap(), 3);
+        assert_eq!(result["truncated"].as_bool().unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn missing_dir_returns_error() {
+        let result = ListDirTool
+            .execute(json!({ "path": "/totally/missing/dir/abc-xyz" }))
+            .await;
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+    }
+}

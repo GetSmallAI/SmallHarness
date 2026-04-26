@@ -149,4 +149,48 @@ mod tests {
         assert_eq!(image_ext("a.txt"), None);
         assert_eq!(image_ext("foo"), None);
     }
+
+    #[tokio::test]
+    async fn reads_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        tokio::fs::write(&path, "line1\nline2\nline3")
+            .await
+            .unwrap();
+
+        let result = FileReadTool
+            .execute(json!({ "path": path.to_str().unwrap() }))
+            .await;
+
+        assert_eq!(result["content"].as_str().unwrap(), "line1\nline2\nline3");
+        assert_eq!(result["totalLines"].as_u64().unwrap(), 3);
+        assert!(result.get("truncated").is_none());
+    }
+
+    #[tokio::test]
+    async fn reads_with_offset_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "1\n2\n3\n4\n5").await.unwrap();
+
+        let result = FileReadTool
+            .execute(json!({
+                "path": path.to_str().unwrap(),
+                "offset": 2,
+                "limit": 2
+            }))
+            .await;
+
+        assert_eq!(result["content"].as_str().unwrap(), "2\n3");
+        assert_eq!(result["truncated"].as_bool().unwrap(), true);
+        assert_eq!(result["nextOffset"].as_u64().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn missing_file_returns_error() {
+        let result = FileReadTool
+            .execute(json!({ "path": "/nonexistent/path/abc.xyz" }))
+            .await;
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+    }
 }
