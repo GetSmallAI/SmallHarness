@@ -321,7 +321,9 @@ mod tests {
     fn looks_like_tool_call_positives() {
         assert!(looks_like_start_of_tool_call("{\"name\":"));
         assert!(looks_like_start_of_tool_call("  {\"name\": \"shell\""));
-        assert!(looks_like_start_of_tool_call("```json\n{\"name\":\"shell\""));
+        assert!(looks_like_start_of_tool_call(
+            "```json\n{\"name\":\"shell\""
+        ));
         assert!(looks_like_start_of_tool_call("```\n{\"name\":"));
         assert!(looks_like_start_of_tool_call("{name: \"shell\""));
     }
@@ -337,11 +339,9 @@ mod tests {
     #[test]
     fn parse_inline_arguments_field() {
         let n = names();
-        let (name, args) = try_parse_inline_tool_call(
-            r#"{"name":"shell","arguments":{"command":"ls"}}"#,
-            &n,
-        )
-        .unwrap();
+        let (name, args) =
+            try_parse_inline_tool_call(r#"{"name":"shell","arguments":{"command":"ls"}}"#, &n)
+                .unwrap();
         assert_eq!(name, "shell");
         assert_eq!(args.get("command").unwrap().as_str().unwrap(), "ls");
     }
@@ -349,11 +349,9 @@ mod tests {
     #[test]
     fn parse_inline_parameters_alias() {
         let n = names();
-        let (_, args) = try_parse_inline_tool_call(
-            r#"{"name":"shell","parameters":{"command":"pwd"}}"#,
-            &n,
-        )
-        .unwrap();
+        let (_, args) =
+            try_parse_inline_tool_call(r#"{"name":"shell","parameters":{"command":"pwd"}}"#, &n)
+                .unwrap();
         assert_eq!(args.get("command").unwrap().as_str().unwrap(), "pwd");
     }
 
@@ -361,8 +359,7 @@ mod tests {
     fn parse_inline_args_alias() {
         let n = names();
         let (_, args) =
-            try_parse_inline_tool_call(r#"{"name":"grep","args":{"pattern":"foo"}}"#, &n)
-                .unwrap();
+            try_parse_inline_tool_call(r#"{"name":"grep","args":{"pattern":"foo"}}"#, &n).unwrap();
         assert_eq!(args.get("pattern").unwrap().as_str().unwrap(), "foo");
     }
 
@@ -389,11 +386,9 @@ mod tests {
     #[test]
     fn parse_inline_unknown_tool_returns_none() {
         let n = names();
-        assert!(try_parse_inline_tool_call(
-            r#"{"name":"unknown_tool","arguments":{}}"#,
-            &n
-        )
-        .is_none());
+        assert!(
+            try_parse_inline_tool_call(r#"{"name":"unknown_tool","arguments":{}}"#, &n).is_none()
+        );
     }
 
     #[test]
