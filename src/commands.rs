@@ -64,6 +64,7 @@ impl AppState {
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "List available commands"),
+    ("/setup", "Run the setup wizard and write agent.config.json"),
     ("/new", "Start a fresh conversation"),
     ("/clear", "Clear the screen"),
     ("/config", "Show resolved configuration"),
@@ -113,6 +114,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
 
     match name {
         "/help" => help(),
+        "/setup" => cmd_setup(state).await?,
         "/new" => cmd_new(state),
         "/clear" => clear_screen(),
         "/config" => cmd_config(state),
@@ -142,6 +144,36 @@ fn help() {
         println!("  {CYAN}{:<12}{RESET} {DIM}{}{RESET}", n, d);
     }
     println!("  {CYAN}{:<12}{RESET} {DIM}Quit{RESET}", "exit");
+}
+
+async fn cmd_setup(state: &mut AppState) -> Result<()> {
+    let Some(config) = crate::setup::run_setup_wizard(&state.config).await? else {
+        return Ok(());
+    };
+    let backend_desc = backend(config.backend);
+    if let Err(e) = validate(&backend_desc) {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}Config saved, but active session stayed on the previous backend: {e}{RESET}"
+        );
+        return Ok(());
+    }
+    let model = default_model(
+        &backend_desc,
+        &config.profile,
+        config.model_override.as_deref(),
+        &config.profiles,
+    );
+    let old_session_dir = state.session_dir.clone();
+    state.config = config;
+    state.backend = backend_desc;
+    state.model = model;
+    state.session_dir = state.config.session_dir.clone();
+    if state.session_dir != old_session_dir {
+        fs::create_dir_all(&state.session_dir)?;
+        state.reset_session();
+    }
+    println!("  {GREEN}✓{RESET} {DIM}active config updated for this session.{RESET}");
+    Ok(())
 }
 
 fn cmd_new(state: &mut AppState) {

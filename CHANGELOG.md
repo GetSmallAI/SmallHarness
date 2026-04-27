@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.1.30] - 2026-04-26
+
 ### Added
 
+- First-run setup wizard that writes `agent.config.json`, chooses backend,
+  hardware profile, model override, approval policy, and tool-selection mode,
+  probes the selected backend, and can be rerun with `/setup`.
+- Documented pre-1.0 commit-count versioning, starting with `0.1.30` for the
+  setup release commit.
 - `llamacpp` backend support for `llama-server` OpenAI-compatible endpoints,
   including `LLAMACPP_BASE_URL`, optional `LLAMACPP_API_KEY`, backend switching,
   docs, and startup troubleshooting hints.

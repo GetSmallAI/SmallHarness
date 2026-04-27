@@ -22,6 +22,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.30-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -46,6 +47,7 @@ backend so you can start running without picking weights out of a long list.
 
 | Area | What you get |
 | --- | --- |
+| First-run setup | Interactive wizard writes `agent.config.json`, picks backend/profile/model, chooses approval/tool mode, and probes the backend |
 | Local-first | OpenAI-compatible chat completions against Ollama, LM Studio, MLX, or llama.cpp, all selectable at runtime |
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
@@ -56,7 +58,7 @@ backend so you can start running without picking weights out of a long list.
 | Efficiency mode | Auto-selects tool schemas per prompt, shows prompt-budget breakdowns, and compacts large tool outputs |
 | Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
 | Session persistence | JSONL append-only session logs with list, resume, and export commands |
-| Slash commands | `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -77,6 +79,10 @@ By default Small Harness talks to Ollama at `http://localhost:11434/v1`. To
 target LM Studio, MLX, or llama.cpp instead, set `BACKEND=lm-studio`,
 `BACKEND=mlx`, or `BACKEND=llamacpp` before running, or use `/backend` once
 the harness is running.
+
+If `agent.config.json` does not exist, the first run opens a short setup
+wizard that writes one for you and probes the selected backend. Set
+`SMALL_HARNESS_NO_WIZARD=true` to skip the wizard and use env/defaults only.
 
 ## Getting Started
 
@@ -99,9 +105,11 @@ LM Studio (already installed), MLX, and llama.cpp are also supported. See
 cargo run --release
 ```
 
-You will see the banner, a backend probe, and a "Warming up" spinner that
-populates the prompt-eval cache so the first prompt isn't slow. When the
-input box opens, type a question:
+On a fresh checkout, the setup wizard asks for backend, hardware profile,
+optional model override, approval policy, and adaptive/fixed tool mode, then
+writes `agent.config.json`. After setup, you will see the banner, a backend
+probe, and a "Warming up" spinner that populates the prompt-eval cache so the
+first prompt isn't slow. When the input box opens, type a question:
 
 ```
 > what files are in src/?
@@ -112,6 +120,7 @@ input box opens, type a question:
 ```
 /backend lm-studio        switch to LM Studio
 /backend llamacpp         switch to llama.cpp
+/setup                    rerun setup and rewrite agent.config.json
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools and auto/fixed selection mode
@@ -200,6 +209,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | Command | Description |
 | --- | --- |
 | `/help` | List available commands |
+| `/setup` | Run the setup wizard, write `agent.config.json`, probe the backend, and apply the new config |
 | `/new` | Start a fresh conversation |
 | `/clear` | Clear the screen |
 | `/config` | Show resolved backend, model, workspace, history, display, and context config |
@@ -294,6 +304,9 @@ AGENT_TOOL_SELECTION=auto
 # Pre-warm the model at startup (default: on)
 WARMUP=true
 
+# Skip first-run setup and rely on env vars / built-in defaults
+SMALL_HARNESS_NO_WIZARD=false
+
 # Maximum agent steps per turn
 AGENT_MAX_STEPS=20
 
@@ -310,8 +323,9 @@ AGENT_HISTORY_MAX_ENTRIES=200
 
 ### `agent.config.json`
 
-For project-level defaults, drop a JSON file in the repo root. Anything you
-put here can be overridden by env vars or slash commands at runtime.
+For project-level defaults, run `/setup` or drop a JSON file in the repo root.
+Anything you put here can be overridden by env vars or slash commands at
+runtime.
 
 ```json
 {
@@ -424,6 +438,14 @@ Quality expectations:
   dangerous shapes — see `shell.rs`).
 - New backends should expose an OpenAI-compatible `/v1/chat/completions`
   endpoint and add a profile-default model map in `backends.rs`.
+
+Versioning:
+
+- Small Harness stays on the `0.1.x` line before a larger product milestone.
+- The patch number tracks the total repo commit count for the release commit.
+  This setup release is `0.1.30`: 29 commits were already on `main`, and the
+  release commit is expected to be commit 30.
+- Release tags should use a leading `v`, for example `v0.1.30`.
 
 ## Troubleshooting
 

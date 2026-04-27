@@ -366,13 +366,13 @@ fn parse_dotenv_file(path: &Path) -> BTreeMap<String, String> {
     out
 }
 
-fn dotenv_values() -> BTreeMap<String, String> {
+pub(crate) fn dotenv_values() -> BTreeMap<String, String> {
     let mut out = parse_dotenv_file(Path::new(".env"));
     out.extend(parse_dotenv_file(Path::new(".env.local")));
     out
 }
 
-fn layered_env(dotenv: &BTreeMap<String, String>, key: &str) -> Option<String> {
+pub(crate) fn layered_env(dotenv: &BTreeMap<String, String>, key: &str) -> Option<String> {
     std::env::var(key).ok().or_else(|| dotenv.get(key).cloned())
 }
 

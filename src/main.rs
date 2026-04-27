@@ -11,6 +11,7 @@ mod loader;
 mod openai;
 mod renderer;
 mod session;
+mod setup;
 mod tools;
 mod warmup;
 
@@ -126,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
+    let setup_base = load_config();
+    let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
     let http = build_http_client();
     let backend_desc = backend(config.backend);
