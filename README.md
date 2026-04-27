@@ -66,7 +66,7 @@ backend so you can start running without picking weights out of a long list.
 You will need Rust (stable, 1.75+) and one local-inference backend running.
 
 ```bash
-git clone https://github.com/morganlinton/SmallHarness.git
+git clone https://github.com/GetSmallAI/SmallHarness.git
 cd SmallHarness
 cp .env.example .env
 cargo run --release
