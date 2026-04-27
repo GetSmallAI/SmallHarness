@@ -10,6 +10,10 @@ use crate::backends::{
     backend, default_model, validate, BackendDescriptor, BackendName, ProfileName,
 };
 use crate::budget::{format_bytes, measure_prompt_budget};
+use crate::capabilities::{
+    self, best_record, recommended_tool_selection, record_score, sorted_records,
+    warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
+};
 use crate::config::{is_tool_name, AgentConfig, ToolSelection, ALL_TOOL_NAMES};
 use crate::input::plain_read_line;
 use crate::openai::{
@@ -96,6 +100,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Summarize older conversation turns"),
     ("/doctor", "Check backend, tools, env, and session storage"),
     ("/bench", "Measure warmup, first-token, and total latency"),
+    ("/capabilities", "Show or refresh model capability cache"),
+    (
+        "/autotune",
+        "Recommend and optionally apply the best cached model",
+    ),
     ("/eval", "Run prompt/model comparison suite"),
 ];
 
@@ -131,6 +140,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/compact" => cmd_compact(&args, state).await?,
         "/doctor" => cmd_doctor(&args, state).await?,
         "/bench" => cmd_bench(&args, state).await?,
+        "/capabilities" => cmd_capabilities(&args, state).await?,
+        "/autotune" => cmd_autotune(&args, state).await?,
         "/eval" => cmd_eval(&args, state).await?,
         other => {
             println!("  {DIM}Unknown command: {other}. Type /help.{RESET}");
@@ -1087,6 +1098,29 @@ fn doctor_warning(row: &DoctorCapabilityRow) -> Option<String> {
     None
 }
 
+fn status_to_cache(status: &ProbeStatus) -> CapabilityStatus {
+    CapabilityStatus {
+        ok: status.ok,
+        detail: status.detail.clone(),
+    }
+}
+
+fn row_to_capability_record(row: &DoctorCapabilityRow, generated_at: &str) -> CapabilityRecord {
+    CapabilityRecord {
+        generated_at: generated_at.into(),
+        backend: row.backend.clone(),
+        base_url: row.base_url.clone(),
+        model: row.model.clone(),
+        models: status_to_cache(&row.models),
+        streaming: status_to_cache(&row.streaming),
+        usage_chunks: status_to_cache(&row.usage_chunks),
+        tool_calls: status_to_cache(&row.tool_calls),
+        inline_tool_json: status_to_cache(&row.inline_tool_json),
+        warning: row.warning.clone(),
+        benchmark: None,
+    }
+}
+
 async fn probe_backend_capabilities(
     state: &AppState,
     backend_desc: BackendDescriptor,
@@ -1258,11 +1292,21 @@ async fn cmd_doctor_deep(state: &AppState, all: bool) -> Result<()> {
         active_backend: state.config.backend.as_str().into(),
         rows,
     };
+    let mut cached = 0usize;
+    for row in &report.rows {
+        let record = row_to_capability_record(row, &report.generated_at);
+        capabilities::save_record(&state.session_dir, record)?;
+        cached += 1;
+    }
     let (json_path, md_path) = save_doctor_report(state, &report)?;
     println!(
         "  {GREEN}✓{RESET} {DIM}doctor report saved → {} and {}{RESET}",
         json_path.display(),
         md_path.display()
+    );
+    println!(
+        "  {GREEN}✓{RESET} {DIM}cached {} capability record(s) under {}/capabilities{RESET}",
+        cached, state.session_dir
     );
     Ok(())
 }
@@ -1301,17 +1345,228 @@ async fn cmd_bench(args: &str, state: &AppState) -> Result<()> {
     })
     .await?;
     let total = start.elapsed();
+    let stats = BenchmarkStats::new(
+        warm_ms,
+        first.map(|d| d.as_millis()),
+        total.as_millis(),
+        chars,
+    );
     let cps = if total.as_secs_f64() > 0.0 {
         chars as f64 / total.as_secs_f64()
     } else {
         0.0
     };
+    let cache_path =
+        capabilities::save_benchmark(&state.session_dir, &state.backend, model, stats)?;
     println!(
         "  {GREEN}✓{RESET} {DIM}warmup={:?} firstToken={:.2}s total={:.2}s charsPerSec={:.1}{RESET}",
         warm_ms.map(|ms| format!("{:.2}s", ms as f64 / 1000.0)),
         first.map(|d| d.as_secs_f64()).unwrap_or(0.0),
         total.as_secs_f64(),
         cps
+    );
+    println!(
+        "  {GREEN}✓{RESET} {DIM}benchmark cached → {}{RESET}",
+        cache_path.display()
+    );
+    Ok(())
+}
+
+async fn refresh_capability_cache(state: &AppState, all: bool) -> Result<Vec<CapabilityRecord>> {
+    let backends: Vec<BackendName> = if all {
+        BackendName::all().to_vec()
+    } else {
+        vec![state.config.backend]
+    };
+    let generated_at = Utc::now().to_rfc3339();
+    let mut records = Vec::new();
+    for name in backends {
+        let backend_desc = if name == state.backend.name {
+            state.backend.clone()
+        } else {
+            backend(name)
+        };
+        println!(
+            "  {DIM}probing {} at {}…{RESET}",
+            backend_desc.name.as_str(),
+            backend_desc.base_url
+        );
+        let row = probe_backend_capabilities(state, backend_desc).await;
+        let record = row_to_capability_record(&row, &generated_at);
+        capabilities::save_record(&state.session_dir, record.clone())?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn short_model(model: &str, width: usize) -> String {
+    if model.chars().count() <= width {
+        return model.into();
+    }
+    let mut out: String = model.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn bench_label(record: &CapabilityRecord) -> String {
+    record
+        .benchmark
+        .as_ref()
+        .map(|bench| {
+            format!(
+                "{:.1} tok/s · {:.2}s first",
+                bench.estimated_tokens_per_sec,
+                bench.first_token_ms.unwrap_or(0) as f64 / 1000.0
+            )
+        })
+        .unwrap_or_else(|| "not benched".into())
+}
+
+fn print_cached_capabilities(records: &[CapabilityRecord]) {
+    println!();
+    println!(
+        "  {BOLD}{:<11}{RESET} {:<28} {:>5} {:<11} {:<10} benchmark",
+        "backend", "model", "score", "tools", "usage"
+    );
+    for record in sorted_records(records) {
+        println!(
+            "  {CYAN}{:<11}{RESET} {:<28} {:>5} {:<11} {:<10} {}",
+            record.backend,
+            short_model(&record.model, 28),
+            record_score(&record),
+            record.tool_path(),
+            mark_cache(&record.usage_chunks),
+            bench_label(&record)
+        );
+        if let Some(warning) = &record.warning {
+            println!("    {YELLOW}!{RESET} {DIM}{warning}{RESET}");
+        }
+    }
+}
+
+fn mark_cache(status: &CapabilityStatus) -> &'static str {
+    if status.ok {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+async fn cmd_capabilities(args: &str, state: &AppState) -> Result<()> {
+    let refresh = args
+        .split_whitespace()
+        .any(|arg| arg == "refresh" || arg == "--refresh");
+    let all = args
+        .split_whitespace()
+        .any(|arg| arg == "all" || arg == "--all");
+    if refresh {
+        let records = refresh_capability_cache(state, all).await?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}cached {} refreshed capability record(s).{RESET}",
+            records.len()
+        );
+    }
+
+    let records = capabilities::load_records(&state.session_dir)?;
+    if records.is_empty() {
+        println!(
+            "  {DIM}No cached capabilities yet. Run /capabilities refresh or /doctor --deep all.{RESET}"
+        );
+        return Ok(());
+    }
+
+    print_cached_capabilities(&records);
+    println!(
+        "  {DIM}cache{RESET} {}",
+        capabilities::cache_dir(&state.session_dir).display()
+    );
+    Ok(())
+}
+
+async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let apply = parts.iter().any(|arg| *arg == "apply" || *arg == "--apply");
+    let include_cloud = parts.iter().any(|arg| *arg == "cloud" || *arg == "--cloud");
+    let refresh = parts
+        .iter()
+        .any(|arg| *arg == "refresh" || *arg == "--refresh");
+    let all = parts.iter().any(|arg| *arg == "all" || *arg == "--all");
+
+    let mut records = capabilities::load_records(&state.session_dir)?;
+    if refresh || records.is_empty() {
+        let refreshed = refresh_capability_cache(state, all).await?;
+        if !refreshed.is_empty() {
+            records = capabilities::load_records(&state.session_dir)?;
+        }
+    }
+
+    let Some(recommendation) = best_record(&records, include_cloud) else {
+        if records.iter().any(CapabilityRecord::is_cloud) && !include_cloud {
+            println!(
+                "  {DIM}Only cloud-capable cached records were found. Re-run with /autotune --cloud to include them.{RESET}"
+            );
+        } else {
+            println!(
+                "  {DIM}No usable cached model yet. Run /autotune refresh all after starting your local backends.{RESET}"
+            );
+        }
+        return Ok(());
+    };
+
+    let tool_selection = recommended_tool_selection(&recommendation);
+    println!("  {BOLD}Autotune recommendation{RESET}");
+    println!(
+        "  {DIM}backend{RESET} {} · {DIM}model{RESET} {}",
+        recommendation.backend, recommendation.model
+    );
+    println!(
+        "  {DIM}score{RESET} {} · {DIM}tools{RESET} {} · {DIM}toolSelection{RESET} {}",
+        record_score(&recommendation),
+        recommendation.tool_path(),
+        tool_selection.as_str()
+    );
+    println!(
+        "  {DIM}bench{RESET} {} · {DIM}warmup{RESET} {}",
+        bench_label(&recommendation),
+        if warmup_recommended(&recommendation) {
+            "recommended"
+        } else {
+            "optional"
+        }
+    );
+    if let Some(warning) = &recommendation.warning {
+        println!("  {YELLOW}!{RESET} {DIM}{warning}{RESET}");
+    }
+
+    if !apply {
+        println!("  {DIM}Run /autotune apply to switch this session to the recommendation.{RESET}");
+        return Ok(());
+    }
+
+    let Some(backend_name) = recommendation.backend_name() else {
+        println!(
+            "  {RED}✗{RESET} {DIM}Cannot apply unknown backend: {}{RESET}",
+            recommendation.backend
+        );
+        return Ok(());
+    };
+    let env_backend = backend(backend_name);
+    if env_backend.base_url != recommendation.base_url {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}cached URL was {}, current env resolves to {}{RESET}",
+            recommendation.base_url, env_backend.base_url
+        );
+    }
+    state.config.backend = backend_name;
+    state.config.model_override = Some(recommendation.model.clone());
+    state.config.tool_selection = tool_selection;
+    state.rebuild_client()?;
+    state.resolve_model();
+    println!(
+        "  {GREEN}✓{RESET} {DIM}active session tuned → {} · {} · tools={}{RESET}",
+        state.config.backend.as_str(),
+        state.model,
+        state.config.tool_selection.as_str()
     );
     Ok(())
 }

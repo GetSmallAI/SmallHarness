@@ -2,12 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Before a larger product milestone, this project uses `0.1.x` versions whose
+patch number matches the release commit count.
 
 ## [Unreleased]
 
 No changes yet.
+
+## [0.1.31] - 2026-04-27
+
+### Added
+
+- Persistent capability cache under `.sessions/capabilities/` for per-backend
+  and per-model probe results, tool-call support, inline JSON fallback support,
+  usage chunk support, warnings, and benchmark stats.
+- `/capabilities [refresh] [all]` to view the cached model scoreboard or refresh
+  active/all backend probes.
+- `/autotune [refresh] [all] [--cloud] [apply]` to score cached models, explain
+  the best fit, and optionally apply the recommended backend/model/tool mode to
+  the active session.
+- `/doctor --deep` and `/bench` now feed the capability cache.
 
 ## [0.1.30] - 2026-04-26
 

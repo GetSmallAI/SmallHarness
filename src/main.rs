@@ -4,6 +4,7 @@ mod backends;
 mod banner;
 mod budget;
 mod cancel;
+mod capabilities;
 mod commands;
 mod config;
 mod input;
