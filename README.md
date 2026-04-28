@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="#quick-install">Quick Install</a> &middot;
+  <a href="Quickstart.md">Quickstart</a> &middot;
   <a href="#getting-started">Getting Started</a> &middot;
   <a href="#features">Features</a> &middot;
   <a href="#backends">Backends</a> &middot;
@@ -76,6 +77,8 @@ cargo run --release
 
 Build a standalone binary with `cargo build --release` — it lands at
 `target/release/small-harness` (~5 MB).
+
+For a guided first session, read [Quickstart.md](Quickstart.md).
 
 By default Small Harness talks to Ollama at `http://localhost:11434/v1`. To
 target LM Studio, MLX, or llama.cpp instead, set `BACKEND=lm-studio`,
