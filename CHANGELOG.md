@@ -10,6 +10,21 @@ patch number matches the release commit count.
 
 No changes yet.
 
+## [0.1.33] - 2026-04-28
+
+### Added
+
+- `/recommend [refresh] [all] [--cloud] [apply]` for hardware-aware model
+  recommendations tuned for local coding-agent use.
+- Safe hardware summary detection for OS, architecture, chip, machine name,
+  memory, and CPU counts, cached under `.sessions/hardware.json` without raw
+  serials, UUIDs, or UDIDs.
+- Model candidate parsing for parameter size and quantization hints, memory-fit
+  scoring, installed/default/cached candidate ranking, and explicit apply
+  behavior for the active session.
+- First-run setup now uses detected hardware memory to choose the default
+  existing hardware profile.
+
 ## [0.1.31] - 2026-04-27
 
 ### Added

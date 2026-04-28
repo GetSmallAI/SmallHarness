@@ -15,9 +15,13 @@ use crate::capabilities::{
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
 };
 use crate::config::{is_tool_name, AgentConfig, ToolSelection, ALL_TOOL_NAMES};
+use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
+};
+use crate::recommend::{
+    apply_recommendation_to_config, recommend_models, ModelCandidate, ModelRecommendation,
 };
 use crate::session::{
     list_sessions, load_messages, load_session, render_markdown, resolve_session_path,
@@ -105,6 +109,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/autotune",
         "Recommend and optionally apply the best cached model",
     ),
+    (
+        "/recommend",
+        "Recommend a model from hardware, installed models, and cached probes",
+    ),
     ("/eval", "Run prompt/model comparison suite"),
 ];
 
@@ -142,6 +150,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/bench" => cmd_bench(&args, state).await?,
         "/capabilities" => cmd_capabilities(&args, state).await?,
         "/autotune" => cmd_autotune(&args, state).await?,
+        "/recommend" => cmd_recommend(&args, state).await?,
         "/eval" => cmd_eval(&args, state).await?,
         other => {
             println!("  {DIM}Unknown command: {other}. Type /help.{RESET}");
@@ -1567,6 +1576,262 @@ async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
         state.config.backend.as_str(),
         state.model,
         state.config.tool_selection.as_str()
+    );
+    Ok(())
+}
+
+fn recommend_backend_names(state: &AppState, all: bool, include_cloud: bool) -> Vec<BackendName> {
+    if all {
+        BackendName::all()
+            .iter()
+            .copied()
+            .filter(|name| include_cloud || *name != BackendName::Openrouter)
+            .collect()
+    } else {
+        vec![state.config.backend]
+    }
+}
+
+async fn refresh_recommendation_capabilities(
+    state: &AppState,
+    all: bool,
+    include_cloud: bool,
+) -> Result<usize> {
+    let generated_at = Utc::now().to_rfc3339();
+    let mut cached = 0usize;
+    for name in recommend_backend_names(state, all, include_cloud) {
+        let backend_desc = if name == state.backend.name {
+            state.backend.clone()
+        } else {
+            backend(name)
+        };
+        println!(
+            "  {DIM}probing {} at {}…{RESET}",
+            backend_desc.name.as_str(),
+            backend_desc.base_url
+        );
+        let row = probe_backend_capabilities(state, backend_desc).await;
+        let record = row_to_capability_record(&row, &generated_at);
+        capabilities::save_record(&state.session_dir, record)?;
+        cached += 1;
+    }
+    Ok(cached)
+}
+
+async fn collect_recommendation_candidates(
+    state: &AppState,
+    spec: &HardwareSpec,
+    all: bool,
+    include_cloud: bool,
+) -> Result<Vec<ModelCandidate>> {
+    let mut candidates = Vec::new();
+    let profile = spec.recommended_profile();
+    for name in recommend_backend_names(state, all, include_cloud) {
+        let backend_desc = if name == state.backend.name {
+            state.backend.clone()
+        } else {
+            backend(name)
+        };
+        let default = default_model(&backend_desc, profile, None, &state.config.profiles);
+        let mut default_candidate =
+            ModelCandidate::new(backend_desc.name, backend_desc.base_url.clone(), default);
+        default_candidate.is_default = true;
+        candidates.push(default_candidate);
+
+        if backend_desc.name == state.backend.name {
+            let mut current = ModelCandidate::new(
+                backend_desc.name,
+                backend_desc.base_url.clone(),
+                &state.model,
+            );
+            current.is_current = true;
+            candidates.push(current);
+        }
+
+        if validate(&backend_desc).is_err() {
+            continue;
+        }
+        let models = match with_probe_timeout(list_models(&state.http, &backend_desc)).await {
+            Ok(models) => models,
+            Err(_) => continue,
+        };
+        for model in models {
+            let mut candidate =
+                ModelCandidate::new(backend_desc.name, backend_desc.base_url.clone(), model);
+            candidate.installed = true;
+            candidates.push(candidate);
+        }
+    }
+
+    for record in capabilities::load_records(&state.session_dir)? {
+        let Some(backend_name) = record.backend_name() else {
+            continue;
+        };
+        if !include_cloud && backend_name == BackendName::Openrouter {
+            continue;
+        }
+        let mut candidate =
+            ModelCandidate::new(backend_name, record.base_url.clone(), record.model.clone());
+        candidate.capability = Some(record);
+        candidates.push(candidate);
+    }
+
+    Ok(candidates)
+}
+
+fn hardware_summary(spec: &HardwareSpec) -> String {
+    let chip = spec.chip_name.as_deref().unwrap_or("unknown chip");
+    let machine = spec.machine_name.as_deref().unwrap_or("unknown machine");
+    format!(
+        "{} {} · {} · {} · {} · profile {}",
+        spec.os,
+        spec.arch,
+        machine,
+        chip,
+        spec.memory_label(),
+        spec.recommended_profile()
+    )
+}
+
+fn model_size_label(rec: &ModelRecommendation) -> String {
+    let size = rec
+        .metadata
+        .parameters_b
+        .map(|params| format!("{params:.0}B"))
+        .unwrap_or_else(|| "unknown size".into());
+    let quant = rec
+        .metadata
+        .quant_bits
+        .map(|bits| format!("q{bits}"))
+        .unwrap_or_else(|| "quant unknown".into());
+    let memory = rec
+        .metadata
+        .estimated_memory_gb
+        .map(|gb| format!("~{gb:.1} GB"))
+        .unwrap_or_else(|| "memory unknown".into());
+    format!("{size} · {quant} · {memory}")
+}
+
+fn backend_model_hint(backend_name: BackendName, model: &str) -> String {
+    match backend_name {
+        BackendName::Ollama => format!("install with `ollama pull {model}`"),
+        BackendName::LmStudio => {
+            "load a matching model in LM Studio, then start the Local Server".into()
+        }
+        BackendName::Mlx => format!("start MLX with `mlx_lm.server --model {model}`"),
+        BackendName::LlamaCpp => {
+            "start llama.cpp with `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja`".into()
+        }
+        BackendName::Openrouter => "set OPENROUTER_API_KEY before using OpenRouter".into(),
+    }
+}
+
+fn print_recommendations(spec: &HardwareSpec, recommendations: &[ModelRecommendation]) {
+    println!("  {BOLD}Hardware-aware recommendation{RESET}");
+    println!("  {DIM}hardware{RESET} {}", hardware_summary(spec));
+    println!(
+        "  {DIM}tier{RESET} {} · {}",
+        spec.tier().as_str(),
+        spec.tier().guidance()
+    );
+    for (idx, rec) in recommendations.iter().take(3).enumerate() {
+        println!();
+        println!(
+            "  {CYAN}{}){RESET} {BOLD}{}{RESET} {DIM}· {}{RESET}",
+            idx + 1,
+            rec.model,
+            rec.backend.as_str()
+        );
+        println!(
+            "     {DIM}score{RESET} {} · {DIM}confidence{RESET} {} · {DIM}fit{RESET} {} · {DIM}installed{RESET} {}",
+            rec.score,
+            rec.confidence.as_str(),
+            rec.memory_fit.as_str(),
+            rec.installed
+        );
+        println!(
+            "     {DIM}size{RESET} {} · {DIM}tools{RESET} {} · {DIM}bench{RESET} {}",
+            model_size_label(rec),
+            rec.tool_path,
+            rec.benchmark_label.as_deref().unwrap_or("not benched")
+        );
+        let why = rec
+            .rationale
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !why.is_empty() {
+            println!("     {DIM}why{RESET} {why}");
+        }
+    }
+}
+
+async fn cmd_recommend(args: &str, state: &mut AppState) -> Result<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let apply = parts.iter().any(|arg| *arg == "apply" || *arg == "--apply");
+    let include_cloud = parts.iter().any(|arg| *arg == "cloud" || *arg == "--cloud");
+    let refresh = parts
+        .iter()
+        .any(|arg| *arg == "refresh" || *arg == "--refresh");
+    let all = parts.iter().any(|arg| *arg == "all" || *arg == "--all");
+
+    let spec = detect_hardware_spec();
+    let hardware_path = save_hardware_summary(&state.session_dir, &spec)?;
+    if refresh || all {
+        let cached = refresh_recommendation_capabilities(state, all, include_cloud).await?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}refreshed {} capability record(s).{RESET}",
+            cached
+        );
+    }
+
+    let candidates = collect_recommendation_candidates(state, &spec, all, include_cloud).await?;
+    let recommendations = recommend_models(&spec, candidates, include_cloud);
+    if recommendations.is_empty() {
+        println!("  {DIM}No model candidates found. Start a local backend, then rerun /recommend refresh.{RESET}");
+        return Ok(());
+    }
+
+    print_recommendations(&spec, &recommendations);
+    println!(
+        "  {DIM}hardware summary cached → {}{RESET}",
+        hardware_path.display()
+    );
+
+    let best = recommendations
+        .first()
+        .expect("checked recommendations is not empty");
+    if !best.installed {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}top recommendation is not installed: {}{RESET}",
+            backend_model_hint(best.backend, &best.model)
+        );
+    }
+
+    if !apply {
+        println!(
+            "  {DIM}Run /recommend apply to switch this session to the top recommendation.{RESET}"
+        );
+        return Ok(());
+    }
+
+    let env_backend = backend(best.backend);
+    if env_backend.base_url != best.base_url {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}recommended URL was {}, current env resolves to {}{RESET}",
+            best.base_url, env_backend.base_url
+        );
+    }
+    apply_recommendation_to_config(&mut state.config, best);
+    state.rebuild_client()?;
+    state.resolve_model();
+    println!(
+        "  {GREEN}✓{RESET} {DIM}active session recommendation applied → {} · {} · profile {}{RESET}",
+        state.config.backend.as_str(),
+        state.model,
+        state.config.profile
     );
     Ok(())
 }

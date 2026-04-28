@@ -104,6 +104,19 @@ Good habits:
 Different local models vary a lot. Small Harness can probe model capabilities,
 cache the results, benchmark latency, and recommend the best cached fit.
 
+Start with a hardware-aware recommendation:
+
+```text
+/recommend
+```
+
+This reads a safe summary of your Mac, ranks installed/default/cached models for
+coding-agent use, and shows the top choices. To refresh probes before ranking:
+
+```text
+/recommend refresh
+```
+
 Run:
 
 ```text
@@ -127,11 +140,12 @@ Then ask for a recommendation:
 Apply the recommendation to the current session:
 
 ```text
-/autotune apply
+/recommend apply
 ```
 
 What Small Harness is checking:
 
+- local chip, architecture, memory, and CPU counts
 - model listing
 - streaming responses
 - usage chunks
@@ -140,11 +154,11 @@ What Small Harness is checking:
 - first-token latency
 - estimated output tokens per second
 
-By default, `/autotune` prefers local backends. To let OpenRouter compete with
+By default, `/recommend` prefers local backends. To let OpenRouter compete with
 local models, use:
 
 ```text
-/autotune --cloud
+/recommend --cloud
 ```
 
 ## A Good First Session
@@ -156,6 +170,7 @@ Here is a simple sequence that exercises the whole product:
 Give me a concise map of this repo.
 /doctor --deep
 /bench
+/recommend
 /capabilities
 /autotune
 Find one small README improvement and propose the exact diff before editing.
@@ -179,7 +194,8 @@ Small Harness keeps local state under `.sessions/`:
   *.jsonl                session transcripts
   doctor/                deep doctor JSON and Markdown reports
   evals/                 eval suite JSON and Markdown reports
+  hardware.json          safe hardware summary, without serials or UUIDs
   capabilities/          per-model capability and benchmark cache
 ```
 
-That local cache is what powers `/capabilities` and `/autotune`.
+That local cache is what powers `/recommend`, `/capabilities`, and `/autotune`.

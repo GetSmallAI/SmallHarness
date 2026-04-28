@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.31-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.33-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -52,6 +52,7 @@ backend so you can start running without picking weights out of a long list.
 | Local-first | OpenAI-compatible chat completions against Ollama, LM Studio, MLX, or llama.cpp, all selectable at runtime |
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
+| Hardware-aware recommendation | `/recommend` reads safe local specs and ranks models for coding-agent use |
 | Capability cache | `/doctor --deep` and `/bench` persist per-backend/model capability and latency records under `.sessions/capabilities/` |
 | Autotune | `/autotune` scores cached models and can switch the active session to the best local fit |
 | Configurable tools | File read/write/edit, apply-patch, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
@@ -61,7 +62,7 @@ backend so you can start running without picking weights out of a long list.
 | Efficiency mode | Auto-selects tool schemas per prompt, shows prompt-budget breakdowns, and compacts large tool outputs |
 | Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
 | Session persistence | JSONL append-only session logs with list, resume, and export commands |
-| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -136,6 +137,7 @@ first prompt isn't slow. When the input box opens, type a question:
 /doctor --deep            probe stream, usage, and tool-call capabilities
 /capabilities             show cached backend/model capability scores
 /autotune                 recommend the best cached local model
+/recommend                recommend a model from hardware + installed models
 ```
 
 ### 4. Adjust the tool set for speed
@@ -236,6 +238,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/bench [model]` | Measure warmup, first-token, total latency, and output rate |
 | `/capabilities [refresh] [all]` | Show cached per-model capability and benchmark records, or refresh the active/all backend probes |
 | `/autotune [refresh] [all] [--cloud] [apply]` | Score cached models, recommend the best fit, and optionally apply it to the active session |
+| `/recommend [refresh] [all] [--cloud] [apply]` | Read safe hardware specs, rank installed/default/cached models, and optionally apply the best fit |
 | `/eval [prompt-file] [models]` | Run saved prompts against one or more models with tools off/on |
 | `exit` | Quit |
 
@@ -247,6 +250,11 @@ capability table.
 `/capabilities` to view the local scoreboard and `/autotune apply` to switch
 the current session to the best cached local model. Add `--cloud` when you want
 OpenRouter records to compete with local models.
+
+`/recommend` is the best first stop when you do not know what to run. It reads
+only a safe hardware summary, caches it at `.sessions/hardware.json`, ranks
+installed/default/cached models for coding-agent use, and applies the top pick
+only when you pass `apply`.
 
 ## Hardware Profiles
 
@@ -432,6 +440,8 @@ src/
   agent.rs            chat/completions runner with tool calls + streaming
   backends.rs         Ollama / LM Studio / MLX / llama.cpp / OpenRouter endpoints + defaults
   config.rs           dotenv + agent.config.json loader, workspace/context/history config
+  hardware.rs         safe local hardware summary + memory-tier profile inference
+  recommend.rs        hardware-aware model candidate parsing, scoring, and apply helpers
   capabilities.rs     persistent model capability cache, scoring, and autotune helpers
   approval.rs         y/n/always/session-allow prompt with diff previews
   session.rs          JSONL conversation log, listing, resume, export helpers
@@ -458,9 +468,9 @@ Versioning:
 
 - Small Harness stays on the `0.1.x` line before a larger product milestone.
 - The patch number tracks the total repo commit count for the release commit.
-  This capability-cache release is `0.1.31`: 30 commits were already on
-  `main`, and the release commit is expected to be commit 31.
-- Release tags should use a leading `v`, for example `v0.1.31`.
+  This recommendation release is `0.1.33`: 32 commits were already on
+  `main`, and the release commit is expected to be commit 33.
+- Release tags should use a leading `v`, for example `v0.1.33`.
 
 ## Troubleshooting
 

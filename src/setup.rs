@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::backends::{backend, default_model, validate, BackendName, ProfileName};
 use crate::config::{dotenv_values, layered_env, AgentConfig, ApprovalPolicy, ToolSelection};
+use crate::hardware::{detect_hardware_spec, save_hardware_summary};
 use crate::input::plain_read_line;
 use crate::openai::{build_http_client, chat_oneshot, list_models, ChatMessage, ChatRequest};
 
@@ -34,6 +35,11 @@ pub fn should_run_first_run_setup(config_path: &Path) -> bool {
 pub async fn maybe_run_first_run_setup(base: &AgentConfig) -> Result<Option<AgentConfig>> {
     if should_run_first_run_setup(Path::new(CONFIG_PATH)) {
         let mut first_run_defaults = base.clone();
+        let spec = detect_hardware_spec();
+        if layered_env(&dotenv_values(), "PROFILE").is_none() {
+            first_run_defaults.profile = spec.recommended_profile().into();
+        }
+        let _ = save_hardware_summary(&first_run_defaults.session_dir, &spec);
         first_run_defaults.approval_policy = ApprovalPolicy::DangerousOnly;
         run_setup_wizard(&first_run_defaults).await
     } else {
