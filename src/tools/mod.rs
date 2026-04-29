@@ -14,6 +14,7 @@ mod glob_tool;
 mod grep;
 mod list_dir;
 mod path_policy;
+mod repo_search;
 mod shell;
 
 pub use apply_patch_tool::ApplyPatchTool;
@@ -24,6 +25,7 @@ pub use glob_tool::GlobTool;
 pub use grep::GrepTool;
 pub use list_dir::ListDirTool;
 pub use path_policy::PathPolicy;
+pub use repo_search::RepoSearchTool;
 pub use shell::ShellTool;
 
 #[derive(Debug, Clone)]
@@ -113,6 +115,9 @@ pub fn select_tool_names(config: &AgentConfig, prompt: &str) -> Vec<String> {
 
     let mut out = Vec::new();
     if fileish || editish {
+        if config.project_memory.enabled {
+            push_if_enabled(&mut out, config, "repo_search");
+        }
         push_if_enabled(&mut out, config, "file_read");
         push_if_enabled(&mut out, config, "grep");
         push_if_enabled(&mut out, config, "list_dir");
@@ -159,6 +164,9 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
             "list_dir" => Some(Arc::new(ListDirTool {
                 path_policy: path_policy.clone(),
             })),
+            "repo_search" => Some(Arc::new(RepoSearchTool {
+                config: config.clone(),
+            })),
             "shell" => Some(Arc::new(ShellTool {
                 policy: config.approval_policy,
                 path_policy: path_policy.clone(),
@@ -197,9 +205,23 @@ mod tests {
             ..Default::default()
         };
         let names = select_tool_names(&config, "search the repo for config");
+        assert!(names.contains(&"repo_search".to_string()));
         assert!(names.contains(&"file_read".to_string()));
         assert!(names.contains(&"grep".to_string()));
         assert!(names.contains(&"list_dir".to_string()));
+    }
+
+    #[test]
+    fn auto_repo_search_requires_memory_enabled() {
+        let config = AgentConfig {
+            project_memory: crate::config::ProjectMemoryConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let names = select_tool_names(&config, "search the repo for config");
+        assert!(!names.contains(&"repo_search".to_string()));
     }
 
     #[test]

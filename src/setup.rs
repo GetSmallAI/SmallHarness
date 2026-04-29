@@ -127,6 +127,7 @@ fn setup_config_value(config: &AgentConfig) -> Value {
     obj.insert("slashCommands".into(), json!(config.slash_commands));
     obj.insert("context".into(), json!(&config.context));
     obj.insert("history".into(), json!(&config.history));
+    obj.insert("projectMemory".into(), json!(&config.project_memory));
     if !config.profiles.is_empty() {
         obj.insert("profiles".into(), json!(config.profiles));
     }
@@ -460,6 +461,7 @@ mod tests {
         assert_eq!(value["toolSelection"], "fixed");
         assert_eq!(value["outsideWorkspace"], "prompt");
         assert_eq!(value["slashCommands"], true);
+        assert_eq!(value["projectMemory"]["enabled"], true);
         assert!(value.get("systemPrompt").is_none());
     }
 

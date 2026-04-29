@@ -20,6 +20,11 @@ use crate::input::plain_read_line;
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
 };
+use crate::project_memory::{
+    append_project_note, build_project_index, clear_project_index, forget_project_note,
+    load_project_index, load_project_notes, project_memory_status, render_repo_map,
+    render_system_prompt_with_memory,
+};
 use crate::recommend::{
     apply_recommendation_to_config, recommend_models, ModelCandidate, ModelRecommendation,
 };
@@ -113,6 +118,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/recommend",
         "Recommend a model from hardware, installed models, and cached probes",
     ),
+    ("/index", "Build, refresh, show, or clear project memory"),
+    ("/map", "Print the project memory repo map or focused hits"),
+    ("/memory", "Turn project memory on/off or show status"),
+    ("/remember", "Save a durable project note"),
+    ("/forget", "Remove a project note"),
     ("/eval", "Run prompt/model comparison suite"),
 ];
 
@@ -151,6 +161,11 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/capabilities" => cmd_capabilities(&args, state).await?,
         "/autotune" => cmd_autotune(&args, state).await?,
         "/recommend" => cmd_recommend(&args, state).await?,
+        "/index" => cmd_index(&args, state)?,
+        "/map" => cmd_map(&args, state)?,
+        "/memory" => cmd_memory(&args, state),
+        "/remember" => cmd_remember(&args, state)?,
+        "/forget" => cmd_forget(&args, state)?,
         "/eval" => cmd_eval(&args, state).await?,
         other => {
             println!("  {DIM}Unknown command: {other}. Type /help.{RESET}");
@@ -255,6 +270,15 @@ fn cmd_config(state: &AppState) {
         state.config.history.enabled,
         state.config.history.max_entries,
         state.config.history_path()
+    );
+    println!(
+        "  {DIM}projectMemory{RESET}    enabled={} autoInject={} autoIndex={} maxFileBytes={} maxInjectedBytes={} allowCloudContext={}",
+        state.config.project_memory.enabled,
+        state.config.project_memory.auto_inject,
+        state.config.project_memory.auto_index,
+        state.config.project_memory.max_file_bytes,
+        state.config.project_memory.max_injected_bytes,
+        state.config.project_memory.allow_cloud_context
     );
     if !state.config.profiles.is_empty() {
         println!(
@@ -694,9 +718,12 @@ fn cmd_context(args: &str, state: &mut AppState) {
     }
     let last_prompt = last_user_prompt(state).unwrap_or_default();
     let active_tool_names = select_tool_names(&state.config, &last_prompt);
-    let system_prompt = state
-        .config
-        .render_system_prompt_for_tools(&active_tool_names);
+    let system_prompt = render_system_prompt_with_memory(
+        &state.config,
+        &state.backend,
+        &active_tool_names,
+        &last_prompt,
+    );
     let tools = build_tools_for_names(&state.config, &active_tool_names);
     let tool_defs = to_openai_tools(&tools);
     let budget = measure_prompt_budget(&system_prompt, &state.messages, &tool_defs);
@@ -733,6 +760,150 @@ fn cmd_context(args: &str, state: &mut AppState) {
         "  {DIM}limits{RESET}    maxMessages={:?} maxBytes={:?}",
         state.config.context.max_messages, state.config.context.max_bytes
     );
+}
+
+fn cmd_index(args: &str, state: &AppState) -> Result<()> {
+    let arg = args.trim();
+    match arg {
+        "" => {
+            let status = project_memory_status(&state.config)?;
+            if status.exists {
+                print_project_memory_status(&status);
+            } else {
+                let index = build_project_index(&state.config)?;
+                print_index_built(&index);
+            }
+        }
+        "status" => {
+            let status = project_memory_status(&state.config)?;
+            print_project_memory_status(&status);
+        }
+        "refresh" => {
+            let index = build_project_index(&state.config)?;
+            print_index_built(&index);
+        }
+        "clear" => {
+            if clear_project_index(&state.config)? {
+                println!("  {GREEN}✓{RESET} {DIM}project memory index cleared.{RESET}");
+            } else {
+                println!("  {DIM}No project memory index to clear.{RESET}");
+            }
+        }
+        other => println!("  {DIM}Usage: /index [refresh|status|clear] (got {other}){RESET}"),
+    }
+    Ok(())
+}
+
+fn print_index_built(index: &crate::project_memory::ProjectIndex) {
+    println!(
+        "  {GREEN}✓{RESET} {DIM}indexed {} files under {}{RESET}",
+        index.files.len(),
+        index.workspace_root
+    );
+    println!(
+        "  {DIM}skipped{RESET} ignored={} oversized={} binary={} outside={} errors={}",
+        index.skipped.ignored,
+        index.skipped.oversized,
+        index.skipped.binary,
+        index.skipped.outside_workspace,
+        index.skipped.read_errors
+    );
+}
+
+fn print_project_memory_status(status: &crate::project_memory::ProjectMemoryStatus) {
+    if status.exists {
+        println!(
+            "  {GREEN}✓{RESET} {DIM}project memory index:{RESET} {}",
+            status.path.display()
+        );
+        println!(
+            "  {DIM}files{RESET} {}  {DIM}bytes{RESET} {}  {DIM}generated{RESET} {}",
+            status.files,
+            status.bytes,
+            status.generated_at.as_deref().unwrap_or("unknown")
+        );
+    } else {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}project memory index missing:{RESET} {}",
+            status.path.display()
+        );
+        println!("  {DIM}Run /index to build it.{RESET}");
+    }
+}
+
+fn cmd_map(args: &str, state: &AppState) -> Result<()> {
+    let Some(index) = load_project_index(&state.config)? else {
+        println!("  {YELLOW}!{RESET} {DIM}project memory index missing. Run /index first.{RESET}");
+        return Ok(());
+    };
+    let notes = load_project_notes(&state.config)?;
+    let query = if args.trim().is_empty() {
+        None
+    } else {
+        Some(args.trim())
+    };
+    let map = render_repo_map(&state.config, &index, &notes, query);
+    print!("{}", map.content);
+    if map.truncated {
+        println!("  {DIM}map truncated at {} bytes{RESET}", map.bytes);
+    }
+    Ok(())
+}
+
+fn cmd_memory(args: &str, state: &mut AppState) {
+    match args.trim() {
+        "" | "status" => {
+            println!(
+                "  {DIM}projectMemory{RESET} enabled={} autoInject={} autoIndex={} allowCloudContext={}",
+                state.config.project_memory.enabled,
+                state.config.project_memory.auto_inject,
+                state.config.project_memory.auto_index,
+                state.config.project_memory.allow_cloud_context
+            );
+            if let Ok(status) = project_memory_status(&state.config) {
+                print_project_memory_status(&status);
+            }
+        }
+        "on" => {
+            state.config.project_memory.enabled = true;
+            println!("  {GREEN}✓{RESET} {DIM}project memory enabled for this session.{RESET}");
+        }
+        "off" => {
+            state.config.project_memory.enabled = false;
+            println!("  {GREEN}✓{RESET} {DIM}project memory disabled for this session.{RESET}");
+        }
+        other => println!("  {DIM}Usage: /memory [on|off|status] (got {other}){RESET}"),
+    }
+}
+
+fn cmd_remember(args: &str, state: &AppState) -> Result<()> {
+    if args.trim().is_empty() {
+        println!("  {DIM}Usage: /remember <project note>{RESET}");
+        return Ok(());
+    }
+    let note = append_project_note(&state.config, args)?;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}remembered{RESET} {CYAN}{}{RESET}",
+        note.id
+    );
+    Ok(())
+}
+
+fn cmd_forget(args: &str, state: &AppState) -> Result<()> {
+    let id = args.trim();
+    if id.is_empty() {
+        println!("  {DIM}Usage: /forget <id|all>{RESET}");
+        return Ok(());
+    }
+    let removed = forget_project_note(&state.config, id)?;
+    if id == "all" {
+        println!("  {GREEN}✓{RESET} {DIM}forgot all project notes.{RESET}");
+    } else if removed == 0 {
+        println!("  {YELLOW}!{RESET} {DIM}project note not found: {id}{RESET}");
+    } else {
+        println!("  {GREEN}✓{RESET} {DIM}forgot project note {id}.{RESET}");
+    }
+    Ok(())
 }
 
 async fn summarize_messages(state: &AppState, older: &[ChatMessage]) -> Result<String> {
@@ -1987,6 +2158,26 @@ async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn test_state(root: &Path) -> AppState {
+        let mut config = AgentConfig {
+            workspace_root: root.display().to_string(),
+            session_dir: root.join(".sessions").display().to_string(),
+            ..Default::default()
+        };
+        config.project_memory.max_injected_bytes = 1024;
+        AppState {
+            http: reqwest::Client::new(),
+            backend: backend(config.backend),
+            model: "test-model".into(),
+            messages: Vec::new(),
+            session_dir: config.session_dir.clone(),
+            session_path: root.join(".sessions/test.jsonl"),
+            total_in: 0,
+            total_out: 0,
+            config,
+        }
+    }
+
     #[test]
     fn detects_inline_tool_json_for_doctor_noop() {
         assert!(looks_like_inline_tool_json(
@@ -2012,5 +2203,36 @@ mod tests {
             warning: None,
         };
         assert!(doctor_warning(&row).unwrap().contains("--jinja"));
+    }
+
+    #[test]
+    fn memory_commands_toggle_and_persist_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+
+        cmd_memory("off", &mut state);
+        assert!(!state.config.project_memory.enabled);
+        cmd_memory("on", &mut state);
+        assert!(state.config.project_memory.enabled);
+
+        cmd_remember("Entry point is src/main.rs", &state).unwrap();
+        let notes = load_project_notes(&state.config).unwrap();
+        assert_eq!(notes.len(), 1);
+        cmd_forget(&notes[0].id, &state).unwrap();
+        assert!(load_project_notes(&state.config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn index_command_builds_maps_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let state = test_state(dir.path());
+
+        cmd_index("", &state).unwrap();
+        assert!(load_project_index(&state.config).unwrap().is_some());
+        cmd_map("main", &state).unwrap();
+        cmd_index("clear", &state).unwrap();
+        assert!(load_project_index(&state.config).unwrap().is_none());
     }
 }

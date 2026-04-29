@@ -12,6 +12,7 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "list_dir",
+    "repo_search",
     "shell",
 ];
 
@@ -206,6 +207,49 @@ impl Default for HistoryConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMemoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "autoInject", default = "default_true")]
+    pub auto_inject: bool,
+    #[serde(rename = "autoIndex", default)]
+    pub auto_index: bool,
+    #[serde(
+        rename = "maxFileBytes",
+        default = "default_project_memory_max_file_bytes"
+    )]
+    pub max_file_bytes: usize,
+    #[serde(
+        rename = "maxInjectedBytes",
+        default = "default_project_memory_max_injected_bytes"
+    )]
+    pub max_injected_bytes: usize,
+    #[serde(rename = "allowCloudContext", default)]
+    pub allow_cloud_context: bool,
+}
+
+fn default_project_memory_max_file_bytes() -> usize {
+    512 * 1024
+}
+
+fn default_project_memory_max_injected_bytes() -> usize {
+    8 * 1024
+}
+
+impl Default for ProjectMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_inject: true,
+            auto_index: false,
+            max_file_bytes: default_project_memory_max_file_bytes(),
+            max_injected_bytes: default_project_memory_max_injected_bytes(),
+            allow_cloud_context: false,
+        }
+    }
+}
+
 pub type ProfileModels = BTreeMap<String, String>;
 
 #[derive(Debug, Clone)]
@@ -225,6 +269,7 @@ pub struct AgentConfig {
     pub slash_commands: bool,
     pub context: ContextConfig,
     pub history: HistoryConfig,
+    pub project_memory: ProjectMemoryConfig,
     pub profiles: BTreeMap<String, ProfileModels>,
 }
 
@@ -267,12 +312,14 @@ impl Default for AgentConfig {
                 "file_edit".into(),
                 "grep".into(),
                 "list_dir".into(),
+                "repo_search".into(),
             ],
             tool_selection: ToolSelection::Auto,
             display: DisplayConfig::default(),
             slash_commands: true,
             context: ContextConfig::default(),
             history: HistoryConfig::default(),
+            project_memory: ProjectMemoryConfig::default(),
             profiles: BTreeMap::new(),
         }
     }
@@ -304,6 +351,8 @@ struct FileConfig {
     slash_commands: Option<bool>,
     context: Option<ContextConfig>,
     history: Option<HistoryConfig>,
+    #[serde(rename = "projectMemory")]
+    project_memory: Option<ProjectMemoryConfig>,
     profiles: Option<BTreeMap<String, ProfileModels>>,
 }
 
@@ -443,6 +492,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(h) = file.history {
                     config.history = h;
+                }
+                if let Some(p) = file.project_memory {
+                    config.project_memory = p;
                 }
                 if let Some(p) = file.profiles {
                     config.profiles = p;

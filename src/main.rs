@@ -11,6 +11,7 @@ mod hardware;
 mod input;
 mod loader;
 mod openai;
+mod project_memory;
 mod recommend;
 mod renderer;
 mod session;
@@ -32,6 +33,10 @@ use crate::config::{load_config, InputStyle};
 use crate::input::{bordered_read_line, plain_read_line_with_history, InputHistory};
 use crate::loader::Loader;
 use crate::openai::{build_http_client, list_models, ChatMessage};
+use crate::project_memory::{
+    build_project_index, load_project_index, prompt_looks_repo_related,
+    render_system_prompt_with_memory,
+};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, new_session_path, save_message};
 use crate::tools::{build_tools_for_names, select_tool_names};
@@ -261,10 +266,23 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
+        if state.config.project_memory.enabled
+            && state.config.project_memory.auto_index
+            && prompt_looks_repo_related(trimmed)
+            && load_project_index(&state.config).ok().flatten().is_none()
+        {
+            if let Err(e) = build_project_index(&state.config) {
+                println!("  {YELLOW}!{RESET} {DIM}project memory auto-index skipped: {e}{RESET}");
+            }
+        }
+
         let active_tool_names = select_tool_names(&state.config, trimmed);
-        let system_prompt = state
-            .config
-            .render_system_prompt_for_tools(&active_tool_names);
+        let system_prompt = render_system_prompt_with_memory(
+            &state.config,
+            &state.backend,
+            &active_tool_names,
+            trimmed,
+        );
         if set_system_message(&mut state.messages, system_prompt.clone()) {
             if let Some(sys) = state.messages.first() {
                 let _ = save_message(&state.session_path, sys);

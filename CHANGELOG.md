@@ -10,6 +10,22 @@ patch number matches the release commit count.
 
 No changes yet.
 
+## [0.1.34] - 2026-04-29
+
+### Added
+
+- Local project memory under `.sessions/project-memory/`, with a metadata-only
+  repo index that honors `.gitignore`, skips secret/env files, binaries,
+  oversized files, `.git`, `.sessions`, `target`, and `node_modules`.
+- `/index`, `/map`, `/memory`, `/remember`, and `/forget` commands for building,
+  inspecting, toggling, and annotating project memory.
+- `repo_search` tool for ranked indexed-file lookup with symbols, headings,
+  imports, reasons, and short on-demand snippets.
+- Smart local repo-map injection for repo/code prompts, disabled for cloud
+  backends unless `projectMemory.allowCloudContext` is explicitly enabled.
+- Deterministic extraction for Rust, Python, TypeScript/JavaScript, Markdown,
+  JSON, TOML, and generic text files.
+
 ## [0.1.33] - 2026-04-28
 
 ### Added

@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.33-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.1.34-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -53,16 +53,17 @@ backend so you can start running without picking weights out of a long list.
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
 | Hardware-aware recommendation | `/recommend` reads safe local specs and ranks models for coding-agent use |
+| Project memory | `/index` builds a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
 | Capability cache | `/doctor --deep` and `/bench` persist per-backend/model capability and latency records under `.sessions/capabilities/` |
 | Autotune | `/autotune` scores cached models and can switch the active session to the best local fit |
-| Configurable tools | File read/write/edit, apply-patch, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
+| Configurable tools | File read/write/edit, apply-patch, repo-search, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
 | Approval gates | Per-tool prompts with diff previews, allow-once / allow-this-session / always-allow caching |
 | Robust parsing | Inline JSON-shaped tool-call detector for small models whose templates skip the `tool_calls` field |
 | Pre-warm at startup | Sends a 1-token request with the full system prompt + tools so the cache is hot before your first prompt |
 | Efficiency mode | Auto-selects tool schemas per prompt, shows prompt-budget breakdowns, and compacts large tool outputs |
 | Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
 | Session persistence | JSONL append-only session logs with list, resume, and export commands |
-| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -138,6 +139,8 @@ first prompt isn't slow. When the input box opens, type a question:
 /capabilities             show cached backend/model capability scores
 /autotune                 recommend the best cached local model
 /recommend                recommend a model from hardware + installed models
+/index                    build or show the local project memory index
+/map                      print a repo map or focused project-memory hits
 ```
 
 ### 4. Adjust the tool set for speed
@@ -158,7 +161,7 @@ The `tools` list is the allowed pool:
 Or set persistently in `agent.config.json`:
 
 ```json
-{ "tools": ["file_read", "file_edit", "grep", "list_dir"] }
+{ "tools": ["file_read", "file_edit", "grep", "list_dir", "repo_search"] }
 ```
 
 ## Backends
@@ -192,6 +195,7 @@ also exposes newer endpoints.
 | `file_edit` | on | yes | Search-and-replace edits with unique-match validation, returns unified diff |
 | `grep` | on | no | Regex search file contents (uses ripgrep) |
 | `list_dir` | on | no* | List directory entries, alphabetical, capped at 500 |
+| `repo_search` | on | no | Search the local project memory index for ranked files, symbols, and snippets |
 | `file_write` | off | yes | Write/create a file (overwrites) |
 | `glob` | off | no* | Find files by glob pattern |
 | `shell` | off | yes | Run a shell command, output capped at 256 KB |
@@ -239,6 +243,11 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/capabilities [refresh] [all]` | Show cached per-model capability and benchmark records, or refresh the active/all backend probes |
 | `/autotune [refresh] [all] [--cloud] [apply]` | Score cached models, recommend the best fit, and optionally apply it to the active session |
 | `/recommend [refresh] [all] [--cloud] [apply]` | Read safe hardware specs, rank installed/default/cached models, and optionally apply the best fit |
+| `/index [refresh\|status\|clear]` | Build, show, refresh, or clear the safe local project memory index |
+| `/map [query]` | Print a compact repo map or focused project-memory hits |
+| `/memory [on\|off\|status]` | Toggle project memory for the active session |
+| `/remember <text>` | Save a durable local project note |
+| `/forget <id\|all>` | Remove one project note or clear all notes |
 | `/eval [prompt-file] [models]` | Run saved prompts against one or more models with tools off/on |
 | `exit` | Quit |
 
@@ -255,6 +264,22 @@ OpenRouter records to compete with local models.
 only a safe hardware summary, caches it at `.sessions/hardware.json`, ranks
 installed/default/cached models for coding-agent use, and applies the top pick
 only when you pass `apply`.
+
+## Project Memory
+
+Run `/index` from the project root to build a safe local memory index under
+`.sessions/project-memory/index.json`. The index stores metadata only: relative
+paths, language, byte size, mtime, SHA-256, symbols, headings, imports, and
+capped keyword terms. It honors `.gitignore` and skips `.git`, `.sessions`,
+`target`, `node_modules`, binaries, oversized files, and common secret/env
+files.
+
+Use `/map` for a compact repo map, `/map config loader` for focused hits, and
+`/remember <text>` for durable project notes saved to
+`.sessions/project-memory/notes.jsonl`. When project memory is enabled,
+Small Harness can inject a compact local repo map into repo/code prompts and can
+use the `repo_search` tool before heavier grep/list/read calls. Cloud backends
+do not receive project memory unless `projectMemory.allowCloudContext` is true.
 
 ## Hardware Profiles
 
@@ -317,8 +342,9 @@ OPENROUTER_API_KEY=sk-or-...
 # Approval policy: always (default) | never | dangerous-only
 APPROVAL_POLICY=always
 
-# Active tools, comma-separated. Default: file_read,file_edit,grep,list_dir
-AGENT_TOOLS=file_read,file_edit,grep,list_dir
+# Active tools, comma-separated. Default:
+# file_read,file_edit,grep,list_dir,repo_search
+AGENT_TOOLS=file_read,file_edit,grep,list_dir,repo_search
 
 # Tool schema selection: auto (default) or fixed
 AGENT_TOOL_SELECTION=auto
@@ -354,7 +380,7 @@ runtime.
   "backend": "ollama",
   "profile": "mac-mini-16gb",
   "approvalPolicy": "dangerous-only",
-  "tools": ["file_read", "file_edit", "grep", "list_dir"],
+  "tools": ["file_read", "file_edit", "grep", "list_dir", "repo_search"],
   "toolSelection": "auto",
   "maxSteps": 20,
   "workspaceRoot": "/path/to/project",
@@ -366,6 +392,14 @@ runtime.
   "history": {
     "enabled": true,
     "maxEntries": 200
+  },
+  "projectMemory": {
+    "enabled": true,
+    "autoInject": true,
+    "autoIndex": false,
+    "maxFileBytes": 524288,
+    "maxInjectedBytes": 8192,
+    "allowCloudContext": false
   },
   "profiles": {
     "mac-studio-fast": {
@@ -439,8 +473,9 @@ src/
   main.rs             entry — input loop, loader, approval wiring, warmup
   agent.rs            chat/completions runner with tool calls + streaming
   backends.rs         Ollama / LM Studio / MLX / llama.cpp / OpenRouter endpoints + defaults
-  config.rs           dotenv + agent.config.json loader, workspace/context/history config
+  config.rs           dotenv + agent.config.json loader, workspace/context/history/memory config
   hardware.rs         safe local hardware summary + memory-tier profile inference
+  project_memory.rs   local repo index, notes, repo maps, and prompt-context injection
   recommend.rs        hardware-aware model candidate parsing, scoring, and apply helpers
   capabilities.rs     persistent model capability cache, scoring, and autotune helpers
   approval.rs         y/n/always/session-allow prompt with diff previews
@@ -452,7 +487,7 @@ src/
   banner.rs           ASCII banner + dynamic backend/profile/model line
   input.rs            bordered + plain readers with history and multi-line input
   openai.rs           wire types + SSE streaming for chat completions
-  tools/              apply_patch, file_read, file_write, file_edit, glob_tool, grep, list_dir, shell
+  tools/              apply_patch, file_read, file_write, file_edit, glob_tool, grep, list_dir, repo_search, shell
 ```
 
 Quality expectations:
@@ -468,9 +503,9 @@ Versioning:
 
 - Small Harness stays on the `0.1.x` line before a larger product milestone.
 - The patch number tracks the total repo commit count for the release commit.
-  This recommendation release is `0.1.33`: 32 commits were already on
-  `main`, and the release commit is expected to be commit 33.
-- Release tags should use a leading `v`, for example `v0.1.33`.
+  This project-memory release is `0.1.34`: 33 commits were already on
+  `main`, and the release commit is expected to be commit 34.
+- Release tags should use a leading `v`, for example `v0.1.34`.
 
 ## Troubleshooting
 

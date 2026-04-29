@@ -37,6 +37,13 @@ tool mode: auto
 Small Harness is most useful when you let it inspect files directly instead of
 pasting code into chat. Start with a broad map, then ask narrower questions.
 
+Build the local project memory index first:
+
+```text
+/index
+/map
+```
+
 Try:
 
 ```text
@@ -57,11 +64,13 @@ Useful commands:
 /config       show the active backend, model, tools, workspace, and history
 /tools        show enabled tools and whether adaptive tool selection is on
 /context      show prompt budget and active tool schemas
+/map          show the local project memory repo map
 ```
 
 What to look for:
 
 - Small Harness should use read/search/list tools only when needed.
+- For repo/code questions, `repo_search` should help it find likely files fast.
 - With `toolSelection: "auto"`, ordinary chat should avoid sending tool schemas.
 - The answer should cite concrete files and functions, not just guess.
 
@@ -192,10 +201,14 @@ Small Harness keeps local state under `.sessions/`:
 .sessions/
   history.jsonl          input history
   *.jsonl                session transcripts
+  project-memory/
+    index.json           safe metadata-only repo index
+    notes.jsonl          durable project notes from /remember
   doctor/                deep doctor JSON and Markdown reports
   evals/                 eval suite JSON and Markdown reports
   hardware.json          safe hardware summary, without serials or UUIDs
   capabilities/          per-model capability and benchmark cache
 ```
 
-That local cache is what powers `/recommend`, `/capabilities`, and `/autotune`.
+That local cache powers `/recommend`, `/capabilities`, `/autotune`, `/map`, and
+`repo_search`.
