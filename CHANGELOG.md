@@ -10,6 +10,29 @@ patch number matches the release commit count.
 
 No changes yet.
 
+## [0.2.0] - 2026-04-29
+
+### Added
+
+- Project memory freshness checks with `/index status`, changed-file refresh,
+  and automatic refresh after successful file mutation tools.
+- Operator modes with `/mode explore`, `/mode edit`, `/mode ship`, and
+  `/mode review` presets for tool sets, approvals, and step budgets.
+- Session lifecycle improvements: inferred/settable titles, `/sessions search`,
+  confirmed session deletion, and safe pruning of old sessions.
+- Non-interactive one-shot mode via `--print`, `-p`, or piped stdin, with
+  explicit `--allow-tools` approval for write/shell tool execution.
+- Reasoning stream support for OpenAI-compatible chunks that expose
+  `reasoning`, `reasoning_content`, or `thinking` deltas.
+
+### Changed
+
+- Bumped the product line to `0.2.0` for the broader release scope.
+
+### Tests
+
+- Added mock OpenAI-compatible SSE coverage for streamed tool-call deltas.
+
 ## [0.1.34] - 2026-04-29
 
 ### Added

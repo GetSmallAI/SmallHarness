@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.34-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -53,7 +53,8 @@ backend so you can start running without picking weights out of a long list.
 | Cloud comparison | One-key A/B against any OpenRouter model with `/compare` |
 | Hardware profiles | `mac-mini-16gb` and `mac-studio-32gb` map to model defaults sized for the box |
 | Hardware-aware recommendation | `/recommend` reads safe local specs and ranks models for coding-agent use |
-| Project memory | `/index` builds a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
+| Project memory | `/index` builds and refreshes a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
+| Operator modes | `/mode explore`, `/mode edit`, `/mode ship`, and `/mode review` tune tools, approvals, and step budgets |
 | Capability cache | `/doctor --deep` and `/bench` persist per-backend/model capability and latency records under `.sessions/capabilities/` |
 | Autotune | `/autotune` scores cached models and can switch the active session to the best local fit |
 | Configurable tools | File read/write/edit, apply-patch, repo-search, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
@@ -61,9 +62,10 @@ backend so you can start running without picking weights out of a long list.
 | Robust parsing | Inline JSON-shaped tool-call detector for small models whose templates skip the `tool_calls` field |
 | Pre-warm at startup | Sends a 1-token request with the full system prompt + tools so the cache is hot before your first prompt |
 | Efficiency mode | Auto-selects tool schemas per prompt, shows prompt-budget breakdowns, and compacts large tool outputs |
-| Streaming output | Tokens stream as they arrive, with a grouped tool-call display |
-| Session persistence | JSONL append-only session logs with list, resume, and export commands |
-| Slash commands | `/setup`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
+| Streaming output | Tokens stream as they arrive, with grouped tool-call display and optional reasoning deltas |
+| Session persistence | JSONL append-only session logs with titles, search, resume, delete, prune, and export commands |
+| One-shot mode | `small-harness --print "prompt"` or piped stdin for scripts and CI |
+| Slash commands | `/setup`, `/mode`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -128,11 +130,14 @@ first prompt isn't slow. When the input box opens, type a question:
 /backend lm-studio        switch to LM Studio
 /backend llamacpp         switch to llama.cpp
 /setup                    rerun setup and rewrite agent.config.json
+/mode explore             use read/search-only defaults
+/mode ship                enable edit + shell with dangerous approvals
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools and auto/fixed selection mode
 /compare                  run the same prompt against OpenRouter cloud
-/sessions                 list saved JSONL sessions
+/sessions                 list titled JSONL sessions
+/sessions search config   search saved sessions
 /resume latest            resume the newest saved session
 /doctor                   check backend, config, rg, and session storage
 /doctor --deep            probe stream, usage, and tool-call capabilities
@@ -140,6 +145,7 @@ first prompt isn't slow. When the input box opens, type a question:
 /autotune                 recommend the best cached local model
 /recommend                recommend a model from hardware + installed models
 /index                    build or show the local project memory index
+/index status             show fresh/stale/missing/deleted index counts
 /map                      print a repo map or focused project-memory hits
 ```
 
@@ -225,9 +231,13 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/setup` | Run the setup wizard, write `agent.config.json`, probe the backend, and apply the new config |
 | `/new` | Start a fresh conversation |
 | `/clear` | Clear the screen |
-| `/config` | Show resolved backend, model, workspace, history, display, and context config |
-| `/session` | Show backend, model, approval policy, session path, message count, total tokens |
+| `/config` | Show resolved mode, backend, model, workspace, history, display, and context config |
+| `/mode [explore\|edit\|ship\|review\|custom]` | Show or set an operator preset for tools, approvals, and step budget |
+| `/session [title <text>]` | Show session info or set a friendly session title |
 | `/sessions` | List saved sessions under `.sessions/` |
+| `/sessions search <query>` | Search saved session titles and transcript text |
+| `/sessions delete <id> --yes` | Delete a saved session and sidecar metadata |
+| `/sessions prune --yes` | Keep the 20 newest sessions and delete older sessions |
 | `/resume latest\|<id>` | Resume a saved session |
 | `/export current\|<id> [markdown\|json] [path]` | Export a session transcript |
 | `/backend [name]` | Switch backend (`ollama`, `lm-studio`, `mlx`, `llamacpp`, `openrouter`) |
@@ -243,7 +253,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/capabilities [refresh] [all]` | Show cached per-model capability and benchmark records, or refresh the active/all backend probes |
 | `/autotune [refresh] [all] [--cloud] [apply]` | Score cached models, recommend the best fit, and optionally apply it to the active session |
 | `/recommend [refresh] [all] [--cloud] [apply]` | Read safe hardware specs, rank installed/default/cached models, and optionally apply the best fit |
-| `/index [refresh\|status\|clear]` | Build, show, refresh, or clear the safe local project memory index |
+| `/index [refresh\|refresh changed\|status\|clear]` | Build, show freshness counts, refresh changed files, or clear the safe local project memory index |
 | `/map [query]` | Print a compact repo map or focused project-memory hits |
 | `/memory [on\|off\|status]` | Toggle project memory for the active session |
 | `/remember <text>` | Save a durable local project note |
@@ -280,6 +290,23 @@ Use `/map` for a compact repo map, `/map config loader` for focused hits, and
 Small Harness can inject a compact local repo map into repo/code prompts and can
 use the `repo_search` tool before heavier grep/list/read calls. Cloud backends
 do not receive project memory unless `projectMemory.allowCloudContext` is true.
+
+Use `/index status` to see fresh, stale, missing, and deleted file counts.
+`/index refresh changed` refreshes the index through the same metadata/mtime/SHA
+reuse path as a full build. Successful `file_write`, `file_edit`, and
+`apply_patch` tool calls also refresh project memory when an index exists.
+
+## One-shot mode
+
+For scripts and CI, run one prompt without the TUI:
+
+```bash
+small-harness --print "summarize this repo"
+printf 'list the risky files\n' | small-harness
+```
+
+By default, approval-gated tools are denied in non-interactive mode. Pass
+`--allow-tools` only when you want write/shell tools to execute without prompts.
 
 ## Hardware Profiles
 
@@ -341,6 +368,9 @@ OPENROUTER_API_KEY=sk-or-...
 
 # Approval policy: always (default) | never | dangerous-only
 APPROVAL_POLICY=always
+
+# Operator mode: explore | edit (default) | ship | review | custom
+SMALL_HARNESS_MODE=edit
 
 # Active tools, comma-separated. Default:
 # file_read,file_edit,grep,list_dir,repo_search

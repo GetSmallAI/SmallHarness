@@ -99,6 +99,7 @@ pub fn write_agent_config(path: &Path, config: &AgentConfig) -> Result<()> {
 
 fn setup_config_value(config: &AgentConfig) -> Value {
     let mut obj = Map::new();
+    obj.insert("mode".into(), json!(config.mode.as_str()));
     obj.insert("backend".into(), json!(config.backend.as_str()));
     obj.insert("profile".into(), json!(config.profile));
     if let Some(model) = &config.model_override {

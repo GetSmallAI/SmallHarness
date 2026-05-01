@@ -101,6 +101,24 @@ pub struct ProjectMemoryStatus {
     pub generated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIndexFreshness {
+    pub indexed_files: usize,
+    pub workspace_files: usize,
+    pub fresh: usize,
+    pub stale: usize,
+    pub missing: usize,
+    pub deleted: usize,
+    pub read_errors: usize,
+}
+
+impl ProjectIndexFreshness {
+    pub fn is_fresh(&self) -> bool {
+        self.stale == 0 && self.missing == 0 && self.deleted == 0 && self.read_errors == 0
+    }
+}
+
 pub fn memory_dir(session_dir: &str) -> PathBuf {
     Path::new(session_dir).join("project-memory")
 }
@@ -146,6 +164,69 @@ pub fn project_memory_status(config: &AgentConfig) -> Result<ProjectMemoryStatus
         bytes,
         generated_at,
     })
+}
+
+pub fn project_index_freshness(config: &AgentConfig) -> Result<ProjectIndexFreshness> {
+    let Some(index) = load_project_index(config)? else {
+        return Ok(ProjectIndexFreshness::default());
+    };
+    let root = normalize_path(Path::new(&config.workspace_root));
+    let mut indexed_by_path: HashMap<String, IndexedFile> = index
+        .files
+        .iter()
+        .cloned()
+        .map(|file| (file.path.clone(), file))
+        .collect();
+    let mut report = ProjectIndexFreshness {
+        indexed_files: indexed_by_path.len(),
+        ..Default::default()
+    };
+
+    for item in indexable_workspace_files(config, &root) {
+        let path = match item {
+            Ok(path) => path,
+            Err(_) => {
+                report.read_errors += 1;
+                continue;
+            }
+        };
+        report.workspace_files += 1;
+        let rel_path = relative_slash_path(&root, &path)?;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                report.read_errors += 1;
+                continue;
+            }
+        };
+        let modified_secs = file_modified_secs(&metadata);
+        let Some(indexed) = indexed_by_path.remove(&rel_path) else {
+            report.missing += 1;
+            continue;
+        };
+        if indexed.byte_size == metadata.len() && indexed.modified_secs == modified_secs {
+            report.fresh += 1;
+            continue;
+        }
+        match fs::read(&path) {
+            Ok(bytes) if sha256_hex(&bytes) == indexed.sha256 => report.fresh += 1,
+            Ok(_) => report.stale += 1,
+            Err(_) => report.read_errors += 1,
+        }
+    }
+    report.deleted = indexed_by_path.len();
+    Ok(report)
+}
+
+pub fn refresh_changed_project_index(config: &AgentConfig) -> Result<ProjectIndex> {
+    build_project_index(config)
+}
+
+pub fn refresh_project_memory_after_write(config: &AgentConfig) -> Result<Option<ProjectIndex>> {
+    if !config.project_memory.enabled || !index_path(&config.session_dir).exists() {
+        return Ok(None);
+    }
+    refresh_changed_project_index(config).map(Some)
 }
 
 pub fn clear_project_index(config: &AgentConfig) -> Result<bool> {
@@ -269,6 +350,58 @@ pub fn build_project_index(config: &AgentConfig) -> Result<ProjectIndex> {
     };
     save_project_index(config, &index)?;
     Ok(index)
+}
+
+fn indexable_workspace_files(config: &AgentConfig, root: &Path) -> Vec<Result<PathBuf>> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(true)
+        .hidden(false)
+        .require_git(false);
+    let root_for_filter = root.to_path_buf();
+    builder.filter_entry(move |entry| !has_skipped_component(&root_for_filter, entry.path()));
+
+    let mut files = Vec::new();
+    for item in builder.build() {
+        let entry = match item {
+            Ok(entry) => entry,
+            Err(e) => {
+                files.push(Err(anyhow!(e.to_string())));
+                continue;
+            }
+        };
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = normalize_path(entry.path());
+        if !path.starts_with(root) || is_secret_file(&path) {
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(&path) else {
+            files.push(Err(anyhow!(
+                "failed to read metadata for {}",
+                path.display()
+            )));
+            continue;
+        };
+        if metadata.len() as usize > config.project_memory.max_file_bytes {
+            continue;
+        }
+        files.push(Ok(path));
+    }
+    files
+}
+
+fn file_modified_secs(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn save_project_index(config: &AgentConfig, index: &ProjectIndex) -> Result<()> {

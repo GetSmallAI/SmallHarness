@@ -41,6 +41,7 @@ Build the local project memory index first:
 
 ```text
 /index
+/index status
 /map
 ```
 
@@ -62,6 +63,7 @@ Useful commands:
 
 ```text
 /config       show the active backend, model, tools, workspace, and history
+/mode explore use a safer read/search preset while learning a repo
 /tools        show enabled tools and whether adaptive tool selection is on
 /context      show prompt budget and active tool schemas
 /map          show the local project memory repo map
@@ -96,7 +98,11 @@ cargo test
 Useful commands:
 
 ```text
+/mode edit    use edit-focused defaults
+/mode ship    enable edit + shell defaults for test/build loops
 /session      show current model, approval policy, session file, and tokens
+/session title Refactor dispatch command
+/sessions search dispatch
 /new          start a clean conversation
 /export current markdown
 ```
@@ -170,13 +176,27 @@ local models, use:
 /recommend --cloud
 ```
 
+## Scripts And CI
+
+Use one-shot mode when you want Small Harness without the interactive TUI:
+
+```bash
+cargo run --release -- --print "Summarize the repo entry points"
+printf 'What changed in this branch?\n' | cargo run --release --
+```
+
+Approval-gated write and shell tools are denied in one-shot mode unless you pass
+`--allow-tools`.
+
 ## A Good First Session
 
 Here is a simple sequence that exercises the whole product:
 
 ```text
 /config
+/mode explore
 Give me a concise map of this repo.
+/index status
 /doctor --deep
 /bench
 /recommend

@@ -29,7 +29,6 @@ pub enum AgentEvent {
         call_id: String,
         output: String,
     },
-    #[allow(dead_code)]
     Reasoning {
         delta: String,
     },
@@ -198,6 +197,11 @@ where
 
         stream_chat(http, backend, &req, cancel.clone(), |chunk| {
             if let Some(choice) = chunk.choices.first() {
+                if let Some(reasoning) = &choice.delta.reasoning {
+                    on_event(AgentEvent::Reasoning {
+                        delta: reasoning.clone(),
+                    });
+                }
                 if let Some(content) = &choice.delta.content {
                     let was_empty = assistant_text.is_empty();
                     assistant_text.push_str(content);

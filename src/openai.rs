@@ -99,6 +99,8 @@ pub struct StreamChoice {
 pub struct StreamDelta {
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default, alias = "reasoning_content", alias = "thinking")]
+    pub reasoning: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -302,6 +304,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::{BackendDescriptor, BackendName};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn content_of(ev: &SseEvent) -> Option<&str> {
         match ev {
@@ -341,6 +346,21 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(content_of(&events[0]), Some("a"));
         assert_eq!(content_of(&events[1]), Some("b"));
+    }
+
+    #[test]
+    fn parses_reasoning_alias_and_content() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\",\"content\":\"answer\"}}]}\n\n";
+        let events = p.feed(bytes).unwrap();
+        match &events[0] {
+            SseEvent::Chunk(c) => {
+                let delta = &c.choices[0].delta;
+                assert_eq!(delta.reasoning.as_deref(), Some("think"));
+                assert_eq!(delta.content.as_deref(), Some("answer"));
+            }
+            _ => panic!("expected chunk"),
+        }
     }
 
     #[test]
@@ -418,5 +438,68 @@ mod tests {
             }
             _ => panic!("expected chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn stream_chat_reads_mock_sse_tool_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"src/main.rs\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let backend = BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: format!("http://{addr}/v1"),
+            api_key: "test".into(),
+            is_local: true,
+        };
+        let messages = vec![ChatMessage::User {
+            content: "read main".into(),
+        }];
+        let req = ChatRequest {
+            model: "mock",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+        };
+        let mut name = String::new();
+        let mut args = String::new();
+        stream_chat(&reqwest::Client::new(), &backend, &req, None, |chunk| {
+            if let Some(call) = chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.tool_calls.as_ref())
+                .and_then(|calls| calls.first())
+            {
+                if let Some(function) = &call.function {
+                    if let Some(n) = &function.name {
+                        name.push_str(n);
+                    }
+                    if let Some(a) = &function.arguments {
+                        args.push_str(a);
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(name, "file_read");
+        assert_eq!(args, "{\"path\":\"src/main.rs\"}");
     }
 }

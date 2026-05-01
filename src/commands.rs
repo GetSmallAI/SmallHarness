@@ -14,7 +14,7 @@ use crate::capabilities::{
     self, best_record, recommended_tool_selection, record_score, sorted_records,
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
 };
-use crate::config::{is_tool_name, AgentConfig, ToolSelection, ALL_TOOL_NAMES};
+use crate::config::{is_tool_name, AgentConfig, OperatorMode, ToolSelection, ALL_TOOL_NAMES};
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
 use crate::openai::{
@@ -22,15 +22,15 @@ use crate::openai::{
 };
 use crate::project_memory::{
     append_project_note, build_project_index, clear_project_index, forget_project_note,
-    load_project_index, load_project_notes, project_memory_status, render_repo_map,
-    render_system_prompt_with_memory,
+    load_project_index, load_project_notes, project_index_freshness, project_memory_status,
+    refresh_changed_project_index, render_repo_map, render_system_prompt_with_memory,
 };
 use crate::recommend::{
     apply_recommendation_to_config, recommend_models, ModelCandidate, ModelRecommendation,
 };
 use crate::session::{
-    list_sessions, load_messages, load_session, render_markdown, resolve_session_path,
-    save_message, SessionEntry,
+    delete_session, list_sessions, load_messages, load_session, render_markdown,
+    resolve_session_path, save_message, search_sessions, set_session_title, SessionEntry,
 };
 use crate::tools::{build_tools, build_tools_for_names, select_tool_names};
 use crate::warmup::warmup;
@@ -81,6 +81,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a fresh conversation"),
     ("/clear", "Clear the screen"),
     ("/config", "Show resolved configuration"),
+    (
+        "/mode",
+        "Show or set operator mode (explore, edit, ship, review)",
+    ),
     ("/session", "Show session info and token usage"),
     ("/sessions", "List saved sessions"),
     ("/resume", "Resume latest or named session"),
@@ -145,8 +149,9 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/new" => cmd_new(state),
         "/clear" => clear_screen(),
         "/config" => cmd_config(state),
-        "/session" => session_info(state),
-        "/sessions" => cmd_sessions(state)?,
+        "/mode" => cmd_mode(&args, state),
+        "/session" => cmd_session(&args, state)?,
+        "/sessions" => cmd_sessions(&args, state)?,
         "/resume" => cmd_resume(&args, state)?,
         "/export" => cmd_export(&args, state)?,
         "/backend" => cmd_backend(&args, state).await?,
@@ -226,6 +231,10 @@ fn clear_screen() {
 
 fn cmd_config(state: &AppState) {
     println!(
+        "  {DIM}mode{RESET}             {CYAN}{}{RESET}",
+        state.config.mode.as_str()
+    );
+    println!(
         "  {DIM}backend{RESET}          {CYAN}{}{RESET}",
         state.config.backend.as_str()
     );
@@ -294,7 +303,24 @@ fn cmd_config(state: &AppState) {
     }
 }
 
-fn session_info(state: &AppState) {
+fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
+    let trimmed = args.trim();
+    if let Some(title) = trimmed.strip_prefix("title ") {
+        set_session_title(&state.session_path, title)?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}session title →{RESET} {CYAN}{}{RESET}",
+            title.trim()
+        );
+        return Ok(());
+    }
+    if !trimmed.is_empty() {
+        println!("  {DIM}Usage: /session [title <text>]{RESET}");
+        return Ok(());
+    }
+    println!(
+        "  {DIM}mode{RESET}      {CYAN}{}{RESET}",
+        state.config.mode.as_str()
+    );
     println!(
         "  {DIM}backend{RESET}   {CYAN}{}{RESET}",
         state.config.backend.as_str()
@@ -315,9 +341,103 @@ fn session_info(state: &AppState) {
         fmt_tokens(state.total_in),
         fmt_tokens(state.total_out)
     );
+    Ok(())
 }
 
-fn cmd_sessions(state: &AppState) -> Result<()> {
+fn cmd_mode(args: &str, state: &mut AppState) {
+    let arg = args.trim();
+    if arg.is_empty() || arg == "status" {
+        println!(
+            "  {DIM}mode{RESET}      {CYAN}{}{RESET}",
+            state.config.mode.as_str()
+        );
+        println!("  {DIM}available{RESET} explore, edit, ship, review, custom");
+        println!(
+            "  {DIM}tools{RESET}     {} · {DIM}toolSelection{RESET} {} · {DIM}approval{RESET} {} · {DIM}maxSteps{RESET} {}",
+            state.config.tools.join(", "),
+            state.config.tool_selection.as_str(),
+            state.config.approval_policy.as_str(),
+            state.config.max_steps
+        );
+        return;
+    }
+    let Some(mode) = OperatorMode::parse(arg) else {
+        println!("  {DIM}Usage: /mode [explore|edit|ship|review|custom]{RESET}");
+        return;
+    };
+    state.config.apply_operator_mode(mode);
+    println!(
+        "  {GREEN}✓{RESET} {DIM}mode →{RESET} {CYAN}{}{RESET} {DIM}tools={} approval={} maxSteps={}{RESET}",
+        state.config.mode.as_str(),
+        state.config.tools.join(","),
+        state.config.approval_policy.as_str(),
+        state.config.max_steps
+    );
+}
+
+fn cmd_sessions(args: &str, state: &AppState) -> Result<()> {
+    let args = args.trim();
+    if let Some(query) = args.strip_prefix("search ") {
+        let hits = search_sessions(&state.session_dir, query)?;
+        if hits.is_empty() {
+            println!("  {DIM}No sessions matched `{}`.{RESET}", query.trim());
+            return Ok(());
+        }
+        for hit in hits.into_iter().take(20) {
+            println!(
+                "  {CYAN}{}{RESET} {DIM}{} match(es) · {} · {}{RESET}",
+                hit.summary.id,
+                hit.matches,
+                hit.summary.title.as_deref().unwrap_or("untitled"),
+                hit.preview
+            );
+        }
+        return Ok(());
+    }
+    if let Some(id) = args.strip_prefix("delete ") {
+        let mut parts: Vec<&str> = id.split_whitespace().collect();
+        let confirmed = parts.iter().any(|part| *part == "--yes" || *part == "yes");
+        parts.retain(|part| *part != "--yes" && *part != "yes");
+        let id = parts.join(" ");
+        if id.is_empty() {
+            println!("  {DIM}Usage: /sessions delete <id> --yes{RESET}");
+            return Ok(());
+        }
+        if !confirmed {
+            println!("  {YELLOW}!{RESET} {DIM}Confirm with /sessions delete {id} --yes{RESET}");
+            return Ok(());
+        }
+        match delete_session(&state.session_dir, &id)? {
+            Some(path) => println!(
+                "  {GREEN}✓{RESET} {DIM}deleted session {}{RESET}",
+                path.display()
+            ),
+            None => println!("  {YELLOW}!{RESET} {DIM}session not found: {id}{RESET}"),
+        }
+        return Ok(());
+    }
+    if args.starts_with("prune") {
+        let confirmed = args
+            .split_whitespace()
+            .any(|part| part == "--yes" || part == "yes");
+        if !confirmed {
+            println!("  {YELLOW}!{RESET} {DIM}Confirm with /sessions prune --yes (keeps 20 newest sessions).{RESET}");
+            return Ok(());
+        }
+        let sessions = list_sessions(&state.session_dir)?;
+        let mut removed = 0usize;
+        for session in sessions.into_iter().skip(20) {
+            if delete_session(&state.session_dir, &session.id)?.is_some() {
+                removed += 1;
+            }
+        }
+        println!("  {GREEN}✓{RESET} {DIM}pruned {removed} old session(s).{RESET}");
+        return Ok(());
+    }
+    if !args.is_empty() {
+        println!("  {DIM}Usage: /sessions [search <query>|delete <id> --yes|prune --yes]{RESET}");
+        return Ok(());
+    }
     let sessions = list_sessions(&state.session_dir)?;
     if sessions.is_empty() {
         println!("  {DIM}No sessions saved yet.{RESET}");
@@ -325,11 +445,12 @@ fn cmd_sessions(state: &AppState) -> Result<()> {
     }
     for session in sessions.into_iter().take(20) {
         println!(
-            "  {CYAN}{}{RESET} {DIM}{} messages · {} bytes · {}{RESET}",
+            "  {CYAN}{}{RESET} {DIM}{} messages · {} bytes · {} · {}{RESET}",
             session.id,
             session.messages,
             session.bytes,
-            format_system_time(session.modified)
+            format_system_time(session.modified),
+            session.title.as_deref().unwrap_or("untitled")
         );
     }
     Ok(())
@@ -596,10 +717,12 @@ fn cmd_tools(args: &str, state: &mut AppState) {
 
     let (mode, list) = if args == "auto" {
         state.config.tool_selection = ToolSelection::Auto;
+        state.config.mode = OperatorMode::Custom;
         println!("  {GREEN}✓{RESET} {DIM}tool selection →{RESET} {CYAN}auto{RESET}");
         return;
     } else if args == "fixed" {
         state.config.tool_selection = ToolSelection::Fixed;
+        state.config.mode = OperatorMode::Custom;
         println!("  {GREEN}✓{RESET} {DIM}tool selection →{RESET} {CYAN}fixed{RESET}");
         return;
     } else if let Some(rest) = args.strip_prefix("auto ") {
@@ -626,6 +749,7 @@ fn cmd_tools(args: &str, state: &mut AppState) {
     }
     state.config.tools = requested;
     state.config.tool_selection = mode;
+    state.config.mode = OperatorMode::Custom;
     println!(
         "  {GREEN}✓{RESET} {DIM}tools →{RESET} {CYAN}{}{RESET} {DIM}· mode →{RESET} {CYAN}{}{RESET}",
         state.config.tools.join(", "),
@@ -777,9 +901,13 @@ fn cmd_index(args: &str, state: &AppState) -> Result<()> {
         "status" => {
             let status = project_memory_status(&state.config)?;
             print_project_memory_status(&status);
+            if status.exists {
+                let freshness = project_index_freshness(&state.config)?;
+                print_project_index_freshness(&freshness);
+            }
         }
-        "refresh" => {
-            let index = build_project_index(&state.config)?;
+        "refresh" | "refresh changed" | "changed" => {
+            let index = refresh_changed_project_index(&state.config)?;
             print_index_built(&index);
         }
         "clear" => {
@@ -789,7 +917,9 @@ fn cmd_index(args: &str, state: &AppState) -> Result<()> {
                 println!("  {DIM}No project memory index to clear.{RESET}");
             }
         }
-        other => println!("  {DIM}Usage: /index [refresh|status|clear] (got {other}){RESET}"),
+        other => println!(
+            "  {DIM}Usage: /index [refresh|refresh changed|status|clear] (got {other}){RESET}"
+        ),
     }
     Ok(())
 }
@@ -829,6 +959,25 @@ fn print_project_memory_status(status: &crate::project_memory::ProjectMemoryStat
         );
         println!("  {DIM}Run /index to build it.{RESET}");
     }
+}
+
+fn print_project_index_freshness(freshness: &crate::project_memory::ProjectIndexFreshness) {
+    let marker = if freshness.is_fresh() { GREEN } else { YELLOW };
+    let label = if freshness.is_fresh() {
+        "fresh"
+    } else {
+        "stale"
+    };
+    println!(
+        "  {marker}{label}{RESET} {DIM}workspaceFiles={} indexed={} fresh={} stale={} missing={} deleted={} errors={}{RESET}",
+        freshness.workspace_files,
+        freshness.indexed_files,
+        freshness.fresh,
+        freshness.stale,
+        freshness.missing,
+        freshness.deleted,
+        freshness.read_errors
+    );
 }
 
 fn cmd_map(args: &str, state: &AppState) -> Result<()> {

@@ -21,6 +21,21 @@ pub struct SessionSummary {
     pub modified: SystemTime,
     pub bytes: u64,
     pub messages: usize,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMetadata {
+    pub title: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSearchHit {
+    pub summary: SessionSummary,
+    pub matches: usize,
+    pub preview: String,
 }
 
 pub fn init_session_dir(dir: &str) -> Result<()> {
@@ -49,6 +64,38 @@ pub fn save_message(path: &Path, message: &ChatMessage) -> Result<()> {
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")?;
     Ok(())
+}
+
+pub fn metadata_path(path: &Path) -> PathBuf {
+    path.with_extension("meta.json")
+}
+
+pub fn load_session_metadata(path: &Path) -> Result<SessionMetadata> {
+    let meta_path = metadata_path(path);
+    if !meta_path.exists() {
+        return Ok(SessionMetadata::default());
+    }
+    let text = fs::read_to_string(meta_path)?;
+    Ok(serde_json::from_str(&text).unwrap_or_default())
+}
+
+pub fn save_session_metadata(path: &Path, metadata: &SessionMetadata) -> Result<()> {
+    let meta_path = metadata_path(path);
+    if let Some(parent) = meta_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(meta_path, serde_json::to_string_pretty(metadata)? + "\n")?;
+    Ok(())
+}
+
+pub fn set_session_title(path: &Path, title: &str) -> Result<()> {
+    let mut metadata = load_session_metadata(path)?;
+    metadata.title = if title.trim().is_empty() {
+        None
+    } else {
+        Some(title.trim().to_string())
+    };
+    save_session_metadata(path, &metadata)
 }
 
 pub fn load_session(path: &Path) -> Result<Vec<SessionEntry>> {
@@ -88,9 +135,12 @@ pub fn list_sessions(dir: &str) -> Result<Vec<SessionSummary>> {
             continue;
         }
         let metadata = entry.metadata()?;
-        let messages = load_session(&path)
-            .map(|entries| entries.len())
-            .unwrap_or(0);
+        let entries = load_session(&path).unwrap_or_default();
+        let messages = entries.len();
+        let title = load_session_metadata(&path)
+            .ok()
+            .and_then(|m| m.title)
+            .or_else(|| infer_session_title(&entries));
         let id = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -102,6 +152,7 @@ pub fn list_sessions(dir: &str) -> Result<Vec<SessionSummary>> {
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             bytes: metadata.len(),
             messages,
+            title,
         });
     }
     out.sort_by_key(|session| Reverse(session.modified));
@@ -122,6 +173,99 @@ pub fn resolve_session_path(dir: &str, id: &str) -> Result<Option<PathBuf>> {
         return Ok(Some(candidate));
     }
     Ok(None)
+}
+
+pub fn delete_session(dir: &str, id: &str) -> Result<Option<PathBuf>> {
+    let Some(path) = resolve_session_path(dir, id)? else {
+        return Ok(None);
+    };
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    let meta = metadata_path(&path);
+    if meta.exists() {
+        fs::remove_file(meta)?;
+    }
+    Ok(Some(path))
+}
+
+pub fn search_sessions(dir: &str, query: &str) -> Result<Vec<SessionSearchHit>> {
+    let needles: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if needles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hits = Vec::new();
+    for summary in list_sessions(dir)? {
+        let entries = load_session(&summary.path).unwrap_or_default();
+        let mut haystack = summary.title.clone().unwrap_or_default();
+        for entry in &entries {
+            haystack.push('\n');
+            haystack.push_str(&message_text(&entry.message));
+        }
+        let lower = haystack.to_lowercase();
+        let matches = needles
+            .iter()
+            .filter(|needle| lower.contains(needle.as_str()))
+            .count();
+        if matches == 0 {
+            continue;
+        }
+        let preview = entries
+            .iter()
+            .find_map(|entry| {
+                let text = message_text(&entry.message);
+                let lower_text = text.to_lowercase();
+                if needles.iter().any(|needle| lower_text.contains(needle)) {
+                    Some(one_line(&text, 120))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| summary.title.clone())
+            .unwrap_or_default();
+        hits.push(SessionSearchHit {
+            summary,
+            matches,
+            preview,
+        });
+    }
+    hits.sort_by(|a, b| {
+        b.matches
+            .cmp(&a.matches)
+            .then_with(|| b.summary.modified.cmp(&a.summary.modified))
+    });
+    Ok(hits)
+}
+
+fn infer_session_title(entries: &[SessionEntry]) -> Option<String> {
+    entries.iter().find_map(|entry| match &entry.message {
+        ChatMessage::User { content } if !content.trim().is_empty() => Some(one_line(content, 64)),
+        _ => None,
+    })
+}
+
+fn message_text(message: &ChatMessage) -> String {
+    match message {
+        ChatMessage::System { content }
+        | ChatMessage::User { content }
+        | ChatMessage::Tool { content, .. } => content.clone(),
+        ChatMessage::Assistant { content, .. } => content.clone().unwrap_or_default(),
+    }
+}
+
+fn one_line(text: &str, max: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max {
+        compact
+    } else {
+        let mut out: String = compact.chars().take(max).collect();
+        out.push('…');
+        out
+    }
 }
 
 pub fn render_markdown(entries: &[SessionEntry]) -> String {

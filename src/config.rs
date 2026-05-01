@@ -97,6 +97,39 @@ impl ToolSelection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum OperatorMode {
+    Explore,
+    Edit,
+    Ship,
+    Review,
+    Custom,
+}
+
+impl OperatorMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OperatorMode::Explore => "explore",
+            OperatorMode::Edit => "edit",
+            OperatorMode::Ship => "ship",
+            OperatorMode::Review => "review",
+            OperatorMode::Custom => "custom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "explore" => Some(Self::Explore),
+            "edit" => Some(Self::Edit),
+            "ship" => Some(Self::Ship),
+            "review" => Some(Self::Review),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutsideWorkspace {
     Prompt,
     Deny,
@@ -254,6 +287,7 @@ pub type ProfileModels = BTreeMap<String, String>;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    pub mode: OperatorMode,
     pub backend: BackendName,
     pub profile: String,
     pub model_override: Option<String>,
@@ -295,6 +329,7 @@ const SYSTEM_PROMPT: &str = concat!(
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            mode: OperatorMode::Edit,
             backend: BackendName::Ollama,
             profile: "mac-mini-16gb".into(),
             model_override: None,
@@ -327,6 +362,7 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
+    mode: Option<String>,
     backend: Option<String>,
     profile: Option<String>,
     #[serde(rename = "modelOverride")]
@@ -357,6 +393,67 @@ struct FileConfig {
 }
 
 impl AgentConfig {
+    pub fn apply_operator_mode(&mut self, mode: OperatorMode) {
+        self.mode = mode;
+        match mode {
+            OperatorMode::Explore => {
+                self.tools = vec![
+                    "file_read".into(),
+                    "grep".into(),
+                    "list_dir".into(),
+                    "glob".into(),
+                    "repo_search".into(),
+                ];
+                self.tool_selection = ToolSelection::Auto;
+                self.approval_policy = ApprovalPolicy::DangerousOnly;
+                self.max_steps = self.max_steps.clamp(6, 12);
+            }
+            OperatorMode::Edit => {
+                self.tools = vec![
+                    "file_read".into(),
+                    "file_edit".into(),
+                    "grep".into(),
+                    "list_dir".into(),
+                    "repo_search".into(),
+                    "apply_patch".into(),
+                ];
+                self.tool_selection = ToolSelection::Auto;
+                self.approval_policy = ApprovalPolicy::Always;
+                self.max_steps = self.max_steps.max(12);
+            }
+            OperatorMode::Ship => {
+                self.tools = vec![
+                    "file_read".into(),
+                    "file_edit".into(),
+                    "file_write".into(),
+                    "apply_patch".into(),
+                    "grep".into(),
+                    "list_dir".into(),
+                    "glob".into(),
+                    "repo_search".into(),
+                    "shell".into(),
+                ];
+                self.tool_selection = ToolSelection::Auto;
+                self.approval_policy = ApprovalPolicy::DangerousOnly;
+                self.max_steps = self.max_steps.max(20);
+            }
+            OperatorMode::Review => {
+                self.tools = vec![
+                    "file_read".into(),
+                    "grep".into(),
+                    "list_dir".into(),
+                    "glob".into(),
+                    "repo_search".into(),
+                    "shell".into(),
+                ];
+                self.tool_selection = ToolSelection::Auto;
+                self.approval_policy = ApprovalPolicy::DangerousOnly;
+                self.max_steps = self.max_steps.clamp(8, 16);
+            }
+            OperatorMode::Custom => {}
+        }
+    }
+
     pub fn render_system_prompt(&self) -> String {
         self.render_system_prompt_for_tools(&self.tools)
     }
@@ -433,6 +530,9 @@ pub fn load_config() -> AgentConfig {
     if path.exists() {
         if let Ok(text) = std::fs::read_to_string(path) {
             if let Ok(file) = serde_json::from_str::<FileConfig>(&text) {
+                if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
+                    config.apply_operator_mode(m);
+                }
                 if let Some(b) = file.backend.as_deref().and_then(BackendName::parse) {
                     config.backend = b;
                 }
@@ -499,6 +599,9 @@ pub fn load_config() -> AgentConfig {
                 if let Some(p) = file.profiles {
                     config.profiles = p;
                 }
+                if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
+                    config.mode = m;
+                }
             }
         }
     }
@@ -537,6 +640,11 @@ pub fn load_config() -> AgentConfig {
     if let Some(s) = layered_env(&dotenv, "AGENT_TOOL_SELECTION") {
         if let Some(selection) = ToolSelection::parse(&s) {
             config.tool_selection = selection;
+        }
+    }
+    if let Some(s) = layered_env(&dotenv, "SMALL_HARNESS_MODE") {
+        if let Some(mode) = OperatorMode::parse(&s) {
+            config.apply_operator_mode(mode);
         }
     }
     if let Some(s) = layered_env(&dotenv, "WORKSPACE_ROOT") {

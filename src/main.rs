@@ -20,7 +20,7 @@ mod tools;
 mod warmup;
 
 use std::hash::{Hash, Hasher};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 
 use crate::agent::{run_agent, AgentEvent, ApprovalProvider};
 use crate::approval::ApprovalCache;
@@ -35,7 +35,7 @@ use crate::loader::Loader;
 use crate::openai::{build_http_client, list_models, ChatMessage};
 use crate::project_memory::{
     build_project_index, load_project_index, prompt_looks_repo_related,
-    render_system_prompt_with_memory,
+    refresh_project_memory_after_write, render_system_prompt_with_memory,
 };
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, new_session_path, save_message};
@@ -48,6 +48,133 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const GRAY: &str = "\x1b[90m";
+
+struct CliOneShot {
+    prompt: String,
+    allow_tools: bool,
+}
+
+struct NonInteractiveApproval {
+    allow: bool,
+}
+
+#[async_trait::async_trait]
+impl ApprovalProvider for NonInteractiveApproval {
+    async fn approve(
+        &mut self,
+        _name: &str,
+        _args: &serde_json::Value,
+        _preview: Option<&crate::tools::ToolPreview>,
+    ) -> bool {
+        self.allow
+    }
+}
+
+fn parse_one_shot_args() -> Option<anyhow::Result<CliOneShot>> {
+    let mut args = std::env::args().skip(1);
+    let mut prompt = None;
+    let mut allow_tools = false;
+    while let Some(arg) = args.next() {
+        if arg == "--allow-tools" || arg == "--yes" {
+            allow_tools = true;
+        } else if arg == "--print" || arg == "-p" {
+            prompt = args.next();
+        } else if let Some(rest) = arg.strip_prefix("--print=") {
+            prompt = Some(rest.to_string());
+        }
+    }
+    if let Some(prompt) = prompt {
+        return Some(Ok(CliOneShot {
+            prompt,
+            allow_tools,
+        }));
+    }
+    if !std::io::stdin().is_terminal() {
+        let mut input = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+            return Some(Err(e.into()));
+        }
+        return Some(Ok(CliOneShot {
+            prompt: input,
+            allow_tools,
+        }));
+    }
+    None
+}
+
+async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
+    let prompt = opts.prompt.trim();
+    if prompt.is_empty() {
+        anyhow::bail!("one-shot prompt is empty");
+    }
+    let config = load_config();
+    let http = build_http_client();
+    let backend_desc = backend(config.backend);
+    validate(&backend_desc)?;
+    let model = default_model(
+        &backend_desc,
+        &config.profile,
+        config.model_override.as_deref(),
+        &config.profiles,
+    );
+    init_session_dir(&config.session_dir)?;
+    if config.project_memory.enabled
+        && config.project_memory.auto_index
+        && prompt_looks_repo_related(prompt)
+        && load_project_index(&config).ok().flatten().is_none()
+    {
+        let _ = build_project_index(&config);
+    }
+    let active_tool_names = select_tool_names(&config, prompt);
+    let system_prompt =
+        render_system_prompt_with_memory(&config, &backend_desc, &active_tool_names, prompt);
+    let messages = vec![
+        ChatMessage::System {
+            content: system_prompt,
+        },
+        ChatMessage::User {
+            content: prompt.to_string(),
+        },
+    ];
+    let tools = build_tools_for_names(&config, &active_tool_names);
+    let mut approval = NonInteractiveApproval {
+        allow: opts.allow_tools,
+    };
+    let mut out = std::io::stdout();
+    let result = run_agent(
+        &http,
+        &backend_desc,
+        &model,
+        messages,
+        tools,
+        config.max_steps,
+        |event| match event {
+            AgentEvent::Text { delta } => {
+                let _ = out.write_all(delta.as_bytes());
+                let _ = out.flush();
+            }
+            AgentEvent::Reasoning { delta } if config.display.reasoning => {
+                let _ = writeln!(out, "\n[reasoning] {delta}");
+            }
+            AgentEvent::ToolCall { name, .. } => {
+                let _ = writeln!(out, "\n[tool] {name}");
+            }
+            AgentEvent::ToolResult { name, output, .. } => {
+                let _ = writeln!(out, "\n[tool-result] {name}: {output}");
+            }
+            _ => {}
+        },
+        Some(&mut approval as &mut dyn ApprovalProvider),
+        None,
+    )
+    .await?;
+    println!();
+    let session_path = new_session_path(&config.session_dir);
+    for message in result.messages {
+        let _ = save_message(&session_path, &message);
+    }
+    Ok(())
+}
 
 fn format_tokens(n: u32) -> String {
     if n >= 1000 {
@@ -129,6 +256,9 @@ async fn probe_backend(http: &reqwest::Client, b: &BackendDescriptor) -> Result<
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(opts) = parse_one_shot_args() {
+        return run_one_shot(opts?).await;
+    }
     if !std::io::stdin().is_terminal() {
         eprintln!(
             "small-harness requires an interactive TTY (run it directly in a terminal, not piped)."
@@ -374,10 +504,18 @@ async fn main() -> anyhow::Result<()> {
             .await
         };
 
+        let mut memory_changed = false;
         let drain_fut = async {
             while let Some(e) = rx.recv().await {
                 if let Some(l) = loader_opt.take() {
                     l.stop();
+                }
+                if let AgentEvent::ToolResult { name, output, .. } = &e {
+                    if matches!(name.as_str(), "file_write" | "file_edit" | "apply_patch")
+                        && !output.contains("\"error\"")
+                    {
+                        memory_changed = true;
+                    }
                 }
                 renderer.handle(e);
             }
@@ -400,6 +538,18 @@ async fn main() -> anyhow::Result<()> {
                 }
                 state.total_in += res.input_tokens;
                 state.total_out += res.output_tokens;
+                if memory_changed {
+                    match refresh_project_memory_after_write(&state.config) {
+                        Ok(Some(index)) => println!(
+                            "  {DIM}project memory refreshed ({} files){RESET}",
+                            index.files.len()
+                        ),
+                        Ok(None) => {}
+                        Err(e) => println!(
+                            "  {YELLOW}!{RESET} {DIM}project memory refresh skipped: {e}{RESET}"
+                        ),
+                    }
+                }
                 println!(
                     "{GRAY}  {} in · {} out{RESET}",
                     format_tokens(res.input_tokens),
