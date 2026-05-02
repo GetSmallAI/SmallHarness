@@ -32,6 +32,10 @@ use crate::session::{
     delete_session, list_sessions, load_messages, load_session, render_markdown,
     resolve_session_path, save_message, search_sessions, set_session_title, SessionEntry,
 };
+use crate::shipcheck::{
+    collect_shipcheck, default_export_path, file_status_label,
+    render_markdown as render_shipcheck_markdown, ShipcheckSnapshot,
+};
 use crate::tools::{build_tools, build_tools_for_names, select_tool_names};
 use crate::warmup::warmup;
 
@@ -84,6 +88,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/mode",
         "Show or set operator mode (explore, edit, ship, review)",
+    ),
+    (
+        "/shipcheck",
+        "Summarize git and project-memory readiness for release",
     ),
     ("/session", "Show session info and token usage"),
     ("/sessions", "List saved sessions"),
@@ -150,6 +158,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/clear" => clear_screen(),
         "/config" => cmd_config(state),
         "/mode" => cmd_mode(&args, state),
+        "/shipcheck" => cmd_shipcheck(&args, state)?,
         "/session" => cmd_session(&args, state)?,
         "/sessions" => cmd_sessions(&args, state)?,
         "/resume" => cmd_resume(&args, state)?,
@@ -373,6 +382,143 @@ fn cmd_mode(args: &str, state: &mut AppState) {
         state.config.approval_policy.as_str(),
         state.config.max_steps
     );
+}
+
+fn cmd_shipcheck(args: &str, state: &AppState) -> Result<()> {
+    let mut parts = args.split_whitespace();
+    let action = parts.next();
+    let export = matches!(action, Some("export") | Some("save"));
+    if matches!(action, Some(other) if other != "export" && other != "save") {
+        println!("  {DIM}Usage: /shipcheck [export [path]]{RESET}");
+        return Ok(());
+    }
+    let explicit_path = parts.next().map(PathBuf::from);
+    if parts.next().is_some() {
+        println!("  {DIM}Usage: /shipcheck [export [path]]{RESET}");
+        return Ok(());
+    }
+
+    let snapshot = collect_shipcheck(&state.config.workspace_root)?;
+    let freshness = if state.config.project_memory.enabled {
+        Some(project_index_freshness(&state.config)?)
+    } else {
+        None
+    };
+    print_shipcheck(&snapshot, freshness.as_ref());
+
+    if export {
+        let out_path = explicit_path.unwrap_or_else(|| default_export_path(&state.session_dir));
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(
+            &out_path,
+            render_shipcheck_markdown(&snapshot, freshness.as_ref()),
+        )?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}shipcheck saved →{RESET} {}",
+            out_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn print_shipcheck(
+    snapshot: &ShipcheckSnapshot,
+    freshness: Option<&crate::project_memory::ProjectIndexFreshness>,
+) {
+    let status_color = if snapshot.is_clean() { GREEN } else { YELLOW };
+    let status = if snapshot.is_clean() {
+        "clean"
+    } else {
+        "dirty"
+    };
+    println!("  {DIM}shipcheck{RESET}       {status_color}{status}{RESET}");
+    println!(
+        "  {DIM}branch{RESET}          {CYAN}{}{RESET}",
+        snapshot.branch_label()
+    );
+    if snapshot.branch.behind > 0 {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}branch is behind upstream by {} commit(s).{RESET}",
+            snapshot.branch.behind
+        );
+    }
+    if snapshot.conflict_count() > 0 {
+        println!(
+            "  {RED}✗{RESET} {DIM}{} conflicted file(s) need attention before release.{RESET}",
+            snapshot.conflict_count()
+        );
+    }
+    println!(
+        "  {DIM}files{RESET}           staged={} unstaged={} untracked={} conflicts={}",
+        snapshot.staged_count(),
+        snapshot.unstaged_count(),
+        snapshot.untracked_count(),
+        snapshot.conflict_count()
+    );
+    print_shipcheck_file_preview(snapshot);
+    print_diff_stat("stagedDiff", &snapshot.staged_diff_stat);
+    print_diff_stat("unstagedDiff", &snapshot.unstaged_diff_stat);
+    print_project_memory_freshness(freshness);
+}
+
+fn print_shipcheck_file_preview(snapshot: &ShipcheckSnapshot) {
+    if snapshot.files.is_empty() {
+        return;
+    }
+    for file in snapshot.files.iter().take(8) {
+        let origin = file
+            .original_path
+            .as_ref()
+            .map(|path| format!(" from {path}"))
+            .unwrap_or_default();
+        println!(
+            "  {DIM}change{RESET}          {}{origin} {DIM}({}){RESET}",
+            file.path,
+            file_status_label(file)
+        );
+    }
+    if snapshot.files.len() > 8 {
+        println!(
+            "  {DIM}change{RESET}          …and {} more{RESET}",
+            snapshot.files.len() - 8
+        );
+    }
+}
+
+fn print_diff_stat(label: &str, stat: &str) {
+    if stat.trim().is_empty() {
+        println!("  {DIM}{label}{RESET}      none");
+    } else {
+        println!("  {DIM}{label}{RESET}");
+        for line in stat.lines() {
+            println!("    {DIM}{line}{RESET}");
+        }
+    }
+}
+
+fn print_project_memory_freshness(
+    freshness: Option<&crate::project_memory::ProjectIndexFreshness>,
+) {
+    match freshness {
+        Some(report) if report.indexed_files > 0 || report.workspace_files > 0 => {
+            let color = if report.is_fresh() { GREEN } else { YELLOW };
+            println!(
+                "  {DIM}projectMemory{RESET}   {color}{} fresh{RESET} · stale={} missing={} deleted={} errors={}",
+                report.fresh,
+                report.stale,
+                report.missing,
+                report.deleted,
+                report.read_errors
+            );
+        }
+        Some(_) => println!("  {DIM}projectMemory{RESET}   not indexed"),
+        None => println!("  {DIM}projectMemory{RESET}   disabled"),
+    }
 }
 
 fn cmd_sessions(args: &str, state: &AppState) -> Result<()> {

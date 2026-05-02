@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.1-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -55,6 +55,7 @@ backend so you can start running without picking weights out of a long list.
 | Hardware-aware recommendation | `/recommend` reads safe local specs and ranks models for coding-agent use |
 | Project memory | `/index` builds and refreshes a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
 | Operator modes | `/mode explore`, `/mode edit`, `/mode ship`, and `/mode review` tune tools, approvals, and step budgets |
+| Ship preflight | `/shipcheck` summarizes branch drift, dirty files, diff stats, and project-memory freshness before release |
 | Capability cache | `/doctor --deep` and `/bench` persist per-backend/model capability and latency records under `.sessions/capabilities/` |
 | Autotune | `/autotune` scores cached models and can switch the active session to the best local fit |
 | Configurable tools | File read/write/edit, apply-patch, repo-search, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
@@ -65,7 +66,7 @@ backend so you can start running without picking weights out of a long list.
 | Streaming output | Tokens stream as they arrive, with grouped tool-call display and optional reasoning deltas |
 | Session persistence | JSONL append-only session logs with titles, search, resume, delete, prune, and export commands |
 | One-shot mode | `small-harness --print "prompt"` or piped stdin for scripts and CI |
-| Slash commands | `/setup`, `/mode`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/mode`, `/shipcheck`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -132,6 +133,7 @@ first prompt isn't slow. When the input box opens, type a question:
 /setup                    rerun setup and rewrite agent.config.json
 /mode explore             use read/search-only defaults
 /mode ship                enable edit + shell with dangerous approvals
+/shipcheck                summarize branch, diff, and memory readiness
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools and auto/fixed selection mode
@@ -233,6 +235,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/clear` | Clear the screen |
 | `/config` | Show resolved mode, backend, model, workspace, history, display, and context config |
 | `/mode [explore\|edit\|ship\|review\|custom]` | Show or set an operator preset for tools, approvals, and step budget |
+| `/shipcheck [export [path]]` | Summarize git branch drift, dirty files, diff stats, and project-memory freshness; optionally save a Markdown report |
 | `/session [title <text>]` | Show session info or set a friendly session title |
 | `/sessions` | List saved sessions under `.sessions/` |
 | `/sessions search <query>` | Search saved session titles and transcript text |
@@ -508,6 +511,7 @@ src/
   project_memory.rs   local repo index, notes, repo maps, and prompt-context injection
   recommend.rs        hardware-aware model candidate parsing, scoring, and apply helpers
   capabilities.rs     persistent model capability cache, scoring, and autotune helpers
+  shipcheck.rs        git and project-memory release preflight helpers
   approval.rs         y/n/always/session-allow prompt with diff previews
   session.rs          JSONL conversation log, listing, resume, export helpers
   warmup.rs           pre-warm the prompt-eval cache at startup
@@ -531,11 +535,16 @@ Quality expectations:
 
 Versioning:
 
-- Small Harness stays on the `0.1.x` line before a larger product milestone.
-- The patch number tracks the total repo commit count for the release commit.
-  This project-memory release is `0.1.34`: 33 commits were already on
-  `main`, and the release commit is expected to be commit 34.
-- Release tags should use a leading `v`, for example `v0.1.34`.
+- Small Harness is currently on the `0.2.x` product line.
+- Use patch bumps for focused feature and fix releases, such as `0.2.1`.
+- Release tags should use a leading `v`, for example `v0.2.1`.
+
+Feature wrap-up:
+
+- When finishing a feature, include a one-line git commit message in the
+  handoff.
+- Also include an X-ready post with a high-level summary and 3-4 short bullets
+  covering what changed.
 
 ## Troubleshooting
 

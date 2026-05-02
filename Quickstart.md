@@ -100,6 +100,7 @@ Useful commands:
 ```text
 /mode edit    use edit-focused defaults
 /mode ship    enable edit + shell defaults for test/build loops
+/shipcheck    show branch drift, dirty files, diff stats, and memory freshness
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
 /sessions search dispatch
@@ -207,6 +208,13 @@ Find one small README improvement and propose the exact diff before editing.
 
 After the edit:
 
+```text
+/shipcheck
+/shipcheck export
+```
+
+Then run:
+
 ```bash
 git diff
 cargo fmt --all -- --check
@@ -226,6 +234,7 @@ Small Harness keeps local state under `.sessions/`:
     notes.jsonl          durable project notes from /remember
   doctor/                deep doctor JSON and Markdown reports
   evals/                 eval suite JSON and Markdown reports
+  shipcheck/             release-readiness Markdown reports
   hardware.json          safe hardware summary, without serials or UUIDs
   capabilities/          per-model capability and benchmark cache
 ```

@@ -3,12 +3,20 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Before a larger product milestone, this project uses `0.1.x` versions whose
-patch number matches the release commit count.
+Small Harness currently uses the `0.2.x` product line for focused feature and
+fix releases.
 
 ## [Unreleased]
 
 No changes yet.
+
+## [0.2.1] - 2026-05-02
+
+### Added
+
+- `/shipcheck [export [path]]` release preflight for git branch drift, staged
+  and unstaged changes, untracked files, conflicts, diff stats, and
+  project-memory freshness reports.
 
 ## [0.2.0] - 2026-04-29
 

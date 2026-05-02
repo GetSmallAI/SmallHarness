@@ -16,6 +16,7 @@ mod recommend;
 mod renderer;
 mod session;
 mod setup;
+mod shipcheck;
 mod tools;
 mod warmup;
 
