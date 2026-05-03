@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.1-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.2-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -56,6 +56,7 @@ backend so you can start running without picking weights out of a long list.
 | Project memory | `/index` builds and refreshes a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
 | Operator modes | `/mode explore`, `/mode edit`, `/mode ship`, and `/mode review` tune tools, approvals, and step budgets |
 | Ship preflight | `/shipcheck` summarizes branch drift, dirty files, diff stats, and project-memory freshness before release |
+| Ship handoff | `/handoff` drafts a one-line commit message, changelog bullets, testing note, and X-ready post from local git context |
 | Capability cache | `/doctor --deep` and `/bench` persist per-backend/model capability and latency records under `.sessions/capabilities/` |
 | Autotune | `/autotune` scores cached models and can switch the active session to the best local fit |
 | Configurable tools | File read/write/edit, apply-patch, repo-search, glob, grep, list-dir, shell — pick which to enable to control prompt-eval cost |
@@ -66,7 +67,7 @@ backend so you can start running without picking weights out of a long list.
 | Streaming output | Tokens stream as they arrive, with grouped tool-call display and optional reasoning deltas |
 | Session persistence | JSONL append-only session logs with titles, search, resume, delete, prune, and export commands |
 | One-shot mode | `small-harness --print "prompt"` or piped stdin for scripts and CI |
-| Slash commands | `/setup`, `/mode`, `/shipcheck`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/mode`, `/shipcheck`, `/handoff`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -74,7 +75,7 @@ backend so you can start running without picking weights out of a long list.
 You will need Rust (stable, 1.75+) and one local-inference backend running.
 
 ```bash
-git clone https://github.com/morganlinton/SmallHarness.git
+git clone https://github.com/GetSmallAI/SmallHarness.git
 cd SmallHarness
 cp .env.example .env
 cargo run --release
@@ -134,6 +135,7 @@ first prompt isn't slow. When the input box opens, type a question:
 /mode explore             use read/search-only defaults
 /mode ship                enable edit + shell with dangerous approvals
 /shipcheck                summarize branch, diff, and memory readiness
+/handoff                  draft commit, changelog, testing, and X-ready copy
 /profile mac-studio-32gb  switch the hardware profile (changes default model)
 /model                    list models from the current backend and pick one
 /tools                    show enabled tools and auto/fixed selection mode
@@ -236,6 +238,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/config` | Show resolved mode, backend, model, workspace, history, display, and context config |
 | `/mode [explore\|edit\|ship\|review\|custom]` | Show or set an operator preset for tools, approvals, and step budget |
 | `/shipcheck [export [path]]` | Summarize git branch drift, dirty files, diff stats, and project-memory freshness; optionally save a Markdown report |
+| `/handoff [export\|save] [path] [--cloud]` | Draft commit, changelog, testing, and X-ready release copy from the current local git context; OpenRouter requires `--cloud` |
 | `/session [title <text>]` | Show session info or set a friendly session title |
 | `/sessions` | List saved sessions under `.sessions/` |
 | `/sessions search <query>` | Search saved session titles and transcript text |
@@ -509,6 +512,7 @@ src/
   config.rs           dotenv + agent.config.json loader, workspace/context/history/memory config
   hardware.rs         safe local hardware summary + memory-tier profile inference
   project_memory.rs   local repo index, notes, repo maps, and prompt-context injection
+  handoff.rs          local git handoff context, prompts, fallback Markdown, and exports
   recommend.rs        hardware-aware model candidate parsing, scoring, and apply helpers
   capabilities.rs     persistent model capability cache, scoring, and autotune helpers
   shipcheck.rs        git and project-memory release preflight helpers
@@ -536,8 +540,8 @@ Quality expectations:
 Versioning:
 
 - Small Harness is currently on the `0.2.x` product line.
-- Use patch bumps for focused feature and fix releases, such as `0.2.1`.
-- Release tags should use a leading `v`, for example `v0.2.1`.
+- Use patch bumps for focused feature and fix releases, such as `0.2.2`.
+- Release tags should use a leading `v`, for example `v0.2.2`.
 
 Feature wrap-up:
 

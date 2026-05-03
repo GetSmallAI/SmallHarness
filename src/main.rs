@@ -7,6 +7,7 @@ mod cancel;
 mod capabilities;
 mod commands;
 mod config;
+mod handoff;
 mod hardware;
 mod input;
 mod loader;

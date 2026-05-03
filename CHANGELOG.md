@@ -10,6 +10,18 @@ fix releases.
 
 No changes yet.
 
+## [0.2.2] - 2026-05-03
+
+### Added
+
+- `/handoff [export|save] [path] [--cloud]` for local model-drafted commit
+  messages, changelog bullets, testing notes, and X-ready release copy from the
+  current git branch or working tree.
+
+### Changed
+
+- Fixed the Quick Install clone URL to point at `GetSmallAI/SmallHarness`.
+
 ## [0.2.1] - 2026-05-02
 
 ### Added

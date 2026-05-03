@@ -101,6 +101,7 @@ Useful commands:
 /mode edit    use edit-focused defaults
 /mode ship    enable edit + shell defaults for test/build loops
 /shipcheck    show branch drift, dirty files, diff stats, and memory freshness
+/handoff      draft commit, changelog, testing, and X-ready release copy
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
 /sessions search dispatch
@@ -211,6 +212,8 @@ After the edit:
 ```text
 /shipcheck
 /shipcheck export
+/handoff
+/handoff export
 ```
 
 Then run:
@@ -235,6 +238,7 @@ Small Harness keeps local state under `.sessions/`:
   doctor/                deep doctor JSON and Markdown reports
   evals/                 eval suite JSON and Markdown reports
   shipcheck/             release-readiness Markdown reports
+  handoff/               local ship-handoff Markdown drafts
   hardware.json          safe hardware summary, without serials or UUIDs
   capabilities/          per-model capability and benchmark cache
 ```

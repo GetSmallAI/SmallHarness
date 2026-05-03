@@ -15,6 +15,11 @@ use crate::capabilities::{
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
 };
 use crate::config::{is_tool_name, AgentConfig, OperatorMode, ToolSelection, ALL_TOOL_NAMES};
+use crate::handoff::{
+    collect_handoff_context, default_export_path as default_handoff_export_path,
+    ensure_required_sections, handoff_system_prompt, render_fallback_markdown,
+    render_handoff_prompt, should_refuse_cloud_handoff,
+};
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
 use crate::openai::{
@@ -93,6 +98,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/shipcheck",
         "Summarize git and project-memory readiness for release",
     ),
+    (
+        "/handoff",
+        "Draft commit, changelog, testing, and X-ready release copy",
+    ),
     ("/session", "Show session info and token usage"),
     ("/sessions", "List saved sessions"),
     ("/resume", "Resume latest or named session"),
@@ -159,6 +168,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/config" => cmd_config(state),
         "/mode" => cmd_mode(&args, state),
         "/shipcheck" => cmd_shipcheck(&args, state)?,
+        "/handoff" => cmd_handoff(&args, state).await?,
         "/session" => cmd_session(&args, state)?,
         "/sessions" => cmd_sessions(&args, state)?,
         "/resume" => cmd_resume(&args, state)?,
@@ -419,6 +429,135 @@ fn cmd_shipcheck(args: &str, state: &AppState) -> Result<()> {
         )?;
         println!(
             "  {GREEN}✓{RESET} {DIM}shipcheck saved →{RESET} {}",
+            out_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandoffArgs {
+    export: bool,
+    explicit_path: Option<PathBuf>,
+    allow_cloud: bool,
+}
+
+fn parse_handoff_args(args: &str) -> Option<HandoffArgs> {
+    let mut export = false;
+    let mut explicit_path = None;
+    let mut allow_cloud = false;
+
+    for part in args.split_whitespace() {
+        match part {
+            "--cloud" => allow_cloud = true,
+            "export" | "save" if !export => export = true,
+            other if export && explicit_path.is_none() => {
+                explicit_path = Some(PathBuf::from(other));
+            }
+            _ => return None,
+        }
+    }
+
+    Some(HandoffArgs {
+        export,
+        explicit_path,
+        allow_cloud,
+    })
+}
+
+async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
+    let Some(args) = parse_handoff_args(args) else {
+        println!("  {DIM}Usage: /handoff [export|save] [path] [--cloud]{RESET}");
+        return Ok(());
+    };
+
+    if should_refuse_cloud_handoff(state.backend.name, args.allow_cloud) {
+        println!(
+            "  {RED}✗{RESET} {DIM}/handoff will not send diff context to OpenRouter unless you pass --cloud.{RESET}"
+        );
+        return Ok(());
+    }
+
+    let snapshot = collect_shipcheck(&state.config.workspace_root)?;
+    let freshness = if state.config.project_memory.enabled {
+        Some(project_index_freshness(&state.config)?)
+    } else {
+        None
+    };
+    let Some(context) = collect_handoff_context(&snapshot)? else {
+        println!(
+            "  {DIM}Nothing to hand off: working tree is clean and branch is not ahead of upstream.{RESET}"
+        );
+        return Ok(());
+    };
+
+    println!(
+        "  {DIM}drafting handoff from {} with {} · {}{RESET}",
+        context.basis.label(),
+        state.config.backend.as_str(),
+        state.model
+    );
+
+    let messages = vec![
+        ChatMessage::System {
+            content: handoff_system_prompt(),
+        },
+        ChatMessage::User {
+            content: render_handoff_prompt(&context, freshness.as_ref()),
+        },
+    ];
+    let req = ChatRequest {
+        model: &state.model,
+        messages: &messages,
+        tools: None,
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: false,
+        }),
+        max_tokens: Some(900),
+    };
+    let mut draft = String::new();
+    let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(content) = &choice.delta.content {
+                draft.push_str(content);
+            }
+        }
+    })
+    .await;
+
+    let body = match result {
+        Ok(_) if !draft.trim().is_empty() => ensure_required_sections(&draft),
+        Ok(_) => render_fallback_markdown(
+            &context,
+            &snapshot,
+            freshness.as_ref(),
+            Some("empty model response"),
+        ),
+        Err(e) => render_fallback_markdown(
+            &context,
+            &snapshot,
+            freshness.as_ref(),
+            Some(&e.to_string()),
+        ),
+    };
+
+    println!();
+    print!("{body}");
+
+    if args.export {
+        let out_path = args
+            .explicit_path
+            .unwrap_or_else(|| default_handoff_export_path(&state.session_dir));
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(&out_path, body)?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}handoff saved →{RESET} {}",
             out_path.display()
         );
     }
@@ -2452,6 +2591,8 @@ async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::BackendDescriptor;
+    use std::process::Command;
 
     fn test_state(root: &Path) -> AppState {
         let mut config = AgentConfig {
@@ -2471,6 +2612,30 @@ mod tests {
             total_out: 0,
             config,
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        git(dir, &["init"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Test User"]);
+        fs::write(dir.join("README.md"), "hello\n").unwrap();
+        git(dir, &["add", "README.md"]);
+        git(dir, &["commit", "-m", "initial"]);
     }
 
     #[test]
@@ -2529,5 +2694,54 @@ mod tests {
         cmd_map("main", &state).unwrap();
         cmd_index("clear", &state).unwrap();
         assert!(load_project_index(&state.config).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_handoff_export_and_cloud_args() {
+        let args = parse_handoff_args("export .sessions/handoff/manual.md --cloud").unwrap();
+        assert!(args.export);
+        assert!(args.allow_cloud);
+        assert_eq!(
+            args.explicit_path.as_deref(),
+            Some(Path::new(".sessions/handoff/manual.md"))
+        );
+        assert!(parse_handoff_args("unexpected").is_none());
+    }
+
+    #[tokio::test]
+    async fn handoff_noops_without_changes_or_ahead_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let state = test_state(dir.path());
+
+        cmd_handoff("export", &state).await.unwrap();
+
+        assert!(!dir.path().join(".sessions/handoff").exists());
+    }
+
+    #[tokio::test]
+    async fn handoff_export_writes_fallback_when_model_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        let out_path = dir.path().join("handoff.md");
+        let mut state = test_state(dir.path());
+        state.backend = BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: "test".into(),
+            is_local: true,
+        };
+
+        cmd_handoff(&format!("export {}", out_path.display()), &state)
+            .await
+            .unwrap();
+
+        let body = fs::read_to_string(out_path).unwrap();
+        assert!(body.contains("## Commit Message"));
+        assert!(body.contains("## Changelog Bullets"));
+        assert!(body.contains("## X Post"));
+        assert!(body.contains("## Testing"));
+        assert!(body.contains("model draft failed"));
     }
 }
