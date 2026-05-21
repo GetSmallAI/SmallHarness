@@ -65,7 +65,7 @@ Useful commands:
 /config       show the active backend, model, tools, workspace, and history
 /mode explore use a safer read/search preset while learning a repo
 /tools        show enabled tools and whether adaptive tool selection is on
-/context      show prompt budget and active tool schemas
+/context      show prompt budget, effective limit, headroom, and auto-guard status
 /map          show the local project memory repo map
 ```
 
@@ -177,6 +177,11 @@ local models, use:
 ```text
 /recommend --cloud
 ```
+
+Long coding sessions on small local models can fill the context window quickly.
+Small Harness auto-compacts older turns on local backends when usage crosses
+~85% of the effective limit (run `/context` to see headroom). Use `/compact`
+manually if you want to shrink sooner.
 
 ## Scripts And CI
 

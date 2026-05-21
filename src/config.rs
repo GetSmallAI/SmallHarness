@@ -205,6 +205,22 @@ pub struct ContextConfig {
     pub max_messages: Option<usize>,
     #[serde(rename = "maxBytes", default)]
     pub max_bytes: Option<usize>,
+    #[serde(rename = "modelContextTokens", default)]
+    pub model_context_tokens: Option<usize>,
+    #[serde(rename = "autoCompact", default)]
+    pub auto_compact: Option<bool>,
+    #[serde(rename = "compactThreshold", default = "default_compact_threshold")]
+    pub compact_threshold: f64,
+    #[serde(rename = "reserveRatio", default = "default_reserve_ratio")]
+    pub reserve_ratio: f64,
+}
+
+fn default_compact_threshold() -> f64 {
+    0.85
+}
+
+fn default_reserve_ratio() -> f64 {
+    0.25
 }
 
 impl Default for ContextConfig {
@@ -212,6 +228,10 @@ impl Default for ContextConfig {
         Self {
             max_messages: Some(40),
             max_bytes: Some(256 * 1024),
+            model_context_tokens: None,
+            auto_compact: None,
+            compact_threshold: default_compact_threshold(),
+            reserve_ratio: default_reserve_ratio(),
         }
     }
 }
@@ -663,6 +683,24 @@ pub fn load_config() -> AgentConfig {
     if let Some(s) = layered_env(&dotenv, "AGENT_CONTEXT_MAX_BYTES") {
         if let Ok(n) = s.parse::<usize>() {
             config.context.max_bytes = Some(n);
+        }
+    }
+    if let Some(s) = layered_env(&dotenv, "AGENT_CONTEXT_MODEL_TOKENS") {
+        if let Ok(n) = s.parse::<usize>() {
+            config.context.model_context_tokens = Some(n);
+        }
+    }
+    if let Some(s) = layered_env(&dotenv, "AGENT_CONTEXT_AUTO_COMPACT") {
+        config.context.auto_compact = Some(s != "false" && s != "0");
+    }
+    if let Some(s) = layered_env(&dotenv, "AGENT_CONTEXT_COMPACT_THRESHOLD") {
+        if let Ok(n) = s.parse::<f64>() {
+            config.context.compact_threshold = n.clamp(0.5, 0.99);
+        }
+    }
+    if let Some(s) = layered_env(&dotenv, "AGENT_CONTEXT_RESERVE_RATIO") {
+        if let Ok(n) = s.parse::<f64>() {
+            config.context.reserve_ratio = n.clamp(0.05, 0.5);
         }
     }
     if let Some(s) = layered_env(&dotenv, "AGENT_HISTORY") {

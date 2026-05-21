@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backends::BackendDescriptor;
+use crate::context_guard::{maybe_compact_messages, ContextGuardParams};
 use crate::cancel::CancellationToken;
 use crate::openai::{
     stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolCall, ToolDef, ToolDefFunction,
@@ -31,6 +32,9 @@ pub enum AgentEvent {
     },
     Reasoning {
         delta: String,
+    },
+    ContextCompacted {
+        notice: String,
     },
 }
 
@@ -157,6 +161,7 @@ pub async fn run_agent<F>(
     mut on_event: F,
     mut approve: Option<&mut dyn ApprovalProvider>,
     cancel: Option<CancellationToken>,
+    guard: Option<(ContextGuardParams, String)>,
 ) -> Result<RunResult>
 where
     F: FnMut(AgentEvent),
@@ -355,6 +360,22 @@ where
                 tool_call_id: tc.id,
                 content: trimmed,
             });
+        }
+
+        if let Some((guard_params, system_prompt)) = &guard {
+            if let Some(notice) = maybe_compact_messages(
+                &mut messages,
+                system_prompt,
+                &tool_defs,
+                guard_params,
+                http,
+                backend,
+                model,
+            )
+            .await?
+            {
+                on_event(AgentEvent::ContextCompacted { notice });
+            }
         }
     }
 

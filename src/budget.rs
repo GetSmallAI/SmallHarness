@@ -9,7 +9,9 @@ pub struct PromptBudget {
     pub transcript_bytes: usize,
     pub tool_schema_bytes: usize,
     pub tool_result_bytes: usize,
+    /// Bytes sent on the wire: system prompt + transcript JSON + tool schemas.
     pub total_bytes: usize,
+    pub effective_total_bytes: usize,
     pub estimated_tokens: usize,
 }
 
@@ -46,9 +48,21 @@ pub fn measure_prompt_budget(
         transcript_bytes,
         tool_schema_bytes,
         tool_result_bytes,
+        effective_total_bytes: total_bytes,
         total_bytes,
         estimated_tokens: estimate_tokens(total_bytes),
     }
+}
+
+pub fn usage_ratio(budget: &PromptBudget, limit_bytes: usize) -> f64 {
+    if limit_bytes == 0 {
+        return 0.0;
+    }
+    budget.effective_total_bytes as f64 / limit_bytes as f64
+}
+
+pub fn headroom_bytes(budget: &PromptBudget, limit_bytes: usize) -> usize {
+    limit_bytes.saturating_sub(budget.effective_total_bytes)
 }
 
 pub fn format_bytes(n: usize) -> String {
@@ -82,5 +96,22 @@ mod tests {
         assert_eq!(budget.system_bytes, 6);
         assert_eq!(budget.tool_result_bytes, 5);
         assert!(budget.transcript_bytes >= 5);
+        assert_eq!(budget.total_bytes, budget.effective_total_bytes);
+        assert!(budget.effective_total_bytes >= budget.tool_result_bytes);
+    }
+
+    #[test]
+    fn usage_ratio_and_headroom() {
+        let budget = PromptBudget {
+            system_bytes: 100,
+            transcript_bytes: 300,
+            tool_schema_bytes: 100,
+            tool_result_bytes: 50,
+            total_bytes: 500,
+            effective_total_bytes: 500,
+            estimated_tokens: 125,
+        };
+        assert!((usage_ratio(&budget, 1000) - 0.5).abs() < f64::EPSILON);
+        assert_eq!(headroom_bytes(&budget, 1000), 500);
     }
 }

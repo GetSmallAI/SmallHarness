@@ -8,6 +8,7 @@ mod cancel;
 mod capabilities;
 mod commands;
 mod config;
+mod context_guard;
 mod handoff;
 mod hardware;
 mod input;
@@ -31,7 +32,7 @@ use crate::agent::{run_agent, AgentEvent, ApprovalProvider};
 use crate::approval::ApprovalCache;
 use crate::backends::{backend, default_model, validate, BackendDescriptor};
 use crate::banner::{print_banner, BannerInfo};
-use crate::budget::{format_bytes, measure_prompt_budget};
+use crate::context_guard::maybe_auto_compact;
 use crate::cancel::CancellationToken;
 use crate::commands::{dispatch, AppState};
 use crate::config::{load_config, InputStyle};
@@ -167,9 +168,13 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             AgentEvent::ToolResult { name, output, .. } => {
                 let _ = writeln!(out, "\n[tool-result] {name}: {output}");
             }
+            AgentEvent::ContextCompacted { notice } => {
+                let _ = writeln!(out, "\n{notice}");
+            }
             _ => {}
         },
         Some(&mut approval as &mut dyn ApprovalProvider),
+        None,
         None,
     )
     .await?;
@@ -216,22 +221,6 @@ fn set_system_message(messages: &mut Vec<ChatMessage>, system_prompt: String) ->
             },
         );
         true
-    }
-}
-
-fn print_budget_warning(total_bytes: usize, max_bytes: Option<usize>) {
-    let warn = max_bytes
-        .map(|max| total_bytes >= max.saturating_mul(3) / 4)
-        .unwrap_or(total_bytes >= 64 * 1024);
-    if warn {
-        let limit = max_bytes
-            .map(format_bytes)
-            .unwrap_or_else(|| "64.0 KB".into());
-        println!(
-            "  {YELLOW}!{RESET} {DIM}prompt budget is {} (warning threshold {}){RESET}",
-            format_bytes(total_bytes),
-            limit
-        );
     }
 }
 
@@ -354,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
         session_path,
         total_in: 0,
         total_out: 0,
+        context_guard_notice: None,
     };
 
     let mut approval_cache = ApprovalCache::new();
@@ -431,8 +421,34 @@ async fn main() -> anyhow::Result<()> {
 
         let tools = build_tools_for_names(&state.config, &active_tool_names);
         let tool_defs = crate::agent::to_openai_tools(&tools);
-        let budget = measure_prompt_budget(&system_prompt, &state.messages, &tool_defs);
-        print_budget_warning(budget.total_bytes, state.config.context.max_bytes);
+        if let Some(notice) = maybe_auto_compact(
+            &mut state.messages,
+            &state.session_dir,
+            &mut state.session_path,
+            &system_prompt,
+            &tool_defs,
+            &state.config,
+            &state.model,
+            state.backend.is_local,
+            &state.http,
+            &state.backend,
+        )
+        .await?
+        {
+            println!("{notice}");
+            state.context_guard_notice = Some(
+                notice
+                    .trim()
+                    .trim_start_matches("\x1b[32m✓\x1b[0m \x1b[2m")
+                    .trim_end_matches("\x1b[0m")
+                    .to_string(),
+            );
+        }
+        let guard_params = crate::context_guard::guard_params_from(
+            &state.config,
+            &state.model,
+            state.backend.is_local,
+        );
         let fingerprint = prompt_fingerprint(
             &state.backend,
             &state.model,
@@ -505,6 +521,7 @@ async fn main() -> anyhow::Result<()> {
                 on_event,
                 Some(&mut approval_cache as &mut dyn ApprovalProvider),
                 Some(cancel_for_agent),
+                Some((guard_params, system_prompt.clone())),
             )
             .await
         };
@@ -521,6 +538,9 @@ async fn main() -> anyhow::Result<()> {
                     {
                         memory_changed = true;
                     }
+                }
+                if let AgentEvent::ContextCompacted { notice } = &e {
+                    state.context_guard_notice = Some(notice.clone());
                 }
                 renderer.handle(e);
             }

@@ -258,8 +258,8 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/model [id]` | List models from the current backend and pick one, or set directly |
 | `/tools [auto\|fixed\|list]` | Show enabled tools, switch adaptive mode, or set the enabled pool: `/tools auto file_read,grep,list_dir` |
 | `/compare [model]` | Re-send the last user message to OpenRouter cloud for A/B |
-| `/context [maxMessages=N maxBytes=N]` | Show prompt budget, active adaptive tools, byte/token estimate, and context limits |
-| `/compact [keep]` | Summarize older turns into a compact continuation session |
+| `/context [maxMessages=N maxBytes=N modelTokens=N autoCompact=on\|off compactThreshold=N reserveRatio=N]` | Show prompt budget, effective model-aware limit, headroom, auto-guard status, and context settings |
+| `/compact [keep]` | Summarize or trim older turns into a compact continuation session (shared with auto-guard) |
 | `/doctor` | Check backend reachability, model list, `rg`, config, and session storage |
 | `/doctor --deep [all]` | Probe OpenAI-compatible streaming, usage chunks, native tool calls, and inline JSON fallback, then save JSON/Markdown reports under `.sessions/doctor/` |
 | `/bench [model]` | Measure warmup, first-token, total latency, and output rate |
@@ -430,7 +430,11 @@ runtime.
   "outsideWorkspace": "prompt",
   "context": {
     "maxMessages": 40,
-    "maxBytes": 262144
+    "maxBytes": 262144,
+    "modelContextTokens": 8192,
+    "autoCompact": true,
+    "compactThreshold": 0.85,
+    "reserveRatio": 0.25
   },
   "history": {
     "enabled": true,
@@ -517,6 +521,8 @@ src/
   agent.rs            chat/completions runner with tool calls + streaming
   backends.rs         Ollama / LM Studio / MLX / llama.cpp / OpenRouter endpoints + defaults
   config.rs           dotenv + agent.config.json loader, workspace/context/history/memory config
+  context_guard.rs    model-aware prompt limits, auto-compaction, and deterministic trim fallback
+  budget.rs           prompt byte/token budgeting helpers
   hardware.rs         safe local hardware summary + memory-tier profile inference
   project_memory.rs   local repo index, notes, repo maps, and prompt-context injection
   handoff.rs          local git handoff context, prompts, fallback Markdown, and exports

@@ -175,6 +175,9 @@ impl TuiRenderer {
                 output,
             } => self.render_tool_result(&name, &call_id, &output),
             AgentEvent::Reasoning { delta } => self.render_reasoning(&delta),
+            AgentEvent::ContextCompacted { notice } => {
+                println!("{notice}");
+            }
         }
     }
 

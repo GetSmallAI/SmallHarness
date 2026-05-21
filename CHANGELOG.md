@@ -16,6 +16,7 @@ fix releases.
 - Built-in prompt library with templates for code review, debug, refactor, document, explain, and test tasks
 - Test status integration in `/shipcheck` with `--tests` flag to run tests during preflight checks
 - Prompt import/export functionality for sharing prompt libraries across projects
+- Adaptive Context Guard: model-aware effective limits, auto-compaction before overflow (local backends), deterministic trim fallback, and expanded `/context` reporting
 
 ## [0.2.2] - 2026-05-03
 

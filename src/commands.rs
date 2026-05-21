@@ -16,6 +16,7 @@ use crate::batch_operations::{
     preview_batch_operations, BatchEditOperation, EditOperation,
 };
 use crate::budget::{format_bytes, measure_prompt_budget};
+use crate::context_guard::{compact_session, context_status_lines, CompactMethod};
 use crate::capabilities::{
     self, best_record, recommended_tool_selection, record_score, sorted_records,
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
@@ -75,6 +76,7 @@ pub struct AppState {
     pub session_path: PathBuf,
     pub total_in: u32,
     pub total_out: u32,
+    pub context_guard_notice: Option<String>,
 }
 
 impl AppState {
@@ -139,8 +141,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/compare",
         "Run the last user prompt against the OpenRouter cloud (requires OPENROUTER_API_KEY)",
     ),
-    ("/context", "Show or update context limits"),
-    ("/compact", "Summarize older conversation turns"),
+    ("/context", "Show or update context limits and auto-guard status"),
+    ("/compact", "Summarize or trim older conversation turns"),
     ("/doctor", "Check backend, tools, env, and session storage"),
     ("/bench", "Measure warmup, first-token, and total latency"),
     ("/capabilities", "Show or refresh model capability cache"),
@@ -1188,6 +1190,20 @@ fn cmd_context(args: &str, state: &mut AppState) {
                 if let Ok(n) = value.parse::<usize>() {
                     state.config.context.max_bytes = Some(n);
                 }
+            } else if let Some(value) = part.strip_prefix("modelTokens=") {
+                if let Ok(n) = value.parse::<usize>() {
+                    state.config.context.model_context_tokens = Some(n);
+                }
+            } else if let Some(value) = part.strip_prefix("autoCompact=") {
+                state.config.context.auto_compact = Some(matches!(value, "on" | "true" | "1"));
+            } else if let Some(value) = part.strip_prefix("compactThreshold=") {
+                if let Ok(n) = value.parse::<f64>() {
+                    state.config.context.compact_threshold = n.clamp(0.5, 0.99);
+                }
+            } else if let Some(value) = part.strip_prefix("reserveRatio=") {
+                if let Ok(n) = value.parse::<f64>() {
+                    state.config.context.reserve_ratio = n.clamp(0.05, 0.5);
+                }
             }
         }
     }
@@ -1221,7 +1237,7 @@ fn cmd_context(args: &str, state: &mut AppState) {
     );
     println!(
         "  {DIM}budget{RESET}    total={} (~{} tokens)",
-        format_bytes(budget.total_bytes),
+        format_bytes(budget.effective_total_bytes),
         budget.estimated_tokens
     );
     println!(
@@ -1232,9 +1248,20 @@ fn cmd_context(args: &str, state: &mut AppState) {
         format_bytes(budget.tool_result_bytes)
     );
     println!(
-        "  {DIM}limits{RESET}    maxMessages={:?} maxBytes={:?}",
-        state.config.context.max_messages, state.config.context.max_bytes
+        "  {DIM}limits{RESET}    maxMessages={:?} maxBytes={:?} modelTokens={:?}",
+        state.config.context.max_messages,
+        state.config.context.max_bytes,
+        state.config.context.model_context_tokens
     );
+    for line in context_status_lines(
+        &state.config,
+        &state.model,
+        state.backend.is_local,
+        &budget,
+        state.context_guard_notice.as_deref(),
+    ) {
+        println!("{line}");
+    }
 }
 
 fn cmd_index(args: &str, state: &AppState) -> Result<()> {
@@ -1406,73 +1433,68 @@ fn cmd_forget(args: &str, state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn summarize_messages(state: &AppState, older: &[ChatMessage]) -> Result<String> {
-    let transcript = serde_json::to_string(older)?;
-    let messages = vec![
-        ChatMessage::System {
-            content: "Summarize this Small Harness conversation for continuing context. Preserve goals, decisions, files touched, errors, and pending work. Be concise.".into(),
-        },
-        ChatMessage::User {
-            content: transcript,
-        },
-    ];
-    let req = ChatRequest {
-        model: &state.model,
-        messages: &messages,
-        tools: None,
-        stream: true,
-        stream_options: Some(StreamOptions {
-            include_usage: false,
-        }),
-        max_tokens: None,
-    };
-    let mut out = String::new();
-    stream_chat(&state.http, &state.backend, &req, None, |chunk| {
-        if let Some(choice) = chunk.choices.first() {
-            if let Some(content) = &choice.delta.content {
-                out.push_str(content);
-            }
-        }
-    })
-    .await?;
-    Ok(out)
-}
-
 async fn cmd_compact(args: &str, state: &mut AppState) -> Result<()> {
     let keep = if args.is_empty() {
-        state.config.context.max_messages.unwrap_or(12).clamp(4, 80)
+        None
     } else {
-        args.parse::<usize>().unwrap_or(12).clamp(4, 80)
+        Some(args.parse::<usize>().unwrap_or(12).clamp(4, 80))
     };
-    if state.messages.len() <= keep + 1 {
+    let last_prompt = last_user_prompt(state).unwrap_or_default();
+    let active_tool_names = select_tool_names(&state.config, &last_prompt);
+    let system_prompt = render_system_prompt_with_memory(
+        &state.config,
+        &state.backend,
+        &active_tool_names,
+        &last_prompt,
+    );
+    let tools = build_tools_for_names(&state.config, &active_tool_names);
+    let tool_defs = to_openai_tools(&tools);
+
+    if state.messages.len() <= keep.unwrap_or(state.config.context.max_messages.unwrap_or(12)) + 1 {
         println!("  {DIM}Nothing to compact yet.{RESET}");
         return Ok(());
     }
-    let split_at = state.messages.len().saturating_sub(keep);
-    let older = state.messages[..split_at].to_vec();
-    let recent: Vec<ChatMessage> = state.messages[split_at..]
-        .iter()
-        .filter(|m| !matches!(m, ChatMessage::System { .. }))
-        .cloned()
-        .collect();
-    println!("  {DIM}Compacting {} older messages…{RESET}", older.len());
-    let summary = summarize_messages(state, &older).await?;
-    let mut messages = vec![ChatMessage::System {
-        content: format!(
-            "{}\n\nConversation summary:\n{}",
-            state.config.render_system_prompt(),
-            summary.trim()
-        ),
-    }];
-    messages.extend(recent);
-    state.messages = messages;
-    state.reset_session();
-    for message in &state.messages {
-        let _ = save_message(&state.session_path, message);
+
+    println!("  {DIM}Compacting older messages…{RESET}");
+    let result = compact_session(
+        &mut state.messages,
+        &state.session_dir,
+        &mut state.session_path,
+        &system_prompt,
+        &tool_defs,
+        &state.config,
+        &state.model,
+        state.backend.is_local,
+        &state.http,
+        &state.backend,
+        keep,
+        true,
+    )
+    .await?;
+
+    if !result.compacted {
+        println!("  {DIM}Nothing to compact yet.{RESET}");
+        return Ok(());
     }
+
+    let method = match result.method {
+        CompactMethod::LlmSummary => "summarized",
+        CompactMethod::DeterministicTrim => "trimmed",
+        CompactMethod::None => "compacted",
+    };
+    state.context_guard_notice = Some(format!(
+        "Compacted {} messages → {} ({method}), budget {:.0}% → {:.0}%",
+        result.before_messages,
+        result.after_messages,
+        result.before_ratio * 100.0,
+        result.after_ratio * 100.0
+    ));
     println!(
-        "  {GREEN}✓{RESET} {DIM}compacted to {} messages → {}{RESET}",
-        state.messages.len(),
+        "  {GREEN}✓{RESET} {DIM}{}{RESET}",
+        state.context_guard_notice.as_deref().unwrap_or("")
+    );
+    println!(
+        "  {DIM}session → {}{RESET}",
         state.session_path.display()
     );
     Ok(())
@@ -3246,6 +3268,7 @@ mod tests {
             session_path: root.join(".sessions/test.jsonl"),
             total_in: 0,
             total_out: 0,
+            context_guard_notice: None,
             config,
         }
     }
