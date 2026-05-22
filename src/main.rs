@@ -411,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
             &active_tool_names,
             trimmed,
         );
-        let system_prompt =
+        let mut system_prompt =
             merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
         if set_system_message(&mut state.messages, system_prompt.clone()) {
             if let Some(sys) = state.messages.first() {
@@ -456,6 +456,11 @@ async fn main() -> anyhow::Result<()> {
                     .trim_end_matches("\x1b[0m")
                     .to_string(),
             );
+        }
+        system_prompt =
+            merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
+        if let Some(ChatMessage::System { content }) = state.messages.first_mut() {
+            *content = system_prompt.clone();
         }
         let guard_params = crate::context_guard::guard_params_from(
             &state.config,

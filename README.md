@@ -259,7 +259,7 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/tools [auto\|fixed\|list]` | Show enabled tools, switch adaptive mode, or set the enabled pool: `/tools auto file_read,grep,list_dir` |
 | `/compare [model]` | Re-send the last user message to OpenRouter cloud for A/B |
 | `/context [maxMessages=N maxBytes=N modelTokens=N autoCompact=on\|off compactThreshold=N reserveRatio=N]` | Show prompt budget, effective model-aware limit, headroom, auto-guard status, and context settings |
-| `/compact [keep]` | Summarize or trim older turns into a compact continuation session (shared with auto-guard) |
+| `/compact [keep]` | Summarize or trim older turns into a compact continuation session (shared with auto-guard; preserves complete tool-call rounds) |
 | `/doctor` | Check backend reachability, model list, `rg`, config, and session storage |
 | `/doctor --deep [all]` | Probe OpenAI-compatible streaming, usage chunks, native tool calls, and inline JSON fallback, then save JSON/Markdown reports under `.sessions/doctor/` |
 | `/bench [model]` | Measure warmup, first-token, total latency, and output rate |
@@ -464,6 +464,8 @@ runtime.
   }
 }
 ```
+
+`context.autoCompact` defaults to on for local backends. When the effective prompt budget crosses `compactThreshold`, Small Harness compacts older conversation history automatically. Compaction splits on user turns and complete assistant/tool-call rounds so the transcript stays valid for OpenAI-compatible APIs. Conversation summaries are stored separately and merged back into each turn's system prompt. One-shot `--print` mode does not auto-compact; use `/compact` in the TUI or start a fresh session instead.
 
 ### Resolution order
 

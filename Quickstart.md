@@ -180,8 +180,10 @@ local models, use:
 
 Long coding sessions on small local models can fill the context window quickly.
 Small Harness auto-compacts older turns on local backends when usage crosses
-~85% of the effective limit (run `/context` to see headroom). Use `/compact`
-manually if you want to shrink sooner.
+~85% of the effective limit (run `/context` to see headroom). Compaction keeps
+complete tool-call rounds intact so the transcript stays valid for the next
+request. Use `/compact` manually if you want to shrink sooner. One-shot
+`--print` mode does not auto-compact.
 
 ## Scripts And CI
 
