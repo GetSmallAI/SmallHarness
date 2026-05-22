@@ -172,6 +172,21 @@ pub fn select_tool_names(config: &AgentConfig, prompt: &str) -> Vec<String> {
     out
 }
 
+/// Returns true when a tool result indicates the workspace was mutated (for ship-loop hooks).
+pub fn tool_output_mutated_workspace(tool_name: &str, output: &str) -> bool {
+    let output_json = serde_json::from_str::<Value>(output).ok();
+    let has_error =
+        output_json.as_ref().and_then(|v| v.get("error")).is_some() || output.contains("\"error\"");
+    let applied_batch_edit = tool_name == "batch_edit"
+        && output_json
+            .as_ref()
+            .and_then(|v| v.get("applied"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    !has_error
+        && (matches!(tool_name, "file_write" | "file_edit" | "apply_patch") || applied_batch_edit)
+}
+
 pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<dyn Tool>> {
     let approve_writes = config.approval_policy != ApprovalPolicy::Never;
     let path_policy = PathPolicy::new(&config.workspace_root, config.outside_workspace);
@@ -290,5 +305,29 @@ mod tests {
         };
         let names = select_tool_names(&config, "is this ready to ship?");
         assert!(names.contains(&"ship_status".to_string()));
+    }
+
+    #[test]
+    fn batch_edit_dry_run_does_not_count_as_mutation() {
+        let output = r#"{"preview":{},"applied":false,"dryRun":true,"successful":[],"failed":[]}"#;
+        assert!(!tool_output_mutated_workspace("batch_edit", output));
+    }
+
+    #[test]
+    fn batch_edit_validation_failure_does_not_count_as_mutation() {
+        let output = r#"{"preview":{},"applied":false,"successful":[],"failed":[{"filePath":"a.rs","error":"not found"}]}"#;
+        assert!(!tool_output_mutated_workspace("batch_edit", output));
+    }
+
+    #[test]
+    fn batch_edit_apply_counts_as_mutation() {
+        let output = r#"{"preview":{},"applied":true,"successful":["a.rs"],"failed":[]}"#;
+        assert!(tool_output_mutated_workspace("batch_edit", output));
+    }
+
+    #[test]
+    fn file_edit_success_counts_as_mutation() {
+        let output = r#"{"path":"src/main.rs","diff":"..."}"#;
+        assert!(tool_output_mutated_workspace("file_edit", output));
     }
 }

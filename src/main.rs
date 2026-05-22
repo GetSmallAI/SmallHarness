@@ -52,7 +52,7 @@ use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
     format_test_failure_feedback, run_selected_tests, smart_test_selection,
 };
-use crate::tools::{build_tools_for_names, select_tool_names};
+use crate::tools::{build_tools_for_names, select_tool_names, tool_output_mutated_workspace};
 use crate::warmup::warmup;
 
 const RESET: &str = "\x1b[0m";
@@ -562,19 +562,7 @@ async fn main() -> anyhow::Result<()> {
                     l.stop();
                 }
                 if let AgentEvent::ToolResult { name, output, .. } = &e {
-                    let output_json = serde_json::from_str::<serde_json::Value>(output).ok();
-                    let has_error = output_json.as_ref().and_then(|v| v.get("error")).is_some()
-                        || output.contains("\"error\"");
-                    let applied_batch_edit = name == "batch_edit"
-                        && output_json
-                            .as_ref()
-                            .and_then(|v| v.get("applied"))
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                    if !has_error
-                        && (matches!(name.as_str(), "file_write" | "file_edit" | "apply_patch")
-                            || applied_batch_edit)
-                    {
+                    if tool_output_mutated_workspace(name, output) {
                         memory_changed = true;
                     }
                 }
