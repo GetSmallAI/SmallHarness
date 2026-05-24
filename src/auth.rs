@@ -1,0 +1,226 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+
+/// Persistent on-disk credential store.
+///
+/// File format is `{"<provider>": "<api-key>"}` so users can read or edit it
+/// by hand without a CLI. Env vars always win at lookup time; this file
+/// just hydrates them at startup, so paste-once / use-everywhere works
+/// without leaking secrets into the shell's environment permanently.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AuthStore {
+    #[serde(flatten)]
+    pub keys: BTreeMap<String, String>,
+}
+
+/// Providers that have a single API-key dimension and a fixed env var.
+/// Add to this when new cloud backends land.
+pub const KNOWN_PROVIDERS: &[(&str, &str)] = &[
+    ("openai", "OPENAI_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+];
+
+/// Returns the env var name that pairs with `provider`, if known.
+pub fn env_var_for(provider: &str) -> Option<&'static str> {
+    KNOWN_PROVIDERS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, env)| *env)
+}
+
+/// `$XDG_CONFIG_HOME/small-harness/auth.json`, falling back to
+/// `~/.config/small-harness/auth.json`. Returns `None` when neither
+/// XDG_CONFIG_HOME nor HOME is set (`None` means "no persistence layer
+/// available," not an error).
+pub fn auth_file_path() -> Option<PathBuf> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config")
+    } else {
+        return None;
+    };
+    Some(base.join("small-harness").join("auth.json"))
+}
+
+impl AuthStore {
+    pub fn load_from(path: &PathBuf) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        if text.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        let store: Self =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        Ok(store)
+    }
+
+    /// Read the store at the default path. Missing file -> empty store.
+    pub fn load() -> Self {
+        match auth_file_path() {
+            Some(path) => Self::load_from(&path).unwrap_or_default(),
+            None => Self::default(),
+        }
+    }
+
+    pub fn save_to(&self, path: &PathBuf) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let body = serde_json::to_string_pretty(self)? + "\n";
+        fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+        set_secret_permissions(path)?;
+        Ok(())
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path =
+            auth_file_path().context("no auth file path (neither XDG_CONFIG_HOME nor HOME set)")?;
+        self.save_to(&path)
+    }
+
+    pub fn set(&mut self, provider: impl Into<String>, key: impl Into<String>) {
+        self.keys.insert(provider.into(), key.into());
+    }
+
+    pub fn clear(&mut self, provider: &str) -> bool {
+        self.keys.remove(provider).is_some()
+    }
+
+    pub fn get(&self, provider: &str) -> Option<&str> {
+        self.keys.get(provider).map(String::as_str)
+    }
+}
+
+#[cfg(unix)]
+fn set_secret_permissions(path: &PathBuf) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_secret_permissions(_path: &PathBuf) -> Result<()> {
+    // On Windows, ACLs are the right mechanism — leave them at default user
+    // for now. The auth file still ends up under the user's profile dir.
+    Ok(())
+}
+
+/// At startup, load the file and set any env vars that aren't already set.
+/// Env vars in the process environment always win, so CI / scripted users
+/// who already export OPENAI_API_KEY see no change in behavior.
+pub fn hydrate_env_from_file() {
+    let store = AuthStore::load();
+    for (provider, key) in &store.keys {
+        if let Some(env_name) = env_var_for(provider) {
+            let already_set = std::env::var(env_name)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !already_set {
+                std::env::set_var(env_name, key);
+            }
+        }
+    }
+}
+
+/// Render an API key for display: keep the leading `sk-` (or first 3 chars)
+/// and the last 4, mask the middle. Empty input renders as "(not set)".
+pub fn mask_key(key: &str) -> String {
+    if key.is_empty() {
+        return "(not set)".into();
+    }
+    let head_len = if key.starts_with("sk-") {
+        3
+    } else {
+        3.min(key.len())
+    };
+    let tail_len = 4.min(key.len().saturating_sub(head_len));
+    if head_len + tail_len >= key.len() {
+        return "•".repeat(key.len());
+    }
+    let head = &key[..head_len];
+    let tail = &key[key.len() - tail_len..];
+    format!("{head}•••{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_providers_includes_openai_and_openrouter() {
+        let names: Vec<&str> = KNOWN_PROVIDERS.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"openai"));
+        assert!(names.contains(&"openrouter"));
+    }
+
+    #[test]
+    fn env_var_lookup_works_for_known_providers() {
+        assert_eq!(env_var_for("openai"), Some("OPENAI_API_KEY"));
+        assert_eq!(env_var_for("openrouter"), Some("OPENROUTER_API_KEY"));
+        assert_eq!(env_var_for("not-a-provider"), None);
+    }
+
+    #[test]
+    fn mask_preserves_sk_prefix_and_last_four() {
+        assert_eq!(mask_key("sk-abcdefgh1234"), "sk-•••1234");
+        assert_eq!(mask_key(""), "(not set)");
+    }
+
+    #[test]
+    fn mask_short_key_is_fully_dotted() {
+        // 6 chars: head=3 + tail=3 = covers the whole string; render as dots.
+        assert_eq!(mask_key("abc123"), "••••••");
+    }
+
+    #[test]
+    fn store_roundtrips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::default();
+        store.set("openai", "sk-test-1");
+        store.set("openrouter", "sk-or-2");
+        store.save_to(&path).unwrap();
+
+        let loaded = AuthStore::load_from(&path).unwrap();
+        assert_eq!(loaded.get("openai"), Some("sk-test-1"));
+        assert_eq!(loaded.get("openrouter"), Some("sk-or-2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_file_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::default();
+        store.set("openai", "sk-test");
+        store.save_to(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn missing_file_loads_to_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        let store = AuthStore::load_from(&path).unwrap();
+        assert!(store.keys.is_empty());
+    }
+
+    #[test]
+    fn clear_returns_false_when_provider_absent() {
+        let mut store = AuthStore::default();
+        assert!(!store.clear("openai"));
+        store.set("openai", "sk-x");
+        assert!(store.clear("openai"));
+    }
+}

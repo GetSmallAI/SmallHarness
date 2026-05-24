@@ -7,7 +7,9 @@ use crate::backends::{backend, default_model, validate, BackendDescriptor};
 use crate::config::AgentConfig;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
+use crate::tools::Tool;
 use crate::turn_checkpoint::CheckpointStack;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct PlayRestoreSnapshot {
@@ -49,6 +51,13 @@ pub struct AppState {
     pub session_path: PathBuf,
     pub total_in: u32,
     pub total_out: u32,
+    /// Accumulated USD across every turn in this session. Each turn computes
+    /// its cost from *its own* model + rate (not the current model × total
+    /// tokens), so switching models mid-session reports correctly.
+    pub session_usd: f64,
+    /// True once any turn used a model that wasn't in the catalog. The status
+    /// line uses this to mark the total as a lower bound rather than lie.
+    pub session_cost_has_unknown: bool,
     pub context_guard_notice: Option<String>,
     pub conversation_summary: Option<String>,
     pub checkpoint_stack: CheckpointStack,
@@ -59,6 +68,15 @@ pub struct AppState {
     pub renderer: TuiRenderer,
     pub warmed_fingerprint: Option<u64>,
     pub tests_ran_this_session: bool,
+    /// Image attachments staged via `/image <path>` that will be folded into
+    /// the next user turn. Cleared after they're sent. Stored as
+    /// `data:image/...;base64,...` URLs so resume doesn't have to re-read
+    /// the file from disk.
+    pub pending_image_attachments: Vec<String>,
+    /// Tools sourced from configured MCP servers. Spawned once at startup
+    /// (in `main`) and appended to every turn's tool list. Kept as Arcs so
+    /// each turn shares the same live JSON-RPC connection per server.
+    pub mcp_tools: Vec<Arc<dyn Tool>>,
 }
 
 impl AppState {

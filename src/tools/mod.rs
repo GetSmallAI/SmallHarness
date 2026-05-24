@@ -19,6 +19,7 @@ mod repo_search;
 mod run_tests;
 mod shell;
 mod ship_status;
+mod web_fetch;
 
 pub use apply_patch_tool::{patch_changed_files, ApplyPatchTool};
 pub use batch_edit::BatchEditTool;
@@ -33,6 +34,14 @@ pub use repo_search::RepoSearchTool;
 pub use run_tests::RunTestsTool;
 pub use shell::ShellTool;
 pub use ship_status::ShipStatusTool;
+pub use web_fetch::WebFetchTool;
+
+/// Base64-encode raw bytes for use in a data URL (e.g. `data:image/png;base64,...`).
+/// Re-exported from `file_read` so callers outside the tools module (like
+/// `/image`) don't have to duplicate the implementation.
+pub fn image_base64_for_data_url(bytes: &[u8]) -> String {
+    file_read::b64_encode(bytes)
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolPreview {
@@ -251,6 +260,9 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
             })),
             "ship_status" => Some(Arc::new(ShipStatusTool {
                 workspace_root: config.workspace_root.clone(),
+            })),
+            "web_fetch" => Some(Arc::new(WebFetchTool {
+                http: reqwest::Client::new(),
             })),
             _ => None,
         };

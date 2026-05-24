@@ -147,6 +147,10 @@ pub struct TuiRenderer {
     grouped_pending: Vec<PendingCall>,
     grouped_category: String,
     minimal_batch: BTreeMap<String, usize>,
+    /// Per-turn flag: have we already printed the "thinking…" header for the
+    /// current burst of reasoning deltas? Reset at end_turn so each turn
+    /// gets its own header.
+    reasoning_header_shown: bool,
 }
 
 impl TuiRenderer {
@@ -158,7 +162,18 @@ impl TuiRenderer {
             grouped_pending: Vec::new(),
             grouped_category: String::new(),
             minimal_batch: BTreeMap::new(),
+            reasoning_header_shown: false,
         }
+    }
+
+    /// Toggle reasoning panel visibility at runtime. Returns the new state.
+    pub fn set_reasoning(&mut self, on: bool) -> bool {
+        self.display.reasoning = on;
+        on
+    }
+
+    pub fn reasoning_enabled(&self) -> bool {
+        self.display.reasoning
     }
 
     pub fn handle(&mut self, event: AgentEvent) {
@@ -184,7 +199,19 @@ impl TuiRenderer {
     pub fn end_turn(&mut self) {
         self.flush_grouped();
         self.flush_minimal();
+        self.end_reasoning();
         self.end_streaming();
+        self.reasoning_header_shown = false;
+    }
+
+    /// Close out the reasoning panel before switching to other output (text,
+    /// tool calls). Adds a trailing newline only if we actually printed one.
+    fn end_reasoning(&mut self) {
+        if self.reasoning_header_shown {
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{RESET}");
+            let _ = out.flush();
+        }
     }
 
     fn end_streaming(&mut self) {
@@ -198,6 +225,12 @@ impl TuiRenderer {
 
     fn render_text(&mut self, delta: &str) {
         self.flush_minimal();
+        // Switching from reasoning to answer text — close the panel cleanly
+        // so the answer doesn't appear glued to the dim trace.
+        if self.reasoning_header_shown {
+            self.end_reasoning();
+            self.reasoning_header_shown = false;
+        }
         self.streaming = true;
         let mut out = std::io::stdout();
         let _ = write!(out, "{delta}");
@@ -210,7 +243,13 @@ impl TuiRenderer {
         }
         self.end_streaming();
         let mut out = std::io::stdout();
-        let _ = write!(out, "{DIM}{delta}{RESET}");
+        if !self.reasoning_header_shown {
+            let _ = writeln!(out, "{GRAY}  thinking…{RESET}");
+            let _ = write!(out, "{DIM}  ");
+            self.reasoning_header_shown = true;
+        }
+        let dimmed = delta.replace('\n', "\n  ");
+        let _ = write!(out, "{dimmed}");
         let _ = out.flush();
     }
 

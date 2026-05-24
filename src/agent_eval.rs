@@ -336,7 +336,7 @@ pub async fn run_agent_eval(
             content: system_prompt,
         },
         ChatMessage::User {
-            content: fixture.prompt.clone(),
+            content: fixture.prompt.clone().into(),
         },
     ];
     let tools = build_tools_for_names(&eval_config, &active_tool_names);

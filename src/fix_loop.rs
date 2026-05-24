@@ -200,6 +200,8 @@ mod tests {
             session_path: root.join(".sessions/test.jsonl"),
             total_in: 0,
             total_out: 0,
+            session_usd: 0.0,
+            session_cost_has_unknown: false,
             context_guard_notice: None,
             conversation_summary: None,
             checkpoint_stack: CheckpointStack::new(config.checkpoints.limits()),
@@ -210,6 +212,8 @@ mod tests {
             renderer: TuiRenderer::new(config.display.clone()),
             warmed_fingerprint: None,
             tests_ran_this_session: false,
+            pending_image_attachments: Vec::new(),
+            mcp_tools: Vec::new(),
             config,
         }
     }

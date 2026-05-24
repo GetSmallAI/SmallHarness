@@ -432,7 +432,7 @@ fn deterministic_summary(messages: &[ChatMessage]) -> String {
         .filter(|message| matches!(message, ChatMessage::Tool { .. }))
         .count();
     let last_user = messages.iter().rev().find_map(|message| match message {
-        ChatMessage::User { content } => Some(truncate_summary_text(content.trim(), 240)),
+        ChatMessage::User { content } => Some(truncate_summary_text(content.as_text().trim(), 240)),
         _ => None,
     });
     match last_user {
@@ -475,7 +475,7 @@ pub async fn summarize_transcript(
             content: "Update this Small Harness conversation summary for continuing context. Preserve durable goals, decisions, files touched, errors, and pending work. Fold the existing summary and new messages into one concise summary without duplicating details.".into(),
         },
         ChatMessage::User {
-            content: transcript,
+            content: transcript.into(),
         },
     ];
     let req = ChatRequest {

@@ -30,7 +30,7 @@ fn image_ext(path: &str) -> Option<&'static str> {
     None
 }
 
-fn b64_encode(input: &[u8]) -> String {
+pub(crate) fn b64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut chunks = input.chunks_exact(3);

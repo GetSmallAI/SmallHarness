@@ -12,7 +12,7 @@ pub enum ChatMessage {
         content: String,
     },
     User {
-        content: String,
+        content: UserContent,
     },
     Assistant {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,10 +26,68 @@ pub enum ChatMessage {
     },
 }
 
-impl ChatMessage {
-    pub fn user_text(&self) -> Option<&str> {
+/// Body of a user-role message. Serializes either as a bare string (the
+/// dominant case — every text-only turn) or as an array of content parts
+/// (text + image_url), matching the OpenAI Chat Completions API's
+/// multi-part user message format. Using `#[serde(untagged)]` keeps the
+/// wire format identical to the pre-image shape for plain text turns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UserContent {
+    Text(String),
+    Parts(Vec<UserContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
+impl UserContent {
+    /// Extract the textual portion of the message. For Parts variants this
+    /// concatenates the text parts; non-text parts (images) are replaced
+    /// with a `[image]` marker so consumers that only care about text
+    /// (transcripts, summaries, byte budgets) still get something sensible.
+    pub fn as_text(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            ChatMessage::User { content } => Some(content),
+            UserContent::Text(s) => std::borrow::Cow::Borrowed(s.as_str()),
+            UserContent::Parts(parts) => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        UserContentPart::Text { text } => out.push_str(text),
+                        UserContentPart::ImageUrl { .. } => out.push_str("[image]"),
+                    }
+                }
+                std::borrow::Cow::Owned(out)
+            }
+        }
+    }
+}
+
+impl From<String> for UserContent {
+    fn from(s: String) -> Self {
+        UserContent::Text(s)
+    }
+}
+
+impl From<&str> for UserContent {
+    fn from(s: &str) -> Self {
+        UserContent::Text(s.to_string())
+    }
+}
+
+impl ChatMessage {
+    pub fn user_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            ChatMessage::User { content } => Some(content.as_text()),
             _ => None,
         }
     }
@@ -312,6 +370,72 @@ mod tests {
         match ev {
             SseEvent::Chunk(c) => c.choices.first()?.delta.content.as_deref(),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn user_content_text_serializes_as_bare_string() {
+        let msg = ChatMessage::User {
+            content: UserContent::Text("hello".into()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn user_content_parts_serialize_as_array() {
+        let msg = ChatMessage::User {
+            content: UserContent::Parts(vec![
+                UserContentPart::Text {
+                    text: "describe this".into(),
+                },
+                UserContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        let parts = json["content"].as_array().expect("content is array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "describe this");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn user_content_text_roundtrips_through_json() {
+        let wire = serde_json::json!({"role": "user", "content": "hi"});
+        let msg: ChatMessage = serde_json::from_value(wire).unwrap();
+        match msg {
+            ChatMessage::User { content } => {
+                assert!(matches!(content, UserContent::Text(ref s) if s == "hi"));
+                assert_eq!(content.as_text(), "hi");
+            }
+            _ => panic!("expected user"),
+        }
+    }
+
+    #[test]
+    fn user_content_parts_roundtrip_through_json() {
+        let wire = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,XX"}}
+            ]
+        });
+        let msg: ChatMessage = serde_json::from_value(wire).unwrap();
+        match msg {
+            ChatMessage::User { content } => {
+                let text = content.as_text();
+                assert!(text.contains("what is this?"));
+                assert!(text.contains("[image]"));
+            }
+            _ => panic!("expected user"),
         }
     }
 

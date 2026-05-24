@@ -243,16 +243,23 @@ pub fn search_sessions(dir: &str, query: &str) -> Result<Vec<SessionSearchHit>> 
 
 fn infer_session_title(entries: &[SessionEntry]) -> Option<String> {
     entries.iter().find_map(|entry| match &entry.message {
-        ChatMessage::User { content } if !content.trim().is_empty() => Some(one_line(content, 64)),
+        ChatMessage::User { content } => {
+            let text = content.as_text();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(one_line(trimmed, 64))
+            }
+        }
         _ => None,
     })
 }
 
 fn message_text(message: &ChatMessage) -> String {
     match message {
-        ChatMessage::System { content }
-        | ChatMessage::User { content }
-        | ChatMessage::Tool { content, .. } => content.clone(),
+        ChatMessage::System { content } | ChatMessage::Tool { content, .. } => content.clone(),
+        ChatMessage::User { content } => content.as_text().into_owned(),
         ChatMessage::Assistant { content, .. } => content.clone().unwrap_or_default(),
     }
 }
@@ -279,7 +286,7 @@ pub fn render_markdown(entries: &[SessionEntry]) -> String {
             }
             ChatMessage::User { content } => {
                 out.push_str("## User\n\n");
-                out.push_str(content);
+                out.push_str(&content.as_text());
                 out.push_str("\n\n");
             }
             ChatMessage::Assistant {

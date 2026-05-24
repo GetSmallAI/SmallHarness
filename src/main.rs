@@ -2,6 +2,7 @@ mod agent;
 mod agent_eval;
 mod app_state;
 mod approval;
+mod auth;
 mod backends;
 mod banner;
 mod batch_operations;
@@ -12,11 +13,13 @@ mod catalog;
 mod commands;
 mod config;
 mod context_guard;
+mod crash_log;
 mod fix_loop;
 mod handoff;
 mod hardware;
 mod input;
 mod loader;
+mod mcp;
 mod openai;
 mod playground;
 mod project_memory;
@@ -30,6 +33,7 @@ mod shipcheck;
 mod test_integration;
 mod tools;
 mod turn_checkpoint;
+mod update_check;
 mod warmup;
 
 use std::io::{IsTerminal, Read, Write};
@@ -74,6 +78,87 @@ impl crate::agent::ApprovalProvider for NonInteractiveApproval {
     ) -> bool {
         self.allow
     }
+}
+
+/// Returns the shell name if the user invoked `small-harness completions <shell>`.
+/// Recognized shells: bash, zsh, fish.
+fn parse_completions_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    let first = args.next()?;
+    if first != "completions" {
+        return None;
+    }
+    args.next()
+}
+
+fn run_completions(shell: &str) -> anyhow::Result<()> {
+    let script = match shell {
+        "bash" => COMPLETIONS_BASH,
+        "zsh" => COMPLETIONS_ZSH,
+        "fish" => COMPLETIONS_FISH,
+        other => {
+            eprintln!("unsupported shell: {other} (try: bash, zsh, fish)");
+            std::process::exit(2);
+        }
+    };
+    print!("{script}");
+    Ok(())
+}
+
+const COMPLETIONS_BASH: &str = r#"# small-harness bash completion
+_small_harness() {
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "--print -p --continue -c --allow-tools --yes completions" -- "$cur") )
+        return 0
+    fi
+    if [[ "$prev" == "completions" ]]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+        return 0
+    fi
+}
+complete -F _small_harness small-harness
+"#;
+
+const COMPLETIONS_ZSH: &str = r#"#compdef small-harness
+# small-harness zsh completion
+
+_small_harness() {
+    local -a opts
+    opts=(
+        '--print[Run one-shot with prompt]:prompt'
+        '-p[Run one-shot with prompt]:prompt'
+        '--continue[Resume the latest session]'
+        '-c[Resume the latest session]'
+        '--allow-tools[Auto-approve tool calls in one-shot mode]'
+        '--yes[Auto-approve tool calls in one-shot mode]'
+        'completions[Emit a shell completion script]:shell:(bash zsh fish)'
+    )
+    _arguments $opts
+}
+
+compdef _small_harness small-harness
+"#;
+
+const COMPLETIONS_FISH: &str = r#"# small-harness fish completion
+complete -c small-harness -l print -s p -d 'Run one-shot with prompt'
+complete -c small-harness -l continue -s c -d 'Resume the latest session'
+complete -c small-harness -l allow-tools -d 'Auto-approve tool calls in one-shot mode'
+complete -c small-harness -l yes -d 'Auto-approve tool calls in one-shot mode'
+complete -c small-harness -n '__fish_use_subcommand' -a completions -d 'Emit a shell completion script'
+complete -c small-harness -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish' -d 'Shell flavor'
+"#;
+
+/// Returns true if the user passed `--continue` or `-c`. Only consulted when
+/// no one-shot prompt was given — `--continue` is interactive-mode only.
+fn should_continue_latest() -> bool {
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--continue" || a == "-c")
 }
 
 fn parse_one_shot_args() -> Option<anyhow::Result<CliOneShot>> {
@@ -145,7 +230,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             content: system_prompt,
         },
         ChatMessage::User {
-            content: prompt.to_string(),
+            content: prompt.to_string().into(),
         },
     ];
     let tools = build_tools_for_names(&config, &active_tool_names);
@@ -242,6 +327,11 @@ async fn probe_backend(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    crate::auth::hydrate_env_from_file();
+    crate::crash_log::install_panic_hook();
+    if let Some(shell) = parse_completions_arg() {
+        return run_completions(&shell);
+    }
     if let Some(opts) = parse_one_shot_args() {
         return run_one_shot(opts?).await;
     }
@@ -273,6 +363,19 @@ async fn main() -> anyhow::Result<()> {
             profile: config.profile.as_str(),
             model: &model,
             approval: config.approval_policy.as_str(),
+        });
+        if let Some(notice) = crate::update_check::pending_notice(env!("CARGO_PKG_VERSION")) {
+            println!("  {YELLOW}↑{RESET} {DIM}{notice}{RESET}");
+        }
+    }
+
+    // Refresh the update-check cache in the background. Failures are silent
+    // and the result lands in time for the next launch; we never block the
+    // user's first prompt on a GitHub API call.
+    {
+        let http_bg = http.clone();
+        tokio::spawn(async move {
+            crate::update_check::refresh_cache_if_stale(&http_bg).await;
         });
     }
 
@@ -317,6 +420,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     init_session_dir(&config.session_dir)?;
+    crate::crash_log::set_crash_dir(&config.session_dir);
     let mut input_history = InputHistory::load(
         config.history_path(),
         config.history.max_entries,
@@ -338,6 +442,8 @@ async fn main() -> anyhow::Result<()> {
         session_path,
         total_in: 0,
         total_out: 0,
+        session_usd: 0.0,
+        session_cost_has_unknown: false,
         context_guard_notice: None,
         conversation_summary: None,
         checkpoint_stack: CheckpointStack::new(checkpoint_limits),
@@ -348,7 +454,50 @@ async fn main() -> anyhow::Result<()> {
         renderer: TuiRenderer::new(display),
         warmed_fingerprint,
         tests_ran_this_session: false,
+        pending_image_attachments: Vec::new(),
+        mcp_tools: Vec::new(),
     };
+
+    if !state.config.mcp_servers.is_empty() {
+        let (tools, errors) = crate::mcp::spawn_configured(&state.config.mcp_servers).await;
+        if !tools.is_empty() {
+            println!(
+                "  {DIM}MCP: {} tool(s) loaded from {} server(s){RESET}",
+                tools.len(),
+                state.config.mcp_servers.len() - errors.len()
+            );
+        }
+        for err in &errors {
+            println!("  {YELLOW}!{RESET} {DIM}MCP: {err}{RESET}");
+        }
+        state.mcp_tools = tools;
+    }
+
+    if should_continue_latest() {
+        match crate::session::resolve_session_path(&state.session_dir, "latest") {
+            Ok(Some(path)) => match crate::session::load_messages(&path) {
+                Ok(messages) => {
+                    state.messages = messages;
+                    state.session_path = path.clone();
+                    let id = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("session");
+                    println!(
+                        "{GREEN}✓{RESET} {DIM}continuing{RESET} {} {DIM}({} messages){RESET}",
+                        id,
+                        state.messages.len()
+                    );
+                }
+                Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+            },
+            Ok(None) => println!(
+                "{YELLOW}!{RESET} {DIM}--continue: no prior session found in {}{RESET}",
+                state.session_dir
+            ),
+            Err(e) => println!("{YELLOW}!{RESET} {DIM}--continue: {e}{RESET}"),
+        }
+    }
 
     loop {
         let input = match state.config.display.input_style {

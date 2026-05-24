@@ -81,7 +81,15 @@ fix a bundled failing test — then `/fix` on your own repo.
 
 ## Quick Install
 
-You will need Rust (stable, 1.75+) and one local-inference backend running.
+Once a tagged release is published, the fastest path is Homebrew via the
+project tap (see [packaging/homebrew/small-harness.rb](packaging/homebrew/small-harness.rb)
+for the formula template):
+
+```bash
+brew install getsmallai/tap/small-harness
+```
+
+From source (requires Rust stable 1.75+) and one local-inference backend:
 
 ```bash
 git clone https://github.com/GetSmallAI/SmallHarness.git

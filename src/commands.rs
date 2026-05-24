@@ -104,6 +104,18 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "Resume latest or named session"),
     ("/export", "Export a session to markdown or json"),
     (
+        "/auth",
+        "Manage API keys for cloud providers (list, set <provider>, clear <provider>)",
+    ),
+    (
+        "/image",
+        "Attach an image to the next user prompt (vision-capable models only)",
+    ),
+    (
+        "/reasoning",
+        "Toggle the streaming reasoning panel (on, off, status)",
+    ),
+    (
         "/backend",
         "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter)",
     ),
@@ -193,6 +205,9 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/sessions" => cmd_sessions(&args, state)?,
         "/resume" => cmd_resume(&args, state)?,
         "/export" => cmd_export(&args, state)?,
+        "/auth" => cmd_auth(&args).await?,
+        "/image" => cmd_image(&args, state),
+        "/reasoning" => cmd_reasoning(&args, state),
         "/backend" => cmd_backend(&args, state).await?,
         "/profile" => cmd_profile(&args, state).await?,
         "/model" => cmd_model(&args, state).await?,
@@ -270,6 +285,10 @@ fn cmd_new(state: &mut AppState) {
     state.context_guard_notice = None;
     state.checkpoint_stack =
         crate::turn_checkpoint::CheckpointStack::new(state.config.checkpoints.limits());
+    state.total_in = 0;
+    state.total_out = 0;
+    state.session_usd = 0.0;
+    state.session_cost_has_unknown = false;
     state.reset_session();
     println!("  {GREEN}✓{RESET} {DIM}New session started.{RESET}");
 }
@@ -401,6 +420,17 @@ fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
         fmt_tokens(state.total_in),
         fmt_tokens(state.total_out)
     );
+    if state.session_usd > 0.0 || state.session_cost_has_unknown {
+        let prefix = if state.session_cost_has_unknown {
+            "≥"
+        } else {
+            ""
+        };
+        println!(
+            "  {DIM}cost{RESET}      {prefix}{} (sum of catalog-priced turns)",
+            catalog::format_usd(state.session_usd)
+        );
+    }
     Ok(())
 }
 
@@ -561,7 +591,7 @@ async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
             content: handoff_system_prompt(),
         },
         ChatMessage::User {
-            content: render_handoff_prompt(&context, freshness.as_ref()),
+            content: render_handoff_prompt(&context, freshness.as_ref()).into(),
         },
     ];
     let req = ChatRequest {
@@ -909,6 +939,214 @@ fn cmd_export(args: &str, state: &AppState) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_auth(args: &str) -> Result<()> {
+    use crate::auth::{auth_file_path, env_var_for, mask_key, AuthStore, KNOWN_PROVIDERS};
+
+    let (action, rest) = match args.split_once(' ') {
+        Some((a, r)) => (a.trim(), r.trim()),
+        None => (args.trim(), ""),
+    };
+
+    match action {
+        "" | "list" | "status" => {
+            print_auth_status();
+            Ok(())
+        }
+        "set" => {
+            if rest.is_empty() {
+                println!(
+                    "  {DIM}usage: /auth set <provider>  (known: {}){RESET}",
+                    KNOWN_PROVIDERS
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                return Ok(());
+            }
+            let provider = rest.to_lowercase();
+            if env_var_for(&provider).is_none() {
+                println!("  {RED}✗{RESET} {DIM}unknown provider: {provider}{RESET}");
+                return Ok(());
+            }
+            let key = plain_read_line(format!(
+                "  {DIM}Paste {} API key (visible while typing): {RESET}",
+                provider
+            ))
+            .await?
+            .trim()
+            .to_string();
+            if key.is_empty() {
+                println!("  {DIM}Cancelled (empty key).{RESET}");
+                return Ok(());
+            }
+            let mut store = AuthStore::load();
+            store.set(&provider, &key);
+            match store.save() {
+                Ok(()) => {
+                    if let Some(env_name) = env_var_for(&provider) {
+                        std::env::set_var(env_name, &key);
+                    }
+                    let path = auth_file_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(no path)".into());
+                    println!(
+                        "  {GREEN}✓{RESET} {DIM}{} →{RESET} {CYAN}{}{RESET} {DIM}(saved to {}){RESET}",
+                        provider,
+                        mask_key(&key),
+                        path
+                    );
+                }
+                Err(e) => println!("  {RED}✗{RESET} {DIM}save failed: {e}{RESET}"),
+            }
+            Ok(())
+        }
+        "clear" => {
+            if rest.is_empty() {
+                println!("  {DIM}usage: /auth clear <provider>{RESET}");
+                return Ok(());
+            }
+            let provider = rest.to_lowercase();
+            let mut store = AuthStore::load();
+            if !store.clear(&provider) {
+                println!("  {DIM}no stored key for {provider}{RESET}");
+                return Ok(());
+            }
+            match store.save() {
+                Ok(()) => {
+                    println!("  {GREEN}✓{RESET} {DIM}cleared {provider} from auth file{RESET}")
+                }
+                Err(e) => println!("  {RED}✗{RESET} {DIM}save failed: {e}{RESET}"),
+            }
+            // Env var stays set for the current process — re-launch to drop it.
+            Ok(())
+        }
+        other => {
+            println!(
+                "  {RED}✗{RESET} {DIM}unknown subcommand: {other} (try: list, set, clear){RESET}"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn print_auth_status() {
+    use crate::auth::{auth_file_path, mask_key, AuthStore, KNOWN_PROVIDERS};
+    let store = AuthStore::load();
+    println!("  {DIM}provider     status                  source{RESET}");
+    for (provider, env_name) in KNOWN_PROVIDERS {
+        let env_val = std::env::var(env_name).unwrap_or_default();
+        let (display, source) = if !env_val.is_empty() {
+            (mask_key(&env_val), format!("env: {env_name}"))
+        } else if let Some(k) = store.get(provider) {
+            (mask_key(k), "auth file".into())
+        } else {
+            ("(not set)".into(), "—".into())
+        };
+        println!("  {:<12} {:<22}  {DIM}{}{RESET}", provider, display, source);
+    }
+    if let Some(path) = auth_file_path() {
+        println!("  {DIM}file{RESET}     {}", path.display());
+    }
+}
+
+fn cmd_image(args: &str, state: &mut AppState) {
+    let args = args.trim();
+    if args.is_empty() || args == "list" {
+        if state.pending_image_attachments.is_empty() {
+            println!("  {DIM}no images staged. Usage: /image <path>{RESET}");
+        } else {
+            println!(
+                "  {DIM}{} image(s) staged for next turn:{RESET}",
+                state.pending_image_attachments.len()
+            );
+            for (i, url) in state.pending_image_attachments.iter().enumerate() {
+                let summary = url.split(';').next().unwrap_or(url);
+                println!("  {DIM}{:>2}){RESET} {}", i + 1, summary);
+            }
+        }
+        return;
+    }
+    if args == "clear" {
+        let n = state.pending_image_attachments.len();
+        state.pending_image_attachments.clear();
+        println!("  {GREEN}✓{RESET} {DIM}cleared {n} staged image(s){RESET}");
+        return;
+    }
+    let path = std::path::Path::new(args);
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            println!(
+                "  {RED}✗{RESET} {DIM}cannot read {}: {e}{RESET}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let mime = guess_image_mime(path);
+    let data_url = format!(
+        "data:{mime};base64,{}",
+        crate::tools::image_base64_for_data_url(&bytes)
+    );
+    let supports_vision = catalog::lookup(state.config.backend, &state.model)
+        .map(|m| m.vision)
+        .unwrap_or(state.config.backend.is_local());
+    if !supports_vision {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}{} isn't catalog-marked as vision-capable — the model may reject the attachment.{RESET}",
+            state.model
+        );
+    }
+    state.pending_image_attachments.push(data_url);
+    println!(
+        "  {GREEN}✓{RESET} {DIM}image staged ({} bytes, {}). Send a prompt to attach.{RESET}",
+        bytes.len(),
+        mime
+    );
+}
+
+fn cmd_reasoning(args: &str, state: &mut AppState) {
+    let arg = args.trim().to_lowercase();
+    let new_state = match arg.as_str() {
+        "" | "status" => {
+            let cur = state.renderer.reasoning_enabled();
+            println!(
+                "  {DIM}reasoning panel:{RESET} {} {DIM}(usage: /reasoning on|off){RESET}",
+                if cur { "on" } else { "off" }
+            );
+            return;
+        }
+        "on" | "true" | "1" => true,
+        "off" | "false" | "0" => false,
+        other => {
+            println!("  {RED}✗{RESET} {DIM}unknown value: {other} (use on, off, status){RESET}");
+            return;
+        }
+    };
+    state.renderer.set_reasoning(new_state);
+    state.config.display.reasoning = new_state;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}reasoning panel →{RESET} {CYAN}{}{RESET}",
+        if new_state { "on" } else { "off" }
+    );
+}
+
+fn guess_image_mime(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
 async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
     let chosen: Option<BackendName> = if !args.is_empty() {
         BackendName::parse(args)
@@ -1172,7 +1410,7 @@ async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
             content: state.config.render_system_prompt(),
         },
         ChatMessage::User {
-            content: user_text.to_string(),
+            content: user_text.to_string().into(),
         },
     ];
     let req = ChatRequest {
@@ -2574,7 +2812,7 @@ fn last_user_prompt(state: &AppState) -> Option<String> {
         .messages
         .iter()
         .rev()
-        .find_map(|m| m.user_text().map(str::to_string))
+        .find_map(|m| m.user_text().map(|s| s.into_owned()))
 }
 
 fn parse_eval_model(spec: &str, state: &AppState) -> (BackendDescriptor, String) {
@@ -2594,7 +2832,7 @@ async fn eval_once(
     tools_on: bool,
 ) -> Result<String> {
     let messages = vec![ChatMessage::User {
-        content: prompt.to_string(),
+        content: prompt.to_string().into(),
     }];
     let tool_defs = if tools_on {
         let tools = build_tools(&state.config);
@@ -3244,7 +3482,7 @@ async fn cmd_prompt(args: &str, state: &mut AppState) -> Result<()> {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(str::to_string)
-                .or_else(|| latest_user_prompt(&state.messages).map(str::to_string));
+                .or_else(|| latest_user_prompt(&state.messages));
             let Some(content) = content else {
                 println!("  {YELLOW}!{RESET} {DIM}No prompt text provided and no prior user prompt found.{RESET}");
                 return Ok(());
@@ -3408,8 +3646,11 @@ Use double curly braces {{}} for variable placeholders."#;
     Ok(())
 }
 
-fn latest_user_prompt(messages: &[ChatMessage]) -> Option<&str> {
-    messages.iter().rev().find_map(ChatMessage::user_text)
+fn latest_user_prompt(messages: &[ChatMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| m.user_text().map(|s| s.into_owned()))
 }
 
 fn parse_prompt_variables(parts: &[&str]) -> HashMap<String, String> {
@@ -3432,7 +3673,7 @@ async fn run_prompt_content(content: &str, state: &mut AppState) -> Result<()> {
     }
 
     let user_msg = ChatMessage::User {
-        content: content.to_string(),
+        content: content.to_string().into(),
     };
     state.messages.push(user_msg.clone());
     save_message(&state.session_path, &user_msg)?;
@@ -3516,6 +3757,8 @@ mod tests {
             session_path: root.join(".sessions/test.jsonl"),
             total_in: 0,
             total_out: 0,
+            session_usd: 0.0,
+            session_cost_has_unknown: false,
             context_guard_notice: None,
             conversation_summary: None,
             checkpoint_stack: crate::turn_checkpoint::CheckpointStack::new(
@@ -3528,6 +3771,8 @@ mod tests {
             renderer: crate::renderer::TuiRenderer::new(config.display.clone()),
             warmed_fingerprint: None,
             tests_ran_this_session: false,
+            pending_image_attachments: Vec::new(),
+            mcp_tools: Vec::new(),
             config,
         }
     }

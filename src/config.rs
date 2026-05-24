@@ -17,6 +17,7 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     "run_tests",
     "shell",
     "ship_status",
+    "web_fetch",
 ];
 
 pub fn is_tool_name(s: &str) -> bool {
@@ -393,6 +394,7 @@ pub struct AgentConfig {
     pub checkpoints: CheckpointConfig,
     pub fix: FixConfig,
     pub profiles: BTreeMap<String, ProfileModels>,
+    pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
 
 const SYSTEM_PROMPT: &str = concat!(
@@ -446,6 +448,7 @@ impl Default for AgentConfig {
             checkpoints: CheckpointConfig::default(),
             fix: FixConfig::default(),
             profiles: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
         }
     }
 }
@@ -482,6 +485,8 @@ struct FileConfig {
     checkpoints: Option<CheckpointConfig>,
     fix: Option<FixConfig>,
     profiles: Option<BTreeMap<String, ProfileModels>>,
+    #[serde(rename = "mcpServers")]
+    mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
 }
 
 impl AgentConfig {
@@ -714,6 +719,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(p) = file.profiles {
                     config.profiles = p;
+                }
+                if let Some(s) = file.mcp_servers {
+                    config.mcp_servers = s;
                 }
                 if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
                     config.mode = m;

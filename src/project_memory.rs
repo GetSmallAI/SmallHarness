@@ -665,12 +665,45 @@ pub fn render_system_prompt_with_memory(
     prompt: &str,
 ) -> String {
     let base = config.render_system_prompt_for_tools(tools);
+    let mut out = base;
     if let Some(context) = maybe_project_context(config, backend, prompt) {
-        format!("{base}\n\nLocal project memory context:\n{context}")
-    } else {
-        base
+        out.push_str("\n\nLocal project memory context:\n");
+        out.push_str(&context);
     }
+    if let Some(project_prompt) = load_project_prompt(&config.workspace_root) {
+        out.push_str("\n\nProject-specific guidance (.small-harness/prompt.md):\n");
+        out.push_str(&project_prompt);
+    }
+    out
 }
+
+/// Read `.small-harness/prompt.md` from the workspace root, if present.
+///
+/// Truncated at PROJECT_PROMPT_MAX_BYTES so a stray multi-megabyte file
+/// can't blow up every turn's prompt budget. Truncation is byte-accurate
+/// but rolled back to a char boundary so we don't slice mid-UTF-8.
+fn load_project_prompt(workspace_root: &str) -> Option<String> {
+    let path = std::path::Path::new(workspace_root)
+        .join(".small-harness")
+        .join("prompt.md");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() <= PROJECT_PROMPT_MAX_BYTES {
+        return Some(trimmed.to_string());
+    }
+    let mut cutoff = PROJECT_PROMPT_MAX_BYTES;
+    while cutoff > 0 && !trimmed.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let mut out = trimmed[..cutoff].to_string();
+    out.push_str("\n\n[… project prompt truncated …]");
+    Some(out)
+}
+
+const PROJECT_PROMPT_MAX_BYTES: usize = 8 * 1024;
 
 pub fn prompt_looks_repo_related(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
@@ -1391,5 +1424,43 @@ mod tests {
         assert_eq!(load_project_notes(&config).unwrap().len(), 1);
         assert_eq!(forget_project_note(&config, &note.id).unwrap(), 1);
         assert!(load_project_notes(&config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_prompt_is_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::load_project_prompt(dir.path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn project_prompt_loads_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join(".small-harness");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("prompt.md"), "Always use snake_case.\n").unwrap();
+        let loaded = super::load_project_prompt(dir.path().to_str().unwrap()).unwrap();
+        assert!(loaded.contains("snake_case"));
+        assert!(!loaded.ends_with('\n'));
+    }
+
+    #[test]
+    fn project_prompt_truncates_when_over_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join(".small-harness");
+        std::fs::create_dir_all(&nested).unwrap();
+        let huge = "x".repeat(super::PROJECT_PROMPT_MAX_BYTES * 2);
+        std::fs::write(nested.join("prompt.md"), &huge).unwrap();
+        let loaded = super::load_project_prompt(dir.path().to_str().unwrap()).unwrap();
+        assert!(loaded.contains("truncated"));
+        assert!(loaded.len() <= super::PROJECT_PROMPT_MAX_BYTES + 64);
+    }
+
+    #[test]
+    fn empty_project_prompt_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join(".small-harness");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("prompt.md"), "   \n\n  ").unwrap();
+        assert!(super::load_project_prompt(dir.path().to_str().unwrap()).is_none());
     }
 }

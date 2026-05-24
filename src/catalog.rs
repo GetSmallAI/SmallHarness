@@ -11,6 +11,9 @@ pub struct ModelInfo {
     pub context_tokens: u32,
     pub input_per_mtoken_usd: f32,
     pub output_per_mtoken_usd: f32,
+    /// True when the model can accept image content parts. Drives whether
+    /// `/image` is allowed to attach images for the next turn.
+    pub vision: bool,
 }
 
 const OPENAI_MODELS: &[ModelInfo] = &[
@@ -19,54 +22,63 @@ const OPENAI_MODELS: &[ModelInfo] = &[
         context_tokens: 128_000,
         input_per_mtoken_usd: 2.50,
         output_per_mtoken_usd: 10.00,
+        vision: true,
     },
     ModelInfo {
         id: "gpt-4o-mini",
         context_tokens: 128_000,
         input_per_mtoken_usd: 0.15,
         output_per_mtoken_usd: 0.60,
+        vision: true,
     },
     ModelInfo {
         id: "gpt-4-turbo",
         context_tokens: 128_000,
         input_per_mtoken_usd: 10.00,
         output_per_mtoken_usd: 30.00,
+        vision: true,
     },
     ModelInfo {
         id: "gpt-4",
         context_tokens: 8_192,
         input_per_mtoken_usd: 30.00,
         output_per_mtoken_usd: 60.00,
+        vision: false,
     },
     ModelInfo {
         id: "gpt-3.5-turbo",
         context_tokens: 16_385,
         input_per_mtoken_usd: 0.50,
         output_per_mtoken_usd: 1.50,
+        vision: false,
     },
     ModelInfo {
         id: "o1",
         context_tokens: 200_000,
         input_per_mtoken_usd: 15.00,
         output_per_mtoken_usd: 60.00,
+        vision: true,
     },
     ModelInfo {
         id: "o1-mini",
         context_tokens: 128_000,
         input_per_mtoken_usd: 3.00,
         output_per_mtoken_usd: 12.00,
+        vision: false,
     },
     ModelInfo {
         id: "o1-preview",
         context_tokens: 128_000,
         input_per_mtoken_usd: 15.00,
         output_per_mtoken_usd: 60.00,
+        vision: false,
     },
     ModelInfo {
         id: "o3-mini",
         context_tokens: 200_000,
         input_per_mtoken_usd: 1.10,
         output_per_mtoken_usd: 4.40,
+        vision: false,
     },
 ];
 
@@ -114,6 +126,34 @@ pub fn format_cost_label(info: &ModelInfo) -> String {
             "{ctx} ctx · ${:.2}/${:.2} per Mtoken",
             info.input_per_mtoken_usd, info.output_per_mtoken_usd
         )
+    }
+}
+
+/// Cost in USD for a single turn given catalog rates. Returns None when the
+/// model isn't in the catalog (caller decides whether to mark the session
+/// total as a lower bound or just omit cost). Returns Some(0.0) for entries
+/// whose rates are 0 (e.g. cataloged-but-free models).
+pub fn turn_cost_usd(
+    backend: BackendName,
+    model_id: &str,
+    tokens_in: u32,
+    tokens_out: u32,
+) -> Option<f64> {
+    let info = lookup(backend, model_id)?;
+    let in_cost = tokens_in as f64 * info.input_per_mtoken_usd as f64 / 1_000_000.0;
+    let out_cost = tokens_out as f64 * info.output_per_mtoken_usd as f64 / 1_000_000.0;
+    Some(in_cost + out_cost)
+}
+
+/// Format a USD amount for the status line. Sub-cent values use four
+/// decimals so a $0.0003 turn doesn't display as "$0.00".
+pub fn format_usd(amount: f64) -> String {
+    if amount >= 0.01 {
+        format!("${amount:.2}")
+    } else if amount > 0.0 {
+        format!("${amount:.4}")
+    } else {
+        "$0.00".into()
     }
 }
 
@@ -190,5 +230,34 @@ mod tests {
         assert_eq!(format_context(128_000), "128k");
         assert_eq!(format_context(1_500_000), "1.5m");
         assert_eq!(format_context(500), "500");
+    }
+
+    #[test]
+    fn turn_cost_uses_catalog_rates() {
+        // gpt-4o-mini: $0.15 in / $0.60 out per Mtoken
+        // 1_000_000 in -> $0.15; 100_000 out -> $0.06; total $0.21
+        let cost = turn_cost_usd(BackendName::OpenAi, "gpt-4o-mini", 1_000_000, 100_000).unwrap();
+        assert!((cost - 0.21).abs() < 0.0001, "got {cost}");
+    }
+
+    #[test]
+    fn turn_cost_is_none_for_uncataloged_model() {
+        assert!(turn_cost_usd(BackendName::OpenAi, "future-model-9001", 1000, 100).is_none());
+        assert!(turn_cost_usd(BackendName::Ollama, "qwen2.5-coder:7b", 1000, 100).is_none());
+    }
+
+    #[test]
+    fn turn_cost_zero_for_zero_tokens() {
+        let cost = turn_cost_usd(BackendName::OpenAi, "gpt-4o", 0, 0).unwrap();
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn format_usd_renders_sub_cent_with_extra_precision() {
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(0.0003), "$0.0003");
+        assert_eq!(format_usd(0.01), "$0.01");
+        assert_eq!(format_usd(1.234), "$1.23");
+        assert_eq!(format_usd(42.0), "$42.00");
     }
 }

@@ -7,12 +7,13 @@ use crate::agent::{run_agent, AgentEvent, ApprovalProvider, RunResult};
 use crate::app_state::AppState;
 use crate::backends::BackendDescriptor;
 use crate::cancel::CancellationToken;
+use crate::catalog::{format_usd, turn_cost_usd};
 use crate::config::OperatorMode;
 use crate::context_guard::{
     maybe_auto_compact, merge_system_prompt, rewrite_session_transcript, CompactSessionContext,
 };
 use crate::loader::Loader;
-use crate::openai::ChatMessage;
+use crate::openai::{ChatMessage, ImageUrl, UserContent, UserContentPart};
 use crate::project_memory::{refresh_project_memory_after_write, render_system_prompt_with_memory};
 use crate::session::save_message;
 use crate::shipcheck::{append_ship_context, collect_shipcheck};
@@ -69,6 +70,34 @@ fn format_tokens(n: u32) -> String {
     }
 }
 
+/// Build the cost suffix for the end-of-turn status line.
+///
+/// Renders nothing for purely local sessions so users on Ollama/LM Studio
+/// don't see a meaningless "$0.00." For cloud sessions: shows the turn cost
+/// when the model is in the catalog, "$?" when it isn't (e.g. OpenRouter
+/// or a not-yet-cataloged OpenAI model), and prefixes the session total
+/// with `≥` whenever any turn fell into the unknown bucket.
+fn format_cost_suffix(
+    turn_cost: Option<f64>,
+    backend_is_local: bool,
+    session_usd: f64,
+    has_unknown: bool,
+) -> String {
+    if backend_is_local && session_usd == 0.0 && !has_unknown {
+        return String::new();
+    }
+    let turn_part = match turn_cost {
+        Some(c) => format_usd(c),
+        None if backend_is_local => format_usd(0.0),
+        None => "$?".into(),
+    };
+    let session_prefix = if has_unknown { "≥" } else { "" };
+    format!(
+        " · {turn_part} this turn · {session_prefix}{} session",
+        format_usd(session_usd)
+    )
+}
+
 fn prompt_fingerprint(
     backend: &BackendDescriptor,
     model: &str,
@@ -123,13 +152,26 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             let _ = save_message(&state.session_path, sys);
         }
     }
-    let user_msg = ChatMessage::User {
-        content: trimmed.to_string(),
+    let content = if state.pending_image_attachments.is_empty() {
+        UserContent::Text(trimmed.to_string())
+    } else {
+        let mut parts: Vec<UserContentPart> = Vec::new();
+        parts.push(UserContentPart::Text {
+            text: trimmed.to_string(),
+        });
+        for url in state.pending_image_attachments.drain(..) {
+            parts.push(UserContentPart::ImageUrl {
+                image_url: ImageUrl { url },
+            });
+        }
+        UserContent::Parts(parts)
     };
+    let user_msg = ChatMessage::User { content };
     state.messages.push(user_msg.clone());
     let _ = save_message(&state.session_path, &user_msg);
 
-    let tools = build_tools_for_names(&state.config, &active_tool_names);
+    let mut tools = build_tools_for_names(&state.config, &active_tool_names);
+    tools.extend(state.mcp_tools.iter().cloned());
     let tool_defs = crate::agent::to_openai_tools(&tools);
     let mut compact_ctx = CompactSessionContext {
         messages: &mut state.messages,
@@ -324,6 +366,23 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.total_in += res.input_tokens;
     state.total_out += res.output_tokens;
+    let turn_cost = turn_cost_usd(
+        state.config.backend,
+        &state.model,
+        res.input_tokens,
+        res.output_tokens,
+    );
+    match turn_cost {
+        Some(c) => state.session_usd += c,
+        None => {
+            // Local backends have no $ cost — silently treat as zero, don't
+            // mark the session total as a lower bound. Cloud backends with
+            // an uncataloged model are the real "unknown" case.
+            if !state.config.backend.is_local() && (res.input_tokens > 0 || res.output_tokens > 0) {
+                state.session_cost_has_unknown = true;
+            }
+        }
+    }
 
     let mut checkpoint_pushed = false;
     let mut last_test_result = None;
@@ -357,7 +416,9 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
                             last_test_result = Some(result.clone());
                             if result.failed > 0 || result.exit_code != 0 {
                                 let feedback = format_test_failure_feedback(&result);
-                                let verify_msg = ChatMessage::User { content: feedback };
+                                let verify_msg = ChatMessage::User {
+                                    content: feedback.into(),
+                                };
                                 state.messages.push(verify_msg.clone());
                                 let _ = save_message(&state.session_path, &verify_msg);
                                 println!(
@@ -382,9 +443,15 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
 
     println!(
-        "{GRAY}  {} in · {} out{RESET}",
+        "{GRAY}  {} in · {} out{}{RESET}",
         format_tokens(res.input_tokens),
-        format_tokens(res.output_tokens)
+        format_tokens(res.output_tokens),
+        format_cost_suffix(
+            turn_cost,
+            state.config.backend.is_local(),
+            state.session_usd,
+            state.session_cost_has_unknown
+        ),
     );
 
     Ok(TurnOutcome {
@@ -394,4 +461,37 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         checkpoint_pushed,
         tool_calls,
     })
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    #[test]
+    fn no_suffix_for_pure_local_session() {
+        assert_eq!(format_cost_suffix(None, true, 0.0, false), "");
+    }
+
+    #[test]
+    fn known_turn_renders_both_parts() {
+        let s = format_cost_suffix(Some(0.0003), false, 0.0003, false);
+        assert!(s.contains("$0.0003 this turn"));
+        assert!(s.contains("$0.0003 session"));
+        assert!(!s.contains("≥"));
+    }
+
+    #[test]
+    fn unknown_cloud_turn_marks_session_as_lower_bound() {
+        let s = format_cost_suffix(None, false, 0.5, true);
+        assert!(s.contains("$? this turn"));
+        assert!(s.contains("≥$0.50 session"));
+    }
+
+    #[test]
+    fn local_turn_after_cloud_history_shows_zero_not_unknown() {
+        let s = format_cost_suffix(None, true, 0.42, false);
+        assert!(s.contains("$0.00 this turn"));
+        assert!(s.contains("$0.42 session"));
+        assert!(!s.contains("≥"));
+    }
 }
