@@ -8,6 +8,7 @@ mod batch_operations;
 mod budget;
 mod cancel;
 mod capabilities;
+mod catalog;
 mod commands;
 mod config;
 mod context_guard;

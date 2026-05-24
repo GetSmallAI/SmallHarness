@@ -22,6 +22,7 @@ use crate::capabilities::{
     self, best_record, recommended_tool_selection, record_score, sorted_records,
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
 };
+use crate::catalog;
 use crate::config::{is_tool_name, OperatorMode, ToolSelection, ALL_TOOL_NAMES};
 use crate::context_guard::{
     compact_session, context_status_lines, extract_conversation_summary, merge_system_prompt,
@@ -1049,8 +1050,18 @@ async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         println!("  {DIM}No matches.{RESET}");
         return Ok(());
     }
+    let name_width = shown.iter().map(|m| m.len()).max().unwrap_or(0);
     for (i, m) in shown.iter().enumerate() {
-        println!("  {DIM}{:>2}){RESET} {}", i + 1, m);
+        match catalog::lookup(state.config.backend, m) {
+            Some(info) => println!(
+                "  {DIM}{:>2}){RESET} {:<width$}  {DIM}{}{RESET}",
+                i + 1,
+                m,
+                catalog::format_cost_label(info),
+                width = name_width
+            ),
+            None => println!("  {DIM}{:>2}){RESET} {}", i + 1, m),
+        }
     }
     if total > shown.len() {
         println!("  {DIM}…and {} more{RESET}", total - shown.len());
