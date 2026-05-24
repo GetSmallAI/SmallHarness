@@ -18,6 +18,10 @@ struct Args {
     path: Option<String>,
 }
 
+pub fn patch_changed_files(patch: &str) -> Vec<String> {
+    changed_files(patch)
+}
+
 fn changed_files(patch: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in patch.lines() {

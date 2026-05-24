@@ -1,5 +1,6 @@
 mod agent;
 mod agent_eval;
+mod app_state;
 mod approval;
 mod backends;
 mod banner;
@@ -10,49 +11,41 @@ mod capabilities;
 mod commands;
 mod config;
 mod context_guard;
+mod fix_loop;
 mod handoff;
 mod hardware;
 mod input;
 mod loader;
 mod openai;
+mod playground;
 mod project_memory;
 mod prompt_library;
 mod recommend;
 mod renderer;
 mod session;
+mod session_turn;
 mod setup;
 mod shipcheck;
 mod test_integration;
 mod tools;
+mod turn_checkpoint;
 mod warmup;
 
-use std::hash::{Hash, Hasher};
 use std::io::{IsTerminal, Read, Write};
 
-use crate::agent::{run_agent, AgentEvent, ApprovalProvider};
+use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
-use crate::backends::{backend, default_model, validate, BackendDescriptor};
+use crate::backends::{backend, default_model, validate};
 use crate::banner::{print_banner, BannerInfo};
-use crate::cancel::CancellationToken;
-use crate::commands::{dispatch, AppState};
-use crate::config::{load_config, InputStyle, OperatorMode};
-use crate::context_guard::{
-    maybe_auto_compact, merge_system_prompt, rewrite_session_transcript, CompactSessionContext,
-};
+use crate::commands::dispatch;
+use crate::config::{load_config, InputStyle};
 use crate::input::{bordered_read_line, plain_read_line_with_history, InputHistory};
-use crate::loader::Loader;
-use crate::openai::{build_http_client, list_models, ChatMessage};
-use crate::project_memory::{
-    build_project_index, load_project_index, prompt_looks_repo_related,
-    refresh_project_memory_after_write, render_system_prompt_with_memory,
-};
+use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
-use crate::session::{init_session_dir, new_session_path, save_message};
-use crate::shipcheck::{append_ship_context, collect_shipcheck};
-use crate::test_integration::{
-    format_test_failure_feedback, run_selected_tests, smart_test_selection,
-};
-use crate::tools::{build_tools_for_names, select_tool_names, tool_output_mutated_workspace};
+use crate::session::{init_session_dir, new_session_path};
+use crate::session_turn::{run_user_turn, TurnOptions};
+use crate::tools::{build_tools_for_names, select_tool_names};
+use crate::turn_checkpoint::CheckpointStack;
 use crate::warmup::warmup;
 
 const RESET: &str = "\x1b[0m";
@@ -60,7 +53,6 @@ const DIM: &str = "\x1b[2m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
-const GRAY: &str = "\x1b[90m";
 
 struct CliOneShot {
     prompt: String,
@@ -72,7 +64,7 @@ struct NonInteractiveApproval {
 }
 
 #[async_trait::async_trait]
-impl ApprovalProvider for NonInteractiveApproval {
+impl crate::agent::ApprovalProvider for NonInteractiveApproval {
     async fn approve(
         &mut self,
         _name: &str,
@@ -116,12 +108,18 @@ fn parse_one_shot_args() -> Option<anyhow::Result<CliOneShot>> {
 }
 
 async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
+    use crate::agent::{run_agent, AgentEvent};
+    use crate::openai::ChatMessage;
+    use crate::project_memory::render_system_prompt_with_memory;
+    use crate::session::save_message;
+    use crate::tools::build_tools_for_names;
+
     let prompt = opts.prompt.trim();
     if prompt.is_empty() {
         anyhow::bail!("one-shot prompt is empty");
     }
     let config = load_config();
-    let http = build_http_client();
+    let http = crate::openai::build_http_client();
     let backend_desc = backend(config.backend);
     validate(&backend_desc)?;
     let model = default_model(
@@ -180,7 +178,8 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             }
             _ => {}
         },
-        Some(&mut approval as &mut dyn ApprovalProvider),
+        Some(&mut approval as &mut dyn crate::agent::ApprovalProvider),
+        None,
         None,
         None,
     )
@@ -193,20 +192,13 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn format_tokens(n: u32) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f32 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
 fn prompt_fingerprint(
-    backend: &BackendDescriptor,
+    backend: &crate::backends::BackendDescriptor,
     model: &str,
     system_prompt: &str,
     tool_names: &[String],
 ) -> u64 {
+    use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     backend.name.hash(&mut hasher);
     backend.base_url.hash(&mut hasher);
@@ -216,22 +208,11 @@ fn prompt_fingerprint(
     hasher.finish()
 }
 
-fn set_system_message(messages: &mut Vec<ChatMessage>, system_prompt: String) -> bool {
-    if let Some(ChatMessage::System { content }) = messages.first_mut() {
-        *content = system_prompt;
-        false
-    } else {
-        messages.insert(
-            0,
-            ChatMessage::System {
-                content: system_prompt,
-            },
-        );
-        true
-    }
-}
-
-async fn probe_backend(http: &reqwest::Client, b: &BackendDescriptor) -> Result<(), String> {
+async fn probe_backend(
+    http: &reqwest::Client,
+    b: &crate::backends::BackendDescriptor,
+) -> Result<(), String> {
+    use crate::openai::list_models;
     match list_models(http, b).await {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -269,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     let setup_base = load_config();
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
-    let http = build_http_client();
+    let http = crate::openai::build_http_client();
     let backend_desc = backend(config.backend);
     if let Err(e) = validate(&backend_desc) {
         eprintln!("{e}");
@@ -301,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
         let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
         let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
-        let loader = Loader::start("Warming up".into(), config.display.loader_style);
+        let loader = crate::loader::Loader::start("Warming up".into(), config.display.loader_style);
         match warmup(
             &http,
             &backend_desc,
@@ -339,24 +320,31 @@ async fn main() -> anyhow::Result<()> {
     );
     let session_path = new_session_path(&config.session_dir);
     let session_dir = config.session_dir.clone();
+    let checkpoint_limits = config.checkpoints.limits();
+    let checkpoints_enabled = config.checkpoints.enabled;
+    let display = config.display.clone();
 
     let mut state = AppState {
         config,
         http,
         backend: backend_desc,
         model,
-        messages: Vec::<ChatMessage>::new(),
+        messages: Vec::new(),
         session_dir,
         session_path,
         total_in: 0,
         total_out: 0,
         context_guard_notice: None,
         conversation_summary: None,
+        checkpoint_stack: CheckpointStack::new(checkpoint_limits),
+        checkpoints_enabled,
+        play_session: None,
+        last_play_scorecard: None,
+        approval_cache: ApprovalCache::new(),
+        renderer: TuiRenderer::new(display),
+        warmed_fingerprint,
+        tests_ran_this_session: false,
     };
-
-    let mut approval_cache = ApprovalCache::new();
-    let mut renderer = TuiRenderer::new(state.config.display.clone());
-    let mut tests_ran_this_session = false;
 
     loop {
         let input = match state.config.display.input_style {
@@ -410,260 +398,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        let active_tool_names = select_tool_names(&state.config, trimmed);
-        let base_system_prompt = append_ship_context(
-            &render_system_prompt_with_memory(
-                &state.config,
-                &state.backend,
-                &active_tool_names,
-                trimmed,
-            ),
-            &state.config,
-            tests_ran_this_session,
-        );
-        let mut system_prompt =
-            merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
-        if set_system_message(&mut state.messages, system_prompt.clone()) {
-            if let Some(sys) = state.messages.first() {
-                let _ = save_message(&state.session_path, sys);
-            }
-        }
-        let user_msg = ChatMessage::User {
-            content: trimmed.to_string(),
-        };
-        state.messages.push(user_msg.clone());
-        let _ = save_message(&state.session_path, &user_msg);
-
-        let tools = build_tools_for_names(&state.config, &active_tool_names);
-        let tool_defs = crate::agent::to_openai_tools(&tools);
-        let mut compact_ctx = CompactSessionContext {
-            messages: &mut state.messages,
-            system_prompt: &base_system_prompt,
-            tool_defs: &tool_defs,
-            config: &state.config,
-            model: &state.model,
-            is_local: state.backend.is_local,
-            http: &state.http,
-            backend: &state.backend,
-            conversation_summary: state.conversation_summary.as_deref(),
-        };
-        if let Some(notice) = maybe_auto_compact(
-            &mut compact_ctx,
-            &state.session_dir,
-            &mut state.session_path,
+        let auto_verify = state.config.mode == crate::config::OperatorMode::Ship;
+        if let Err(e) = run_user_turn(
+            &mut state,
+            TurnOptions {
+                user_prompt: trimmed.to_string(),
+                auto_verify_tests: auto_verify,
+                yolo_approve: false,
+            },
         )
-        .await?
+        .await
         {
-            println!("{}", notice.line);
-            if let Some(summary) = notice.conversation_summary {
-                state.conversation_summary = Some(summary);
-            }
-            state.context_guard_notice = Some(
-                notice
-                    .line
-                    .trim()
-                    .trim_start_matches("\x1b[32m✓\x1b[0m \x1b[2m")
-                    .trim_end_matches("\x1b[0m")
-                    .to_string(),
-            );
-        }
-        system_prompt =
-            merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
-        if let Some(ChatMessage::System { content }) = state.messages.first_mut() {
-            *content = system_prompt.clone();
-        }
-        let guard_params = crate::context_guard::guard_params_from(
-            &state.config,
-            &state.model,
-            state.backend.is_local,
-            state.conversation_summary.clone(),
-        );
-        let fingerprint = prompt_fingerprint(
-            &state.backend,
-            &state.model,
-            &system_prompt,
-            &active_tool_names,
-        );
-        if std::env::var("WARMUP").as_deref() != Ok("false")
-            && warmed_fingerprint != Some(fingerprint)
-        {
-            let loader = Loader::start(
-                "Warming prompt cache".into(),
-                state.config.display.loader_style,
-            );
-            let warm_result = warmup(
-                &state.http,
-                &state.backend,
-                &state.model,
-                &system_prompt,
-                &tool_defs,
-            )
-            .await;
-            loader.stop();
-            if warm_result.is_ok() {
-                warmed_fingerprint = Some(fingerprint);
-            }
-        }
-        let initial = state.messages.clone();
-        let max_steps = state.config.max_steps;
-        let model = state.model.clone();
-        let backend_desc_clone = state.backend.clone();
-        let http_clone = state.http.clone();
-
-        let loader = Loader::start(
-            state.config.display.loader_text.clone(),
-            state.config.display.loader_style,
-        );
-        let mut loader_opt = Some(loader);
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        let cancel = CancellationToken::new();
-        let cancel_for_agent = cancel.clone();
-        let cancel_for_signal = cancel.clone();
-        let ctrl_task = tokio::spawn(async move {
-            let mut hits = 0usize;
-            loop {
-                if tokio::signal::ctrl_c().await.is_err() {
-                    break;
-                }
-                hits += 1;
-                if hits == 1 {
-                    cancel_for_signal.cancel();
-                    eprintln!("\n  cancelling current turn… press Ctrl-C again to exit");
-                } else {
-                    std::process::exit(130);
-                }
-            }
-        });
-
-        let agent_fut = async {
-            let on_event = move |e: AgentEvent| {
-                let _ = tx.send(e);
-            };
-            run_agent(
-                &http_clone,
-                &backend_desc_clone,
-                &model,
-                initial,
-                tools,
-                max_steps,
-                on_event,
-                Some(&mut approval_cache as &mut dyn ApprovalProvider),
-                Some(cancel_for_agent),
-                Some((guard_params, base_system_prompt.clone())),
-            )
-            .await
-        };
-
-        let mut memory_changed = false;
-        let drain_fut = async {
-            while let Some(e) = rx.recv().await {
-                if let Some(l) = loader_opt.take() {
-                    l.stop();
-                }
-                if let AgentEvent::ToolResult { name, output, .. } = &e {
-                    if tool_output_mutated_workspace(name, output) {
-                        memory_changed = true;
-                    }
-                }
-                if let AgentEvent::ContextCompacted {
-                    notice,
-                    conversation_summary,
-                } = &e
-                {
-                    state.context_guard_notice = Some(notice.clone());
-                    if let Some(summary) = conversation_summary {
-                        state.conversation_summary = Some(summary.clone());
-                    }
-                }
-                renderer.handle(e);
-            }
-        };
-
-        let before = state.messages.len();
-        let (result, _) = tokio::join!(agent_fut, drain_fut);
-        ctrl_task.abort();
-
-        if let Some(l) = loader_opt.take() {
-            l.stop();
-        }
-        renderer.end_turn();
-
-        match result {
-            Ok(res) => {
-                state.messages = res.messages;
-                if let Some(summary) = res.conversation_summary {
-                    state.conversation_summary = Some(summary);
-                }
-                if res.transcript_rewritten || state.messages.len() < before {
-                    if let Err(e) = rewrite_session_transcript(
-                        &state.session_dir,
-                        &mut state.session_path,
-                        &state.messages,
-                    ) {
-                        println!("  {RED}✗{RESET} {DIM}session rewrite failed: {e}{RESET}");
-                    }
-                } else {
-                    for message in &state.messages[before..] {
-                        let _ = save_message(&state.session_path, message);
-                    }
-                }
-                state.total_in += res.input_tokens;
-                state.total_out += res.output_tokens;
-                if memory_changed {
-                    match refresh_project_memory_after_write(&state.config) {
-                        Ok(Some(index)) => println!(
-                            "  {DIM}project memory refreshed ({} files){RESET}",
-                            index.files.len()
-                        ),
-                        Ok(None) => {}
-                        Err(e) => println!(
-                            "  {YELLOW}!{RESET} {DIM}project memory refresh skipped: {e}{RESET}"
-                        ),
-                    }
-                    if state.config.mode == OperatorMode::Ship {
-                        if let Ok(selected) = smart_test_selection(&state.config.workspace_root) {
-                            if !selected.is_empty() {
-                                match run_selected_tests(&state.config.workspace_root, &selected) {
-                                    Ok(result) => {
-                                        tests_ran_this_session = true;
-                                        if result.failed > 0 || result.exit_code != 0 {
-                                            let feedback = format_test_failure_feedback(&result);
-                                            let verify_msg =
-                                                ChatMessage::User { content: feedback };
-                                            state.messages.push(verify_msg.clone());
-                                            let _ = save_message(&state.session_path, &verify_msg);
-                                            println!(
-                                                "  {YELLOW}tests:{RESET} {} failed (see context)",
-                                                result.failed
-                                            );
-                                        } else if let Ok(snapshot) =
-                                            collect_shipcheck(&state.config.workspace_root)
-                                        {
-                                            if snapshot.ready_to_ship() {
-                                                println!(
-                                                    "  {GREEN}✓{RESET} {DIM}ready for /handoff{RESET}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => println!(
-                                        "  {YELLOW}!{RESET} {DIM}auto-verify skipped: {e}{RESET}"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                }
-                println!(
-                    "{GRAY}  {} in · {} out{RESET}",
-                    format_tokens(res.input_tokens),
-                    format_tokens(res.output_tokens)
-                );
-            }
-            Err(e) => {
-                println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
-            }
+            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
         }
     }
 }

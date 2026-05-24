@@ -44,6 +44,9 @@ coding assistant without depending on a cloud API. Hardware profiles for the
 Mac mini (16 GB) and Mac Studio (32 GB) pick sensible default models per
 backend so you can start running without picking weights out of a long list.
 
+**Try it in 60 seconds:** run `/play fix-failing-test` to watch your local model
+fix a bundled failing test — then `/fix` on your own repo.
+
 ## Features
 
 | Area | What you get |
@@ -55,6 +58,9 @@ backend so you can start running without picking weights out of a long list.
 | Hardware-aware recommendation | `/recommend` reads safe local specs and ranks models for coding-agent use |
 | Project memory | `/index` builds and refreshes a safe local repo map; `/map` and `repo_search` help small models find the right files fast |
 | Operator modes | `/mode explore`, `/mode edit`, `/mode ship`, and `/mode review` tune tools, approvals, and step budgets; ship mode auto-runs smart tests after edits and injects failures into context |
+| Interactive playground | `/play` runs bundled demos (fix failing tests, add a feature, refactor) in an isolated sandbox with a scorecard; `/play battle` compares local models; `/play exit` restores your workspace |
+| Fix loop | `/fix` runs a fix-until-green loop on your repo (smart test selection, `--attempts`, `--yolo`) |
+| Turn checkpoints | Lazy per-file snapshots before mutating tools; `/undo` reverts the last agent turn's file changes (enabled by default in edit/ship modes) |
 | Ship preflight | `/shipcheck` summarizes branch drift, dirty files, diff stats, and project-memory freshness before release |
 | Ship handoff | `/handoff` drafts a one-line commit message, changelog bullets, testing note, and X-ready post from local git context |
 | Multi-file operations | `/batch` and `/refactor` enable cross-file reference finding and coordinated multi-file edits with preview |
@@ -70,7 +76,7 @@ backend so you can start running without picking weights out of a long list.
 | Streaming output | Tokens stream as they arrive, with grouped tool-call display and optional reasoning deltas |
 | Session persistence | JSONL append-only session logs with titles, search, resume, delete, prune, and export commands |
 | One-shot mode | `small-harness --print "prompt"` or piped stdin for scripts and CI |
-| Slash commands | `/setup`, `/mode`, `/shipcheck`, `/handoff`, `/batch`, `/refactor`, `/test`, `/prompt`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/new`, `/help` |
+| Slash commands | `/setup`, `/mode`, `/play`, `/fix`, `/shipcheck`, `/handoff`, `/batch`, `/refactor`, `/test`, `/prompt`, `/backend`, `/profile`, `/model`, `/tools`, `/index`, `/map`, `/memory`, `/remember`, `/forget`, `/compare`, `/session`, `/sessions`, `/resume`, `/export`, `/doctor`, `/bench`, `/capabilities`, `/autotune`, `/recommend`, `/eval`, `/undo`, `/new`, `/help` |
 | Bordered TUI | Clean terminal box input with persisted history, arrow recall, and Ctrl-J multi-line prompts |
 
 ## Quick Install
@@ -275,6 +281,8 @@ At each prompt you can choose `[y]es`, `[n]o`, `[a]lways for this tool`, or
 | `/memory [on\|off\|status]` | Toggle project memory for the active session |
 | `/remember <text>` | Save a durable local project note |
 | `/forget <id\|all>` | Remove one project note or clear all notes |
+| `/undo [list]` | Revert the last agent turn's file mutations (or list checkpoint stack) |
+| `/checkpoints [on\|off\|status]` | Toggle or inspect turn checkpoint settings for this session |
 | `/eval [prompt-file] [models]` | Run saved prompts against one or more models with tools off/on |
 | `/eval agent [fixture\|all] [models]` | Run agent-loop benchmarks (`read-and-explain`, `fix-failing-test`, `small-refactor`) and save scored JSON/Markdown under `.sessions/evals/` |
 | `exit` | Quit |
@@ -452,6 +460,12 @@ runtime.
     "maxFileBytes": 524288,
     "maxInjectedBytes": 8192,
     "allowCloudContext": false
+  },
+  "checkpoints": {
+    "enabled": true,
+    "maxTurns": 10,
+    "maxBytes": 10485760,
+    "maxFileBytes": 1048576
   },
   "profiles": {
     "mac-studio-fast": {

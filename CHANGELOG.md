@@ -10,9 +10,14 @@ fix releases.
 
 ### Added
 
+- Interactive playground: `/play` runs bundled agent demos in an isolated sandbox with scorecards; `/play battle` compares local models; `/play exit` restores workspace
+- Fix-until-green loop: `/fix` retries agent turns until tests pass (`--attempts`, `--yolo`, smart or full test selection)
+- Shared session turn runner (`session_turn.rs`) used by the REPL, `/play`, and `/fix`
+- New eval/play fixture: `add-feature` (add `mul` function + test)
 - Agent workflow tools: `run_tests`, `batch_edit`, and `ship_status` wrap `/test`, `/batch`, and `/shipcheck` for structured tool calls in ship and edit modes
 - Ship loop autopilot: `/mode ship` auto-runs smart-selected tests after edit turns and injects failure summaries into session context; ship-status one-liner in the system prompt
 - Agent eval suite: `/eval agent [fixture|all] [models]` runs `run_agent` benchmarks with scored JSON/Markdown reports under `.sessions/evals/` (fixtures: `read-and-explain`, `fix-failing-test`, `small-refactor`)
+- Turn checkpoints: lazy per-file snapshots before mutating tools; `/undo` reverts the last agent turn's file changes; `/checkpoints` to toggle or inspect
 - Multi-file operations with `/batch` and `/refactor` commands for cross-file reference finding and coordinated edits
 - Test integration with `/test` command for test discovery, execution, and smart selection based on changed files
 - Prompt library with `/prompt` command for saving, listing, running, and managing prompt templates

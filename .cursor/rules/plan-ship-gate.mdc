@@ -1,0 +1,27 @@
+---
+description: Before marking a plan done — run integration matrix, not just unit tests
+alwaysApply: true
+---
+
+# Plan ship gate (required before "done")
+
+When implementing a **plan** or multi-file feature (not tiny one-line fixes):
+
+## Do not mark complete until
+
+1. Read [docs/INTEGRATION_MATRIX.md](docs/INTEGRATION_MATRIX.md) — run **Global baseline** + any **Feature-specific** rows that apply.
+2. Add **plan-specific** rows to INTEGRATION_MATRIX if the feature introduces new cross-module paths (config ↔ session, tools ↔ main loop, path normalization, mode switches).
+3. Implement **at least one automated test** per new cross-module wiring path (not only happy-path unit tests on absolute tempdirs).
+4. Explicitly verify: default config shapes (`workspaceRoot: "."`), session flags vs config flags, dry-run/no-op tools, and git/untracked edge cases when filesystem is involved.
+
+## Definition of done
+
+- `cargo test`, `cargo fmt --check`, `cargo clippy -D warnings` pass.
+- Integration matrix rows for this build are checked (document in final summary: which rows ran + any new tests added).
+- **Never** treat "all unit tests green" as shippable when the feature touches config, session state, operator modes, or filesystem paths.
+
+## Anti-patterns (caused recent P1s)
+
+- Duplicate jail checks using raw config paths after a normalizing helper already validated.
+- Two flags for one behavior (`config.foo.enabled` vs `state.foo_enabled`) without syncing every mutation site (`/mode`, `/new`, presets).
+- Tool side effects keyed on `"error"` substring or tool name alone instead of structured result fields (`applied`, etc.).

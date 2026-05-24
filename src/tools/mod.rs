@@ -20,7 +20,7 @@ mod run_tests;
 mod shell;
 mod ship_status;
 
-pub use apply_patch_tool::ApplyPatchTool;
+pub use apply_patch_tool::{patch_changed_files, ApplyPatchTool};
 pub use batch_edit::BatchEditTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
@@ -174,17 +174,35 @@ pub fn select_tool_names(config: &AgentConfig, prompt: &str) -> Vec<String> {
 
 /// Returns true when a tool result indicates the workspace was mutated (for ship-loop hooks).
 pub fn tool_output_mutated_workspace(tool_name: &str, output: &str) -> bool {
-    let output_json = serde_json::from_str::<Value>(output).ok();
-    let has_error =
-        output_json.as_ref().and_then(|v| v.get("error")).is_some() || output.contains("\"error\"");
-    let applied_batch_edit = tool_name == "batch_edit"
-        && output_json
-            .as_ref()
-            .and_then(|v| v.get("applied"))
+    let Ok(output_json) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    if output_json.get("error").is_some() {
+        return false;
+    }
+    match tool_name {
+        "file_write" => output_json
+            .get("written")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
-    !has_error
-        && (matches!(tool_name, "file_write" | "file_edit" | "apply_patch") || applied_batch_edit)
+            .unwrap_or(false),
+        "file_edit" => output_json
+            .get("edited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "apply_patch" | "batch_edit" => output_json
+            .get("applied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+pub fn mutation_tool_names() -> &'static [&'static str] {
+    &["file_write", "file_edit", "apply_patch", "batch_edit"]
+}
+
+pub fn is_mutation_tool(name: &str) -> bool {
+    mutation_tool_names().contains(&name)
 }
 
 pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<dyn Tool>> {
@@ -327,7 +345,16 @@ mod tests {
 
     #[test]
     fn file_edit_success_counts_as_mutation() {
-        let output = r#"{"path":"src/main.rs","diff":"..."}"#;
+        let output = r#"{"edited":true,"path":"src/main.rs","diff":"..."}"#;
         assert!(tool_output_mutated_workspace("file_edit", output));
+    }
+
+    #[test]
+    fn mutation_detection_uses_structured_fields_not_error_substrings() {
+        let output = r#"{"edited":true,"path":"src/main.rs","diff":"+ let label = \"error\";"}"#;
+        assert!(tool_output_mutated_workspace("file_edit", output));
+
+        let output = r#"{"path":"src/main.rs","diff":"..."}"#;
+        assert!(!tool_output_mutated_workspace("file_edit", output));
     }
 }

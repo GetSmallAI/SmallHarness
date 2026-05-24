@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -108,6 +109,18 @@ pub fn builtin_fixtures() -> Vec<AgentEvalFixture> {
                 AgentEvalCheck::TestsPass,
             ],
         },
+        AgentEvalFixture {
+            id: "add-feature".into(),
+            prompt: "Add a `mul` function and a passing test for it.".into(),
+            workspace: Some("add-feature".into()),
+            checks: vec![
+                AgentEvalCheck::FileContains {
+                    path: "src/lib.rs".into(),
+                    needle: "fn mul".into(),
+                },
+                AgentEvalCheck::TestsPass,
+            ],
+        },
     ]
 }
 
@@ -117,11 +130,11 @@ pub fn fixture_by_id(id: &str) -> Option<AgentEvalFixture> {
         .find(|fixture| fixture.id == id)
 }
 
-fn fixtures_root() -> PathBuf {
+pub fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("evals/fixtures")
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -136,7 +149,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare_fixture_workspace(fixture: &AgentEvalFixture) -> Result<(tempfile::TempDir, PathBuf)> {
+pub fn prepare_fixture_workspace(
+    fixture: &AgentEvalFixture,
+) -> Result<(tempfile::TempDir, PathBuf)> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().to_path_buf();
     if let Some(rel) = &fixture.workspace {
@@ -149,7 +164,27 @@ fn prepare_fixture_workspace(fixture: &AgentEvalFixture) -> Result<(tempfile::Te
     Ok((temp, workspace))
 }
 
-fn init_git_if_needed(workspace: &Path) -> Result<()> {
+pub fn prepare_playground_workspace(
+    session_dir: &str,
+    fixture_id: &str,
+    fixture: &AgentEvalFixture,
+) -> Result<PathBuf> {
+    let stamp = Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
+    let dest = Path::new(session_dir)
+        .join("play")
+        .join(format!("{fixture_id}-{stamp}"));
+    fs::create_dir_all(&dest)?;
+    if let Some(rel) = &fixture.workspace {
+        let src = fixtures_root().join(rel);
+        if !src.exists() {
+            anyhow::bail!("fixture workspace not found: {}", src.display());
+        }
+        copy_dir_all(&src, &dest)?;
+    }
+    Ok(dest)
+}
+
+pub fn init_git_if_needed(workspace: &Path) -> Result<()> {
     if workspace.join(".git").exists() {
         return Ok(());
     }
@@ -171,14 +206,14 @@ fn init_git_if_needed(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn count_assistant_steps(messages: &[ChatMessage]) -> usize {
+pub fn count_assistant_steps(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
         .count()
 }
 
-fn evaluate_checks(
+pub fn evaluate_checks(
     workspace: &Path,
     checks: &[AgentEvalCheck],
     run: &RunResult,
@@ -324,6 +359,7 @@ pub async fn run_agent_eval(
         Some(&mut approval as &mut dyn ApprovalProvider),
         None,
         None,
+        None,
     )
     .await;
     let elapsed_ms = start.elapsed().as_millis();
@@ -431,6 +467,21 @@ mod tests {
         assert!(ids.contains(&"read-and-explain".to_string()));
         assert!(ids.contains(&"fix-failing-test".to_string()));
         assert!(ids.contains(&"small-refactor".to_string()));
+        assert!(ids.contains(&"add-feature".to_string()));
+    }
+
+    #[test]
+    fn prepare_playground_workspace_copies_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = fixture_by_id("fix-failing-test").unwrap();
+        let dest = prepare_playground_workspace(
+            dir.path().to_str().unwrap(),
+            "fix-failing-test",
+            &fixture,
+        )
+        .unwrap();
+        assert!(dest.join("Cargo.toml").exists());
+        assert!(dest.join("src/lib.rs").exists());
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Small Harness Quickstart
 
 This guide is for the first 20 minutes with Small Harness. It focuses on the
-top three things you can do immediately: understand a repo, make a safe edit,
-and tune Small Harness to the best model available on your machine.
+top things you can do immediately: try a bundled demo, fix failing tests on
+your repo, understand a codebase, make a safe edit, and tune Small Harness to
+the best model available on your machine.
 
 ## Before You Start
 
@@ -30,6 +31,42 @@ profile: mac-mini-16gb
 model override: blank
 approval policy: dangerous-only
 tool mode: auto
+```
+
+## 0. Try It In 60 Seconds
+
+Pull a 7B coder and run a bundled demo — no repo setup required:
+
+```text
+/play
+/play fix-failing-test
+```
+
+Small Harness copies a tiny Rust crate with a failing test into
+`.sessions/play/`, switches to ship mode, and runs the agent live. You approve
+edits (or pass `--yolo` to auto-approve). When it finishes, you get a scorecard
+showing whether tests pass.
+
+```text
+/play score
+/play exit
+```
+
+Then try the same loop on your real project:
+
+```text
+/fix
+/fix all --attempts 3
+/fix --yolo
+```
+
+`/fix` runs smart-selected tests, loops until they pass (default 5 attempts),
+then restores your previous operator mode.
+
+Compare two local models on the same demo:
+
+```text
+/play battle fix-failing-test qwen2.5-coder:7b,deepseek-coder:6.7b
 ```
 
 ## 1. Understand A Codebase Fast
@@ -226,6 +263,17 @@ In ship mode the harness:
 - injects a compact ship-status line into the system prompt each turn
 - exposes `run_tests`, `batch_edit`, and `ship_status` as agent tools
 - after a successful edit turn, runs smart-selected tests and injects failures into the next turn context (no automatic re-run loop)
+- saves a turn checkpoint when files change — use `/undo` if the model breaks something
+
+If a small model makes a bad edit:
+
+```text
+/undo
+/undo list
+/checkpoints status
+```
+
+`/undo` restores file contents from immediately before the last mutating agent turn and removes files the model created. Checkpoints are enabled by default in edit and ship modes.
 
 You can still run the operator commands manually:
 

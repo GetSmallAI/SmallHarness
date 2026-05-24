@@ -203,6 +203,69 @@ impl Default for DisplayConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "maxTurns", default = "default_checkpoint_max_turns")]
+    pub max_turns: usize,
+    #[serde(rename = "maxBytes", default = "default_checkpoint_max_bytes")]
+    pub max_bytes: u64,
+    #[serde(rename = "maxFileBytes", default = "default_checkpoint_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+fn default_checkpoint_max_turns() -> usize {
+    10
+}
+
+fn default_checkpoint_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_checkpoint_max_file_bytes() -> u64 {
+    1024 * 1024
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_turns: default_checkpoint_max_turns(),
+            max_bytes: default_checkpoint_max_bytes(),
+            max_file_bytes: default_checkpoint_max_file_bytes(),
+        }
+    }
+}
+
+impl CheckpointConfig {
+    pub fn limits(&self) -> crate::turn_checkpoint::CheckpointLimits {
+        crate::turn_checkpoint::CheckpointLimits {
+            max_turns: self.max_turns,
+            max_bytes: self.max_bytes,
+            max_file_bytes: self.max_file_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixConfig {
+    #[serde(rename = "maxAttempts", default = "default_fix_max_attempts")]
+    pub max_attempts: usize,
+}
+
+fn default_fix_max_attempts() -> usize {
+    5
+}
+
+impl Default for FixConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_fix_max_attempts(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     #[serde(rename = "maxMessages", default)]
     pub max_messages: Option<usize>,
@@ -327,6 +390,8 @@ pub struct AgentConfig {
     pub context: ContextConfig,
     pub history: HistoryConfig,
     pub project_memory: ProjectMemoryConfig,
+    pub checkpoints: CheckpointConfig,
+    pub fix: FixConfig,
     pub profiles: BTreeMap<String, ProfileModels>,
 }
 
@@ -378,6 +443,8 @@ impl Default for AgentConfig {
             context: ContextConfig::default(),
             history: HistoryConfig::default(),
             project_memory: ProjectMemoryConfig::default(),
+            checkpoints: CheckpointConfig::default(),
+            fix: FixConfig::default(),
             profiles: BTreeMap::new(),
         }
     }
@@ -412,6 +479,8 @@ struct FileConfig {
     history: Option<HistoryConfig>,
     #[serde(rename = "projectMemory")]
     project_memory: Option<ProjectMemoryConfig>,
+    checkpoints: Option<CheckpointConfig>,
+    fix: Option<FixConfig>,
     profiles: Option<BTreeMap<String, ProfileModels>>,
 }
 
@@ -430,6 +499,7 @@ impl AgentConfig {
                 self.tool_selection = ToolSelection::Auto;
                 self.approval_policy = ApprovalPolicy::DangerousOnly;
                 self.max_steps = self.max_steps.clamp(6, 12);
+                self.checkpoints.enabled = false;
             }
             OperatorMode::Edit => {
                 self.tools = vec![
@@ -444,6 +514,7 @@ impl AgentConfig {
                 self.tool_selection = ToolSelection::Auto;
                 self.approval_policy = ApprovalPolicy::Always;
                 self.max_steps = self.max_steps.max(12);
+                self.checkpoints.enabled = true;
             }
             OperatorMode::Ship => {
                 self.tools = vec![
@@ -463,6 +534,7 @@ impl AgentConfig {
                 self.tool_selection = ToolSelection::Auto;
                 self.approval_policy = ApprovalPolicy::DangerousOnly;
                 self.max_steps = self.max_steps.max(20);
+                self.checkpoints.enabled = true;
             }
             OperatorMode::Review => {
                 self.tools = vec![
@@ -476,6 +548,7 @@ impl AgentConfig {
                 self.tool_selection = ToolSelection::Auto;
                 self.approval_policy = ApprovalPolicy::DangerousOnly;
                 self.max_steps = self.max_steps.clamp(8, 16);
+                self.checkpoints.enabled = false;
             }
             OperatorMode::Custom => {}
         }
@@ -632,6 +705,12 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(p) = file.project_memory {
                     config.project_memory = p;
+                }
+                if let Some(c) = file.checkpoints {
+                    config.checkpoints = c;
+                }
+                if let Some(f) = file.fix {
+                    config.fix = f;
                 }
                 if let Some(p) = file.profiles {
                     config.profiles = p;

@@ -13,7 +13,8 @@ use crate::openai::{
     stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolCall, ToolDef, ToolDefFunction,
     ToolFunction,
 };
-use crate::tools::{Tool, ToolPreview};
+use crate::tools::{is_mutation_tool, Tool, ToolPreview};
+use crate::turn_checkpoint::TurnCapturer;
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -165,6 +166,7 @@ pub async fn run_agent<F>(
     mut approve: Option<&mut dyn ApprovalProvider>,
     cancel: Option<CancellationToken>,
     guard: Option<(ContextGuardParams, String)>,
+    mut capturer: Option<&mut TurnCapturer>,
 ) -> Result<RunResult>
 where
     F: FnMut(AgentEvent),
@@ -344,6 +346,12 @@ where
                         content: denied_str,
                     });
                     continue;
+                }
+                if is_mutation_tool(&tc.function.name) {
+                    if let Some(c) = capturer.as_deref_mut() {
+                        c.snapshot_before_tool(&tc.function.name, &parsed_args)
+                            .await;
+                    }
                 }
                 let result = tool.execute_cancelable(parsed_args, cancel.clone()).await;
                 if let Some(s) = result.as_str() {

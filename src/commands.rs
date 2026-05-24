@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::to_openai_tools;
 use crate::agent_eval::{builtin_fixtures, render_agent_eval_markdown, run_agent_eval};
+use crate::app_state::AppState;
 use crate::backends::{
     backend, default_model, validate, BackendDescriptor, BackendName, ProfileName,
 };
@@ -21,11 +22,12 @@ use crate::capabilities::{
     self, best_record, recommended_tool_selection, record_score, sorted_records,
     warmup_recommended, BenchmarkStats, CapabilityRecord, CapabilityStatus,
 };
-use crate::config::{is_tool_name, AgentConfig, OperatorMode, ToolSelection, ALL_TOOL_NAMES};
+use crate::config::{is_tool_name, OperatorMode, ToolSelection, ALL_TOOL_NAMES};
 use crate::context_guard::{
     compact_session, context_status_lines, extract_conversation_summary, merge_system_prompt,
     CompactMethod, CompactSessionContext,
 };
+use crate::fix_loop::{parse_fix_args, run_fix_loop};
 use crate::handoff::{
     collect_handoff_context, default_export_path as default_handoff_export_path,
     ensure_required_sections, handoff_system_prompt, render_fallback_markdown,
@@ -35,6 +37,9 @@ use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec}
 use crate::input::plain_read_line;
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
+};
+use crate::playground::{
+    print_play_list, print_scorecard, restore_play_session, run_play_battle, run_play_fixture,
 };
 use crate::project_memory::{
     append_project_note, build_project_index, clear_project_index, forget_project_note,
@@ -70,41 +75,12 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
-pub struct AppState {
-    pub config: AgentConfig,
-    pub http: reqwest::Client,
-    pub backend: BackendDescriptor,
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
-    pub session_dir: String,
-    pub session_path: PathBuf,
-    pub total_in: u32,
-    pub total_out: u32,
-    pub context_guard_notice: Option<String>,
-    pub conversation_summary: Option<String>,
-}
-
-impl AppState {
-    pub fn rebuild_client(&mut self) -> Result<()> {
-        let new_backend = backend(self.config.backend);
-        validate(&new_backend)?;
-        self.backend = new_backend;
-        Ok(())
-    }
-    pub fn resolve_model(&mut self) {
-        self.model = default_model(
-            &self.backend,
-            &self.config.profile,
-            self.config.model_override.as_deref(),
-            &self.config.profiles,
-        );
-    }
-    pub fn reset_session(&mut self) {
-        self.session_path = crate::session::new_session_path(&self.session_dir);
-    }
-}
-
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("/undo", "Revert the last agent turn's file mutations"),
+    (
+        "/checkpoints",
+        "Show or toggle turn checkpoints (on, off, status)",
+    ),
     ("/help", "List available commands"),
     ("/setup", "Run the setup wizard and write agent.config.json"),
     ("/new", "Start a fresh conversation"),
@@ -178,6 +154,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Discover, run, and analyze tests with smart selection",
     ),
     ("/prompt", "Save, list, run, and manage prompt templates"),
+    (
+        "/play",
+        "Try bundled agent demos (fix-failing-test, add-feature, battle, exit)",
+    ),
+    (
+        "/fix",
+        "Fix-until-green loop on your repo (smart tests, --attempts, --yolo)",
+    ),
 ];
 
 fn fmt_tokens(n: u32) -> String {
@@ -198,6 +182,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/setup" => cmd_setup(state).await?,
         "/new" => cmd_new(state),
         "/clear" => clear_screen(),
+        "/undo" => cmd_undo(&args, state)?,
+        "/checkpoints" => cmd_checkpoints(&args, state),
         "/config" => cmd_config(state),
         "/mode" => cmd_mode(&args, state),
         "/shipcheck" => cmd_shipcheck(&args, state)?,
@@ -228,6 +214,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/refactor" => cmd_refactor(&args, state)?,
         "/test" => cmd_test(&args, state)?,
         "/prompt" => cmd_prompt(&args, state).await?,
+        "/play" => cmd_play(&args, state).await?,
+        "/fix" => cmd_fix(&args, state).await?,
         other => {
             println!("  {DIM}Unknown command: {other}. Type /help.{RESET}");
         }
@@ -273,9 +261,14 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
 }
 
 fn cmd_new(state: &mut AppState) {
+    if state.play_session.is_some() {
+        let _ = restore_play_session(state);
+    }
     state.messages.clear();
     state.conversation_summary = None;
     state.context_guard_notice = None;
+    state.checkpoint_stack =
+        crate::turn_checkpoint::CheckpointStack::new(state.config.checkpoints.limits());
     state.reset_session();
     println!("  {GREEN}✓{RESET} {DIM}New session started.{RESET}");
 }
@@ -346,6 +339,14 @@ fn cmd_config(state: &AppState) {
         state.config.project_memory.max_file_bytes,
         state.config.project_memory.max_injected_bytes,
         state.config.project_memory.allow_cloud_context
+    );
+    println!(
+        "  {DIM}checkpoints{RESET}      enabled={} session={} stack={}/{} maxBytes={}",
+        state.config.checkpoints.enabled,
+        state.checkpoints_enabled,
+        state.checkpoint_stack.len(),
+        state.checkpoint_stack.limits.max_turns,
+        state.config.checkpoints.max_bytes
     );
     if !state.config.profiles.is_empty() {
         println!(
@@ -424,6 +425,7 @@ fn cmd_mode(args: &str, state: &mut AppState) {
         return;
     };
     state.config.apply_operator_mode(mode);
+    state.checkpoints_enabled = state.config.checkpoints.enabled;
     println!(
         "  {GREEN}✓{RESET} {DIM}mode →{RESET} {CYAN}{}{RESET} {DIM}tools={} approval={} maxSteps={}{RESET}",
         state.config.mode.as_str(),
@@ -2604,6 +2606,57 @@ async fn eval_once(
     Ok(out)
 }
 
+async fn cmd_play(args: &str, state: &mut AppState) -> Result<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if args.trim().is_empty() {
+        print_play_list();
+        return Ok(());
+    }
+    if parts.first() == Some(&"exit") {
+        let fixture = state
+            .play_session
+            .as_ref()
+            .map(|s| s.fixture_id.clone())
+            .unwrap_or_else(|| "session".into());
+        restore_play_session(state)?;
+        println!("  {GREEN}✓{RESET} {DIM}play ended ({fixture}) — workspace restored{RESET}");
+        return Ok(());
+    }
+    if parts.first() == Some(&"score") {
+        if let Some(score) = state.last_play_scorecard.as_ref() {
+            print_scorecard(state, score);
+        } else {
+            println!("  {DIM}No play scorecard yet.{RESET}");
+        }
+        return Ok(());
+    }
+
+    let yolo = parts.contains(&"--yolo");
+    let filtered: Vec<&str> = parts.iter().copied().filter(|p| *p != "--yolo").collect();
+
+    if filtered.first() == Some(&"battle") {
+        let fixture = filtered
+            .get(1)
+            .ok_or_else(|| anyhow!("usage: /play battle <fixture> <model[,model]>"))?;
+        let models = filtered
+            .get(2)
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_else(|| vec![state.model.clone()]);
+        run_play_battle(state, fixture, &models).await?;
+        return Ok(());
+    }
+
+    let fixture = filtered
+        .first()
+        .ok_or_else(|| anyhow!("usage: /play <fixture> [--yolo]"))?;
+    run_play_fixture(state, fixture, yolo).await
+}
+
+async fn cmd_fix(args: &str, state: &mut AppState) -> Result<()> {
+    let opts = parse_fix_args(args, state.config.fix.max_attempts)?;
+    run_fix_loop(state, opts).await
+}
+
 async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.first() == Some(&"agent") {
@@ -2763,6 +2816,89 @@ async fn cmd_eval_agent(parts: &[&str], state: &AppState) -> Result<()> {
         md_path.display()
     );
     Ok(())
+}
+
+fn cmd_undo(args: &str, state: &mut AppState) -> Result<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.first() == Some(&"list") {
+        if state.checkpoint_stack.is_empty() {
+            println!("  {DIM}No checkpoints to undo.{RESET}");
+            return Ok(());
+        }
+        println!(
+            "  {DIM}Checkpoint stack ({}){RESET}",
+            state.checkpoint_stack.len()
+        );
+        for (idx, cp) in state.checkpoint_stack.checkpoints.iter().rev().enumerate() {
+            println!(
+                "  {CYAN}{idx}.{RESET} {DIM}{}{RESET} · {} file(s) · skipped {}",
+                cp.created_at,
+                cp.file_count(),
+                cp.skipped.len()
+            );
+        }
+        return Ok(());
+    }
+
+    let Some(checkpoint) = state.checkpoint_stack.pop() else {
+        println!("  {DIM}Nothing to undo — no checkpoint from a prior mutating turn.{RESET}");
+        return Ok(());
+    };
+
+    let workspace = Path::new(&state.config.workspace_root);
+    let report = crate::turn_checkpoint::restore_checkpoint(&checkpoint, workspace);
+    println!("  {GREEN}✓{RESET} {DIM}undo {}{RESET}", checkpoint.id);
+    if !report.restored.is_empty() {
+        println!(
+            "  {DIM}restored {} file(s): {}{RESET}",
+            report.restored.len(),
+            report.restored.join(", ")
+        );
+    }
+    if !report.removed.is_empty() {
+        println!(
+            "  {DIM}removed {} created file(s): {}{RESET}",
+            report.removed.len(),
+            report.removed.join(", ")
+        );
+    }
+    if report.is_partial() {
+        println!("  {YELLOW}!{RESET} {DIM}partial undo — some paths were skipped or failed{RESET}");
+        if !report.skipped.is_empty() {
+            println!("  {DIM}skipped: {}{RESET}", report.skipped.join(", "));
+        }
+        for err in &report.errors {
+            println!("  {RED}✗{RESET} {DIM}{err}{RESET}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_checkpoints(args: &str, state: &mut AppState) {
+    let arg = args.trim();
+    match arg {
+        "on" => {
+            state.checkpoints_enabled = true;
+            println!("  {GREEN}✓{RESET} {DIM}turn checkpoints enabled for this session{RESET}");
+        }
+        "off" => {
+            state.checkpoints_enabled = false;
+            println!("  {GREEN}✓{RESET} {DIM}turn checkpoints disabled for this session{RESET}");
+        }
+        "status" | "" => {
+            println!(
+                "  {DIM}checkpoints{RESET}  config={} session={} stack={}/{} maxFileBytes={}",
+                state.config.checkpoints.enabled,
+                state.checkpoints_enabled,
+                state.checkpoint_stack.len(),
+                state.checkpoint_stack.limits.max_turns,
+                state.config.checkpoints.max_file_bytes
+            );
+        }
+        other => {
+            println!("  {DIM}Usage: /checkpoints [on|off|status]{RESET} (unknown: {other})");
+        }
+    }
 }
 
 fn cmd_batch(args: &str, state: &AppState) -> Result<()> {
@@ -3339,6 +3475,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::backends::BackendDescriptor;
+    use crate::config::AgentConfig;
     use std::process::Command;
 
     fn test_state(root: &Path) -> AppState {
@@ -3359,6 +3496,16 @@ mod tests {
             total_out: 0,
             context_guard_notice: None,
             conversation_summary: None,
+            checkpoint_stack: crate::turn_checkpoint::CheckpointStack::new(
+                config.checkpoints.limits(),
+            ),
+            checkpoints_enabled: config.checkpoints.enabled,
+            play_session: None,
+            last_play_scorecard: None,
+            approval_cache: crate::approval::ApprovalCache::new(),
+            renderer: crate::renderer::TuiRenderer::new(config.display.clone()),
+            warmed_fingerprint: None,
+            tests_ran_this_session: false,
             config,
         }
     }
@@ -3492,5 +3639,82 @@ mod tests {
         assert!(body.contains("## X Post"));
         assert!(body.contains("## Testing"));
         assert!(body.contains("model draft failed"));
+    }
+
+    #[test]
+    fn undo_restores_mutated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("note.txt"), "before\n").unwrap();
+        let mut state = test_state(dir.path());
+        let mut checkpoint = crate::turn_checkpoint::TurnCheckpoint::new();
+        crate::turn_checkpoint::snapshot_file_into(
+            &mut checkpoint,
+            dir.path(),
+            "note.txt",
+            state.config.checkpoints.limits(),
+        )
+        .unwrap();
+        fs::write(dir.path().join("note.txt"), "after\n").unwrap();
+        state.checkpoint_stack.push(checkpoint);
+
+        cmd_undo("", &mut state).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(state.checkpoint_stack.is_empty());
+    }
+
+    #[test]
+    fn new_restores_play_session_and_clears_session_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        let original_root = state.config.workspace_root.clone();
+        let original_mode = state.config.mode;
+        let sandbox = dir.path().join("sandbox");
+        state.play_session = Some(crate::app_state::PlaySession {
+            fixture_id: "demo".into(),
+            sandbox_root: sandbox.clone(),
+            restore: crate::app_state::PlayRestoreSnapshot {
+                config: state.config.clone(),
+                checkpoints_enabled: true,
+            },
+        });
+        state.config.workspace_root = sandbox.display().to_string();
+        state.config.apply_operator_mode(OperatorMode::Ship);
+        state.messages.push(crate::openai::ChatMessage::User {
+            content: "hello".into(),
+        });
+        state.conversation_summary = Some("summary".into());
+        state.context_guard_notice = Some("notice".into());
+        state
+            .checkpoint_stack
+            .push(crate::turn_checkpoint::TurnCheckpoint::new());
+
+        cmd_new(&mut state);
+
+        assert_eq!(state.config.workspace_root, original_root);
+        assert_eq!(state.config.mode, original_mode);
+        assert!(state.play_session.is_none());
+        assert!(state.messages.is_empty());
+        assert!(state.conversation_summary.is_none());
+        assert!(state.context_guard_notice.is_none());
+        assert!(state.checkpoint_stack.is_empty());
+    }
+
+    #[test]
+    fn mode_ship_syncs_session_checkpoints_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.config.apply_operator_mode(OperatorMode::Explore);
+        state.checkpoints_enabled = state.config.checkpoints.enabled;
+        assert!(!state.checkpoints_enabled);
+
+        cmd_mode("ship", &mut state);
+
+        assert_eq!(state.config.mode, OperatorMode::Ship);
+        assert!(state.config.checkpoints.enabled);
+        assert!(state.checkpoints_enabled);
     }
 }
