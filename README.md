@@ -45,6 +45,9 @@ shell, run tests — plus a few that aren't usual:
 - **Real undo.** `/undo` reverts the last agent turn's file mutations,
   including files the agent created or files that weren't tracked when the
   turn started.
+- **Session paths.** `/path fork` branches the conversation and workspace so
+  you can try two fixes, diff them, and `/path pick` the winner — no
+  worktree required.
 - **MCP-native.** Drop servers into `mcpServers` in your config; their tools
   show up as `mcp__<server>__<tool>` to the model on next launch.
 - **`/auth` instead of `.env`.** Paste API keys once into a `0600` file
@@ -117,6 +120,8 @@ A handful of moves worth knowing right away:
 - `/mode explore | edit | ship | review` toggles tool + approval + step-budget
   presets.
 - `/undo` reverts the last turn's file mutations.
+- `/path fork` branches the session to try an alternate approach; `/path switch`,
+  `/path diff`, and `/path pick` compare and merge paths.
 - `/shipcheck` summarizes git state; `/handoff` drafts a commit message,
   changelog bullets, and a release post from local context.
 - `/play fix-failing-test` runs a bundled demo in an isolated sandbox so you
@@ -206,6 +211,8 @@ this exact call`. The session cache resets on `/new`.
 /resume latest|<id>    resume a saved session
 /export current|<id>   export transcript to markdown or json
 /undo                  revert the last agent turn's file mutations
+/path                  fork, switch, diff, pick, or drop parallel session paths
+/paths                 list saved session paths
 ```
 
 **Operator modes and workflow**
@@ -413,6 +420,12 @@ root. Common shape:
     "allowCloudContext": false
   },
   "checkpoints": { "enabled": true, "maxTurns": 10 },
+  "paths": {
+    "enabled": true,
+    "maxPaths": 5,
+    "maxSnapshotBytes": 52428800,
+    "maxFileBytes": 1048576
+  },
   "mcpServers": {
     "fs": { "command": "/usr/local/bin/some-mcp-server", "args": [] }
   },

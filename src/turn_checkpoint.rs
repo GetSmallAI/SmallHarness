@@ -85,7 +85,8 @@ impl RestoreReport {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CheckpointStack {
     pub checkpoints: Vec<TurnCheckpoint>,
     pub limits: CheckpointLimits,
@@ -285,6 +286,21 @@ pub fn snapshot_file_into(
         },
     );
     Ok(())
+}
+
+pub fn restore_file_baselines(
+    files: &BTreeMap<String, FileBaseline>,
+    skipped: &[String],
+    workspace_root: &Path,
+) -> RestoreReport {
+    let checkpoint = TurnCheckpoint {
+        id: String::new(),
+        created_at: String::new(),
+        files: files.clone(),
+        skipped: skipped.to_vec(),
+        snapshot_bytes: 0,
+    };
+    restore_checkpoint(&checkpoint, workspace_root)
 }
 
 pub fn restore_checkpoint(checkpoint: &TurnCheckpoint, workspace_root: &Path) -> RestoreReport {

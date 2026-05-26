@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Session paths** — terminal-native branching without a worktree.
+  `/path fork [name]` snapshots the workspace and clones the transcript;
+  `/path switch <name>` restores another path; `/path diff` and `/path pick`
+  compare and merge file changes with approval preview. State lives under
+  `.sessions/paths/<session-id>/`. Config block `paths` controls enablement,
+  max paths, and snapshot byte caps. Status line shows `path: name · N paths`
+  when multiple paths exist. Resumes via `--continue`, `/resume`, and session
+  metadata `activePathId`.
+
 ## [0.3.0] - 2026-05-24
 
 A polish + capability pass. Direct OpenAI provider, per-turn cost on the

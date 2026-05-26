@@ -77,6 +77,17 @@ fn format_tokens(n: u32) -> String {
 /// when the model is in the catalog, "$?" when it isn't (e.g. OpenRouter
 /// or a not-yet-cataloged OpenAI model), and prefixes the session total
 /// with `≥` whenever any turn fell into the unknown bucket.
+fn format_path_suffix(state: &AppState) -> String {
+    if !state.paths_enabled() || state.path_store.path_count() <= 1 {
+        return String::new();
+    }
+    format!(
+        " · path: {} · {} paths",
+        state.path_store.active_id(),
+        state.path_store.path_count()
+    )
+}
+
 fn format_cost_suffix(
     turn_cost: Option<f64>,
     backend_is_local: bool,
@@ -388,6 +399,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let mut last_test_result = None;
 
     if memory_changed {
+        state.path_store.mark_dirty();
         if let Some(capturer) = turn_capturer {
             let checkpoint = capturer.into_checkpoint();
             if should_push_checkpoint(true, &checkpoint) {
@@ -443,7 +455,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
 
     println!(
-        "{GRAY}  {} in · {} out{}{RESET}",
+        "{GRAY}  {} in · {} out{}{}{RESET}",
         format_tokens(res.input_tokens),
         format_tokens(res.output_tokens),
         format_cost_suffix(
@@ -452,6 +464,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             state.session_usd,
             state.session_cost_has_unknown
         ),
+        format_path_suffix(state),
     );
 
     Ok(TurnOutcome {

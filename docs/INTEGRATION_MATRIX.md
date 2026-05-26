@@ -18,17 +18,21 @@ This file is the **checklist** (G/F/P rows below). It is not what you paste into
 The agent must paste this filled in before you merge:
 
 ```
-## Integration matrix — [plan name]
+## Integration matrix — Session Paths
 
-Global: G1 [ ] G2 [ ] G3 [ ] G4 [ ] G5 [ ] G6 [ ]
-Feature: F1 [ ] F2 [ ] F3 [ ] F4 [ ] F5 [ ] F6 [ ] F7 [ ] F8 [ ] (N/A where unchecked)
+Global: G1 [x] G2 [x] G3 [x] G4 [x] G5 [x] G6 [x]
+Feature: F1 [x] F2 [x] F3 [x] F4 [x] F5 [ ] F6 [ ] F7 [ ] F8 [x] (N/A where unchecked)
 
 Plan-specific:
-| P1 | … | pass | test: … |
-| P2 | … | pass | test: … |
+| P1 | Fork → mutate → switch → workspace round-trips with workspaceRoot "." | pass | test: session_paths.rs::fork_switch_round_trip |
+| P2 | /path pick uses approval preview; dry-run does not write | pass | test: session_paths.rs::pick_dry_run_does_not_write |
+| P3 | /new clears path registry; resume restores active path id | pass | test: commands.rs::new_resets_path_store_for_fresh_session |
+| P4 | Refuse fork/switch/pick during active /play | pass | test: commands.rs::path_fork_refuses_during_play_session |
+| P5 | Pick result parsing uses structured applied field | pass | test: session_paths.rs::pick_applies_structured_result |
+| P6 | Untracked file created on branch A absent after switch to main | pass | test: session_paths.rs::fork_switch_round_trip |
 
 Commands: cargo test / fmt / clippy — all green
-Follow-ups (if any): …
+Follow-ups (if any): none
 ```
 
 **Your job at the end:** skim the report (~2 min). If P-rows or G-rows are blank but the feature clearly touches those areas, send it back.
@@ -77,40 +81,40 @@ Follow-ups (if any): …
 
 ## Current build
 
-_Plan name: Play and Fix Features  
-Date: 2026-05-23
+_Plan name: Session Paths  
+Date: 2026-05-25
 
 ### Plan-specific rows
 
 | # | Scenario | Pass? | Test added (path) |
 |---|----------|-------|-------------------|
-| P1 | `/play exit` restores original `workspace_root`, mode, and full mode-mutated config | [x] | `playground.rs::play_session_restore_round_trip` |
-| P2 | `/play` refuses nested start; `/fix` refuses while play active | [x] | `playground.rs::play_refuses_while_active`, `fix_loop.rs::fix_refuses_during_play_session` |
-| P3 | `/fix` stops when tests pass; respects `--attempts N` and `--attempts=N`; restores full mode-mutated config | [x] | `fix_loop.rs::fix_loop_stops_when_tests_pass`, `fix_loop.rs::fix_mode_restore_round_trip`, `fix_loop.rs::fix_loop_respects_max_attempts_config` |
-| P4 | `/play battle` produces comparison table + JSON export | [x] | `playground.rs::play_battle_saves_json_and_markdown`, `run_play_battle` wiring |
-| P5 | `/fix` sets `auto_verify_tests: false` to avoid double test runs | [x] | `fix_loop.rs` (explicit re-run after each turn) |
+| P1 | Fork → mutate → switch → workspace round-trips with `workspaceRoot: "."` | [x] | `session_paths.rs::fork_switch_round_trip`, `relative_workspace_root_capture_and_restore` |
+| P2 | `/path pick` dry-run does not write; live pick uses approval in `cmd_path` | [x] | `session_paths.rs::pick_dry_run_does_not_write`, `pick_applies_structured_result` |
+| P3 | `/new` resets path store; `/resume` + `--continue` load `activePathId` | [x] | `commands.rs::new_resets_path_store_for_fresh_session` |
+| P4 | Refuse `/path` fork during active `/play` | [x] | `commands.rs::path_fork_refuses_during_play_session` |
+| P5 | Pick uses structured `applied` field, not `"error"` substring | [x] | `session_paths.rs::pick_applies_structured_result` |
+| P6 | Branch-only file removed when switching back to main | [x] | `session_paths.rs::fork_switch_round_trip` |
 
 ### Global baseline
 
 - [x] G1  [x] G2  [x] G3  [x] G4  [x] G5  [x] G6
 
 Notes:
-- G1/G3: `turn_checkpoint.rs::relative_workspace_root_restore_round_trip`, `turn_checkpoint.rs::snapshot_works_with_relative_workspace_root`
-- G2/G5: `playground.rs::play_session_restore_round_trip`, `fix_loop.rs::fix_mode_restore_round_trip`, `commands.rs::mode_ship_syncs_session_checkpoints_flag`
-- G4: `tools::tests::batch_edit_dry_run_does_not_count_as_mutation`, `turn_checkpoint.rs::batch_edit_dry_run_should_not_push`
-- G6: `tools::tests::mutation_detection_uses_structured_fields_not_error_substrings`
+- G1/G3: `session_paths.rs::relative_workspace_root_capture_and_restore`, `resolve_under_workspace`
+- G2: paths are config-only (`paths.enabled`); no dual session toggle — `/new` resets `PathStore`
+- G4: `/path pick --dry-run` and `PickResult { dry_run, applied }` do not write files
+- G5: paths work in all operator modes; pick always approval-gated
+- G6: `PickResult.applied` gates success in tests and command handler
 
 ### Feature-specific (check all that apply)
 
-- [x] F1  [x] F2  [x] F3  [x] F4  [x] F5  [x] F6  [x] F7  [x] F8
+- [x] F1  [x] F2  [x] F3  [x] F4  [ ] F5  [ ] F6  [ ] F7  [x] F8
 
 Notes:
-- F1/F2/F3: `turn_checkpoint.rs::relative_workspace_root_restore_round_trip`, `restore_removes_created_file`, `lazy_snapshot_before_untracked_edit`
-- F4: `turn_checkpoint.rs::batch_edit_dry_run_should_not_push`
-- F5: `test_integration.rs::smart_selection_includes_untracked_files`
-- F6: `session_turn.rs` auto-verify path plus `tools::tests::file_edit_success_counts_as_mutation`
-- F7: `context_guard.rs::partition_keeps_tool_rounds_intact`, `partition_can_split_large_single_user_turn_on_tool_boundaries`
-- F8: `commands.rs::new_restores_play_session_and_clears_session_state`
+- F1/F3: `session_paths.rs::relative_workspace_root_capture_and_restore`, `untracked_file_captured`
+- F2: branch file removal on switch uses snapshot diff (`remove_files_not_in_snapshot`)
+- F4: N/A (paths are slash commands, not batch_edit)
+- F8: `commands.rs::new_resets_path_store_for_fresh_session`; resume loads `activePathId` from session meta
 
 ### Commands run
 

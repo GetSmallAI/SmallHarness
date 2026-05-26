@@ -29,6 +29,8 @@ pub struct SessionMetadata {
     pub title: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(rename = "activePathId", default)]
+    pub active_path_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

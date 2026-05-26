@@ -7,7 +7,7 @@ use crate::config::{AgentConfig, ApprovalPolicy, ToolSelection};
 
 mod apply_patch_tool;
 mod batch_edit;
-mod diff;
+pub mod diff;
 mod file_edit;
 mod file_read;
 mod file_write;
@@ -23,6 +23,7 @@ mod web_fetch;
 
 pub use apply_patch_tool::{patch_changed_files, ApplyPatchTool};
 pub use batch_edit::BatchEditTool;
+pub use diff::unified_diff;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;

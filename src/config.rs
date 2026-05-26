@@ -267,6 +267,44 @@ impl Default for FixConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "maxPaths", default = "default_paths_max_paths")]
+    pub max_paths: usize,
+    #[serde(
+        rename = "maxSnapshotBytes",
+        default = "default_paths_max_snapshot_bytes"
+    )]
+    pub max_snapshot_bytes: u64,
+    #[serde(rename = "maxFileBytes", default = "default_paths_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+fn default_paths_max_paths() -> usize {
+    5
+}
+
+fn default_paths_max_snapshot_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+
+fn default_paths_max_file_bytes() -> u64 {
+    1024 * 1024
+}
+
+impl Default for PathsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_paths: default_paths_max_paths(),
+            max_snapshot_bytes: default_paths_max_snapshot_bytes(),
+            max_file_bytes: default_paths_max_file_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     #[serde(rename = "maxMessages", default)]
     pub max_messages: Option<usize>,
@@ -393,6 +431,7 @@ pub struct AgentConfig {
     pub project_memory: ProjectMemoryConfig,
     pub checkpoints: CheckpointConfig,
     pub fix: FixConfig,
+    pub paths: PathsConfig,
     pub profiles: BTreeMap<String, ProfileModels>,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
@@ -447,6 +486,7 @@ impl Default for AgentConfig {
             project_memory: ProjectMemoryConfig::default(),
             checkpoints: CheckpointConfig::default(),
             fix: FixConfig::default(),
+            paths: PathsConfig::default(),
             profiles: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
         }
@@ -484,6 +524,7 @@ struct FileConfig {
     project_memory: Option<ProjectMemoryConfig>,
     checkpoints: Option<CheckpointConfig>,
     fix: Option<FixConfig>,
+    paths: Option<PathsConfig>,
     profiles: Option<BTreeMap<String, ProfileModels>>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
@@ -716,6 +757,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(f) = file.fix {
                     config.fix = f;
+                }
+                if let Some(p) = file.paths {
+                    config.paths = p;
                 }
                 if let Some(p) = file.profiles {
                     config.profiles = p;

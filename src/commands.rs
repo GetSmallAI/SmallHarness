@@ -55,9 +55,11 @@ use crate::recommend::{
     apply_recommendation_to_config, recommend_models, ModelCandidate, ModelRecommendation,
 };
 use crate::session::{
-    delete_session, list_sessions, load_messages, load_session, render_markdown,
-    resolve_session_path, save_message, search_sessions, set_session_title, SessionEntry,
+    delete_session, list_sessions, load_messages, load_session, load_session_metadata,
+    render_markdown, resolve_session_path, save_message, save_session_metadata, search_sessions,
+    set_session_title, SessionEntry,
 };
+use crate::session_paths::{apply_path_session_state, PathStore, DEFAULT_PATH_ID};
 use crate::shipcheck::{
     collect_shipcheck, collect_shipcheck_with_tests, default_export_path, file_status_label,
     render_markdown as render_shipcheck_markdown, ShipcheckSnapshot,
@@ -82,6 +84,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/checkpoints",
         "Show or toggle turn checkpoints (on, off, status)",
     ),
+    (
+        "/path",
+        "Fork, switch, diff, pick, or drop parallel session paths",
+    ),
+    ("/paths", "List saved session paths"),
     ("/help", "List available commands"),
     ("/setup", "Run the setup wizard and write agent.config.json"),
     ("/new", "Start a fresh conversation"),
@@ -197,6 +204,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/clear" => clear_screen(),
         "/undo" => cmd_undo(&args, state)?,
         "/checkpoints" => cmd_checkpoints(&args, state),
+        "/path" => cmd_path(&args, state).await?,
+        "/paths" => cmd_paths(state)?,
         "/config" => cmd_config(state),
         "/mode" => cmd_mode(&args, state),
         "/shipcheck" => cmd_shipcheck(&args, state)?,
@@ -293,6 +302,237 @@ fn cmd_new(state: &mut AppState) {
     println!("  {GREEN}✓{RESET} {DIM}New session started.{RESET}");
 }
 
+fn ensure_path_ops_allowed(state: &AppState) -> Result<()> {
+    if state.in_play_session() {
+        anyhow::bail!("cannot use /path during a /play session — /play exit first");
+    }
+    Ok(())
+}
+
+fn cmd_paths(state: &AppState) -> Result<()> {
+    if !state.paths_enabled() {
+        println!("  {DIM}session paths are disabled in config{RESET}");
+        return Ok(());
+    }
+    let active = state.path_store.active_id();
+    if state.path_store.registry.paths.is_empty() {
+        println!(
+            "  {DIM}path{RESET}           {CYAN}{active}{RESET} {DIM}(only path — /path fork to branch){RESET}"
+        );
+        return Ok(());
+    }
+    println!(
+        "  {DIM}active{RESET}         {CYAN}{}{RESET} · {} path(s) · {} stored",
+        active,
+        state.path_store.path_count(),
+        format_bytes(state.path_store.total_storage_bytes() as usize)
+    );
+    for record in &state.path_store.registry.paths {
+        let marker = if record.id == active {
+            format!("{GREEN}*{RESET} ")
+        } else {
+            "  ".to_string()
+        };
+        println!(
+            "  {marker}{CYAN}{}{RESET} {DIM}msgs={} files={} updated={}{RESET}",
+            record.id, record.message_count, record.file_count, record.updated_at
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_path(args: &str, state: &mut AppState) -> Result<()> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "status" {
+        cmd_path_status(state);
+        return Ok(());
+    }
+    let mut parts = trimmed.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match sub {
+        "fork" => {
+            ensure_path_ops_allowed(state)?;
+            let name = if rest.is_empty() { None } else { Some(rest) };
+            let root = state.workspace_root();
+            let session_path = state.session_path.clone();
+            let current = PathStore::capture_state(state, &root)?;
+            let (new_id, new_state) = state.path_store.fork(current, &session_path, name, &root)?;
+            let transcript = state.path_store.transcript_path(&new_id);
+            apply_path_session_state(state, &new_state, &transcript);
+            let _ = state.save_active_path_metadata();
+            let parent = state
+                .path_store
+                .registry
+                .paths
+                .iter()
+                .find(|p| p.id == new_id)
+                .and_then(|p| p.parent_id.clone())
+                .unwrap_or_else(|| DEFAULT_PATH_ID.to_string());
+            let notice = format!(
+                "Forked to path '{new_id}' from '{parent}' at message {}.",
+                state.messages.len()
+            );
+            state.messages.push(ChatMessage::System {
+                content: notice.clone(),
+            });
+            println!(
+                "  {GREEN}✓{RESET} {DIM}forked to path{RESET} {CYAN}{new_id}{RESET} {DIM}— continue here, /path switch to compare{RESET}"
+            );
+        }
+        "switch" => {
+            ensure_path_ops_allowed(state)?;
+            if rest.is_empty() {
+                println!("  {DIM}Usage: /path switch <name>{RESET}");
+                return Ok(());
+            }
+            let root = state.workspace_root();
+            let current = PathStore::capture_state(state, &root)?;
+            let (path_state, report) = state.path_store.switch_to(rest, current, &root)?;
+            let transcript = state
+                .path_store
+                .transcript_path(state.path_store.active_id());
+            apply_path_session_state(state, &path_state, &transcript);
+            let _ = state.save_active_path_metadata();
+            println!(
+                "  {GREEN}✓{RESET} {DIM}switched to path{RESET} {CYAN}{}{RESET}",
+                state.path_store.active_id()
+            );
+            if !report.restored.is_empty() || !report.removed.is_empty() {
+                println!(
+                    "  {DIM}restored {} · removed {}{RESET}",
+                    report.restored.len(),
+                    report.removed.len()
+                );
+            }
+            if report.is_partial() {
+                println!(
+                    "  {YELLOW}!{RESET} {DIM}partial restore — {} skipped, {} errors{RESET}",
+                    report.skipped.len(),
+                    report.errors.len()
+                );
+            }
+        }
+        "diff" => {
+            if rest.is_empty() {
+                println!("  {DIM}Usage: /path diff <name>{RESET}");
+                return Ok(());
+            }
+            let diff = state.path_store.diff_with(rest, &state.workspace_root())?;
+            if diff.is_empty() {
+                println!("  {DIM}No file differences vs path `{rest}`.{RESET}");
+            } else {
+                for line in diff.lines().take(120) {
+                    println!("  {DIM}{line}{RESET}");
+                }
+                if diff.lines().count() > 120 {
+                    println!("  {DIM}…diff truncated for display{RESET}");
+                }
+            }
+        }
+        "pick" => {
+            ensure_path_ops_allowed(state)?;
+            let mut name = rest;
+            let mut dry_run = false;
+            if name.starts_with("--dry-run") {
+                dry_run = true;
+                name = name.strip_prefix("--dry-run").unwrap_or("").trim();
+            }
+            if name.is_empty() {
+                println!("  {DIM}Usage: /path pick <name> [--dry-run]{RESET}");
+                return Ok(());
+            }
+            let preview = state
+                .path_store
+                .pick_from(name, &state.workspace_root(), true)?;
+            if preview.files.is_empty() {
+                println!("  {DIM}Nothing to pick from path `{name}`.{RESET}");
+                return Ok(());
+            }
+            if dry_run {
+                println!(
+                    "  {DIM}dry-run would apply {} file(s): {}{RESET}",
+                    preview.files.len(),
+                    preview.files.join(", ")
+                );
+                return Ok(());
+            }
+            let diff = state.path_store.diff_with(name, &state.workspace_root())?;
+            if !diff.is_empty() {
+                println!();
+                for line in diff.lines().take(80) {
+                    println!("  {DIM}{line}{RESET}");
+                }
+                if diff.lines().count() > 80 {
+                    println!("  {DIM}…diff truncated for display{RESET}");
+                }
+                println!();
+            }
+            println!(
+                "  {YELLOW}?{RESET} {DIM}Apply {} file(s) from `{name}`? [y/n]{RESET}",
+                preview.files.len()
+            );
+            let answer = plain_read_line(format!("  {YELLOW}? {RESET}")).await?;
+            if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                println!("  {RED}✗{RESET} {DIM}pick cancelled{RESET}");
+                return Ok(());
+            }
+            let result = state
+                .path_store
+                .pick_from(name, &state.workspace_root(), false)?;
+            if result.applied {
+                state.path_store.mark_dirty();
+                println!(
+                    "  {GREEN}✓{RESET} {DIM}picked {} file(s) from `{name}`{RESET}",
+                    result.files.len()
+                );
+            } else if !result.errors.is_empty() {
+                println!(
+                    "  {RED}✗{RESET} {DIM}pick failed: {}{RESET}",
+                    result.errors.join("; ")
+                );
+            }
+        }
+        "drop" => {
+            ensure_path_ops_allowed(state)?;
+            if rest.is_empty() {
+                println!("  {DIM}Usage: /path drop <name>{RESET}");
+                return Ok(());
+            }
+            state.path_store.drop_path(rest)?;
+            println!("  {GREEN}✓{RESET} {DIM}dropped path `{rest}`{RESET}");
+        }
+        other => {
+            println!(
+                "  {DIM}Usage: /path [fork [name] | switch <name> | diff <name> | pick <name> [--dry-run] | drop <name> | status]{RESET} (unknown: {other})"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_path_status(state: &AppState) {
+    if !state.paths_enabled() {
+        println!("  {DIM}paths{RESET}           disabled in config");
+        return;
+    }
+    let count = state.path_store.path_count();
+    println!(
+        "  {DIM}path{RESET}           {CYAN}{}{RESET}",
+        state.path_store.active_id()
+    );
+    if count > 1 {
+        println!(
+            "  {DIM}paths{RESET}          {count} · {} stored",
+            format_bytes(state.path_store.total_storage_bytes() as usize)
+        );
+    } else {
+        println!(
+            "  {DIM}paths{RESET}          1 {DIM}(/path fork to try an alternate approach){RESET}"
+        );
+    }
+}
+
 fn clear_screen() {
     use std::io::Write;
     let mut out = std::io::stdout();
@@ -368,6 +608,15 @@ fn cmd_config(state: &AppState) {
         state.checkpoint_stack.limits.max_turns,
         state.config.checkpoints.max_bytes
     );
+    if state.paths_enabled() {
+        println!(
+            "  {DIM}paths{RESET}            enabled={} active={} count={} maxPaths={}",
+            state.config.paths.enabled,
+            state.path_store.active_id(),
+            state.path_store.path_count(),
+            state.config.paths.max_paths
+        );
+    }
     if !state.config.profiles.is_empty() {
         println!(
             "  {DIM}customProfiles{RESET}   {}",
@@ -861,6 +1110,29 @@ fn cmd_resume(args: &str, state: &mut AppState) -> Result<()> {
     let messages = load_messages(&path)?;
     state.messages = messages;
     state.session_path = path.clone();
+    state.path_store =
+        PathStore::load(&state.session_dir, &state.session_path, &state.config.paths);
+    let metadata = load_session_metadata(&path)?;
+    let root = state.workspace_root();
+    if let Some((path_state, report)) = state
+        .path_store
+        .load_resume_state(&root, metadata.active_path_id.as_deref())?
+    {
+        let transcript = state
+            .path_store
+            .transcript_path(state.path_store.active_id());
+        apply_path_session_state(state, &path_state, &transcript);
+        if report.is_partial() {
+            println!(
+                "  {YELLOW}!{RESET} {DIM}path restore partial — {} skipped, {} errors{RESET}",
+                report.skipped.len(),
+                report.errors.len()
+            );
+        }
+    }
+    let mut updated = metadata.clone();
+    updated.active_path_id = Some(state.path_store.active_id().to_string());
+    let _ = save_session_metadata(&path, &updated);
     state.conversation_summary = state.messages.first().and_then(|message| match message {
         ChatMessage::System { content } => extract_conversation_summary(content),
         _ => None,
@@ -3739,6 +4011,7 @@ mod tests {
     use super::*;
     use crate::backends::BackendDescriptor;
     use crate::config::AgentConfig;
+    use crate::session_paths::PathStore;
     use std::process::Command;
 
     fn test_state(root: &Path) -> AppState {
@@ -3748,13 +4021,15 @@ mod tests {
             ..Default::default()
         };
         config.project_memory.max_injected_bytes = 1024;
+        config.paths.enabled = true;
+        let session_path = root.join(".sessions/test.jsonl");
         AppState {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
-            session_path: root.join(".sessions/test.jsonl"),
+            session_path,
             total_in: 0,
             total_out: 0,
             session_usd: 0.0,
@@ -3773,6 +4048,11 @@ mod tests {
             tests_ran_this_session: false,
             pending_image_attachments: Vec::new(),
             mcp_tools: Vec::new(),
+            path_store: PathStore::new(
+                &config.session_dir,
+                &root.join(".sessions/test.jsonl"),
+                &config.paths,
+            ),
             config,
         }
     }
@@ -3983,5 +4263,42 @@ mod tests {
         assert_eq!(state.config.mode, OperatorMode::Ship);
         assert!(state.config.checkpoints.enabled);
         assert!(state.checkpoints_enabled);
+    }
+
+    #[test]
+    fn path_fork_refuses_during_play_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path());
+        state.play_session = Some(crate::app_state::PlaySession {
+            fixture_id: "demo".into(),
+            sandbox_root: dir.path().join("sandbox"),
+            restore: crate::app_state::PlayRestoreSnapshot {
+                config: state.config.clone(),
+                checkpoints_enabled: true,
+            },
+        });
+        let err = ensure_path_ops_allowed(&state).unwrap_err();
+        assert!(err.to_string().contains("/play"));
+    }
+
+    #[test]
+    fn new_resets_path_store_for_fresh_session() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("alpha.txt"), "main\n").unwrap();
+        let mut state = test_state(dir.path());
+        let root = state.workspace_root();
+        let session_path = state.session_path.clone();
+        let current = PathStore::capture_state(&state, &root).unwrap();
+        state
+            .path_store
+            .fork(current, &session_path, Some("plan-a"), &root)
+            .unwrap();
+        assert!(state.path_store.path_count() >= 2);
+
+        cmd_new(&mut state);
+
+        assert_eq!(state.path_store.active_id(), DEFAULT_PATH_ID);
+        assert_eq!(state.path_store.path_count(), 1);
+        assert!(state.path_store.registry.paths.is_empty());
     }
 }

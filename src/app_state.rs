@@ -7,6 +7,7 @@ use crate::backends::{backend, default_model, validate, BackendDescriptor};
 use crate::config::AgentConfig;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
+use crate::session_paths::PathStore;
 use crate::tools::Tool;
 use crate::turn_checkpoint::CheckpointStack;
 use std::sync::Arc;
@@ -77,9 +78,23 @@ pub struct AppState {
     /// (in `main`) and appended to every turn's tool list. Kept as Arcs so
     /// each turn shares the same live JSON-RPC connection per server.
     pub mcp_tools: Vec<Arc<dyn Tool>>,
+    pub path_store: PathStore,
 }
 
 impl AppState {
+    pub fn workspace_root(&self) -> PathBuf {
+        crate::session_paths::workspace_root_path(&self.config)
+    }
+
+    pub fn paths_enabled(&self) -> bool {
+        self.config.paths.enabled
+    }
+
+    pub fn save_active_path_metadata(&self) -> Result<()> {
+        let mut metadata = crate::session::load_session_metadata(&self.session_path)?;
+        metadata.active_path_id = Some(self.path_store.active_id().to_string());
+        crate::session::save_session_metadata(&self.session_path, &metadata)
+    }
     pub fn rebuild_client(&mut self) -> Result<()> {
         let new_backend = backend(self.config.backend);
         validate(&new_backend)?;
@@ -98,6 +113,7 @@ impl AppState {
 
     pub fn reset_session(&mut self) {
         self.session_path = crate::session::new_session_path(&self.session_dir);
+        self.path_store = PathStore::new(&self.session_dir, &self.session_path, &self.config.paths);
     }
 
     pub fn in_play_session(&self) -> bool {

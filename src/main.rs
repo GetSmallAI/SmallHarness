@@ -27,6 +27,7 @@ mod prompt_library;
 mod recommend;
 mod renderer;
 mod session;
+mod session_paths;
 mod session_turn;
 mod setup;
 mod shipcheck;
@@ -47,7 +48,8 @@ use crate::config::{load_config, InputStyle};
 use crate::input::{bordered_read_line, plain_read_line_with_history, InputHistory};
 use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
-use crate::session::{init_session_dir, new_session_path};
+use crate::session::{init_session_dir, load_session_metadata, new_session_path};
+use crate::session_paths::{apply_path_session_state, PathStore};
 use crate::session_turn::{run_user_turn, TurnOptions};
 use crate::tools::{build_tools_for_names, select_tool_names};
 use crate::turn_checkpoint::CheckpointStack;
@@ -428,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let session_path = new_session_path(&config.session_dir);
     let session_dir = config.session_dir.clone();
+    let paths_config = config.paths.clone();
     let checkpoint_limits = config.checkpoints.limits();
     let checkpoints_enabled = config.checkpoints.enabled;
     let display = config.display.clone();
@@ -438,8 +441,8 @@ async fn main() -> anyhow::Result<()> {
         backend: backend_desc,
         model,
         messages: Vec::new(),
-        session_dir,
-        session_path,
+        session_dir: session_dir.clone(),
+        session_path: session_path.clone(),
         total_in: 0,
         total_out: 0,
         session_usd: 0.0,
@@ -456,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
         tests_ran_this_session: false,
         pending_image_attachments: Vec::new(),
         mcp_tools: Vec::new(),
+        path_store: PathStore::new(&session_dir, &session_path, &paths_config),
     };
 
     if !state.config.mcp_servers.is_empty() {
@@ -479,12 +483,38 @@ async fn main() -> anyhow::Result<()> {
                 Ok(messages) => {
                     state.messages = messages;
                     state.session_path = path.clone();
+                    state.path_store = PathStore::load(
+                        &state.session_dir,
+                        &state.session_path,
+                        &state.config.paths,
+                    );
+                    let metadata = load_session_metadata(&path).unwrap_or_default();
+                    let root = state.workspace_root();
+                    if let Some((path_state, report)) = state
+                        .path_store
+                        .load_resume_state(&root, metadata.active_path_id.as_deref())?
+                    {
+                        let transcript = state
+                            .path_store
+                            .transcript_path(state.path_store.active_id());
+                        apply_path_session_state(&mut state, &path_state, &transcript);
+                        if report.is_partial() {
+                            println!(
+                                "{YELLOW}!{RESET} {DIM}--continue path restore partial{RESET}"
+                            );
+                        }
+                    }
                     let id = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("session");
+                    let path_note = if state.path_store.path_count() > 1 {
+                        format!(" · path {}", state.path_store.active_id())
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{GREEN}✓{RESET} {DIM}continuing{RESET} {} {DIM}({} messages){RESET}",
+                        "{GREEN}✓{RESET} {DIM}continuing{RESET} {} {DIM}({} messages{path_note}){RESET}",
                         id,
                         state.messages.len()
                     );
@@ -530,6 +560,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if trimmed == "exit" || trimmed == "quit" || trimmed == ".exit" {
+            if state.path_store.dirty {
+                let current = PathStore::capture_state(&state, &state.workspace_root())?;
+                let _ = state.path_store.flush_if_dirty(current);
+            }
+            let _ = state.save_active_path_metadata();
             println!("  {DIM}bye.{RESET}");
             std::process::exit(0);
         }

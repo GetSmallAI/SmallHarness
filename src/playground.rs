@@ -270,6 +270,7 @@ mod tests {
     use crate::approval::ApprovalCache;
     use crate::config::AgentConfig;
     use crate::renderer::TuiRenderer;
+    use crate::session_paths::PathStore;
     use crate::turn_checkpoint::CheckpointStack;
 
     fn test_state(root: &Path) -> AppState {
@@ -279,13 +280,14 @@ mod tests {
             ..Default::default()
         };
         config.apply_operator_mode(OperatorMode::Explore);
+        let session_path = root.join(".sessions/test.jsonl");
         AppState {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
-            session_path: root.join(".sessions/test.jsonl"),
+            session_path: session_path.clone(),
             total_in: 0,
             total_out: 0,
             session_usd: 0.0,
@@ -302,6 +304,7 @@ mod tests {
             tests_ran_this_session: false,
             pending_image_attachments: Vec::new(),
             mcp_tools: Vec::new(),
+            path_store: PathStore::new(&config.session_dir, &session_path, &config.paths),
             config,
         }
     }
