@@ -57,6 +57,10 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
         return Ok(None);
     };
 
+    // Cloud backends need an API key. Collect it now so the end-of-wizard
+    // probe succeeds instead of failing on a missing key.
+    prompt_api_key(chosen_backend).await?;
+
     let model_default =
         default_model(&backend(chosen_backend), &base.profile, None, &base.profiles);
     let Some(model_override) = prompt_model(&model_default, base.model_override.as_deref()).await?
@@ -169,6 +173,69 @@ async fn prompt_backend(default: BackendName) -> Result<Option<BackendName>> {
         }
         println!("  {YELLOW}!{RESET} {DIM}Unknown backend: {trimmed}{RESET}");
     }
+}
+
+/// For a cloud backend, make sure an API key is available. If one is already
+/// set (env var or stored auth file, which is hydrated into the env at
+/// startup), say so and move on. Otherwise prompt for it and persist it to the
+/// `0600` auth file, also setting it in the current process so the end-of-wizard
+/// probe works this session. Local backends need no key, so this is a no-op.
+async fn prompt_api_key(chosen: BackendName) -> Result<()> {
+    use crate::auth::{auth_file_path, env_var_for, mask_key, AuthStore};
+
+    if chosen.is_local() {
+        return Ok(());
+    }
+    let provider = chosen.as_str();
+    let Some(env_name) = env_var_for(provider) else {
+        return Ok(());
+    };
+
+    let existing = std::env::var(env_name).unwrap_or_default();
+    if !existing.trim().is_empty() {
+        println!(
+            "  {GREEN}✓{RESET} {DIM}{provider} key already set ({}){RESET}",
+            mask_key(existing.trim())
+        );
+        return Ok(());
+    }
+
+    println!("  {DIM}{provider} needs an API key.{RESET}");
+    let key = plain_read_line(format!(
+        "  {DIM}Paste {provider} API key (visible while typing, blank to skip): {RESET}"
+    ))
+    .await?
+    .trim()
+    .to_string();
+
+    if key.is_empty() {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}Skipped — set {env_name} or run /auth set {provider} before your first prompt.{RESET}"
+        );
+        return Ok(());
+    }
+
+    let mut store = AuthStore::load();
+    store.set(provider, &key);
+    match store.save() {
+        Ok(()) => {
+            std::env::set_var(env_name, &key);
+            let path = auth_file_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(no path)".into());
+            println!(
+                "  {GREEN}✓{RESET} {DIM}{provider} →{RESET} {CYAN}{}{RESET} {DIM}(saved to {}){RESET}",
+                mask_key(&key),
+                path
+            );
+        }
+        Err(e) => {
+            // Still set it for this session so the probe can succeed.
+            std::env::set_var(env_name, &key);
+            println!("  {YELLOW}!{RESET} {DIM}saved for this session, but writing the auth file failed: {e}{RESET}");
+        }
+    }
+    Ok(())
 }
 
 async fn prompt_model(
