@@ -1,8 +1,0 @@
-Implement the attached plan. Before marking any todo complete or saying the work is ready to commit, use docs/INTEGRATION_MATRIX.md as the ship-gate checklist:
-
-1. Fill its "Current build" section (plan name, date, at least 2 plan-specific P-rows)
-2. Verify every applicable Global baseline (G1–G6) and Feature-specific (F1–F8) row; add regression tests for new wiring paths
-3. Run: cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings
-4. Reply with a filled-in Completion report (template is in INTEGRATION_MATRIX.md, Quick start section)
-
-Do not treat unit tests alone as shippable when the feature touches config, session state, operator modes, tools, or filesystem paths.
