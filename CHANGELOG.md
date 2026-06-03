@@ -6,8 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-03
+
+A core-power + bare-bones pass: the agent loop got faster and more capable,
+and the command/tool surface got leaner.
+
 ### Added
 
+- **Parallel read-tool execution** — read-only tools (`file_read`, `grep`,
+  `list_dir`, `glob`, `repo_search`, `ship_status`) emitted in a single step
+  now run concurrently. Mutations and `shell`/`run_tests`/MCP stay serial;
+  approval and checkpoint capture remain sequential.
+- **`update_plan` tool** — the model maintains a short, visible task checklist
+  across a multi-step turn (rendered as a plan box). No new slash commands; the
+  plan lives in the conversation and auto-selection only surfaces it for
+  multi-step work.
+- **`task` subagent tool** — delegates a scoped, read-only investigation to a
+  fresh agent loop (capped at 12 steps, no edit/shell, no recursion) and returns
+  only its summary, keeping deep exploration out of the parent context.
+- **Step-budget signalling** — when the loop exhausts `max_steps` mid-task it now
+  sets `RunResult.hit_step_limit`, emits `StepLimitReached`, and shows a
+  resumable notice instead of stopping silently. Eval results record it too.
+- **Edit verification** — `file_edit` re-reads from disk after writing, returns
+  `verified` (disk matches the intended write) and a line-numbered
+  `applied_snippet` of the changed region so the model confirms the edit landed.
 - **Session paths** — terminal-native branching without a worktree.
   `/path fork [name]` snapshots the workspace and clones the transcript;
   `/path switch <name>` restores another path; `/path diff` and `/path pick`
@@ -16,6 +38,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   max paths, and snapshot byte caps. Status line shows `path: name · N paths`
   when multiple paths exist. Resumes via `--continue`, `/resume`, and session
   metadata `activePathId`.
+
+### Changed
+
+- **Model-tuning commands folded under `/doctor`** — `/doctor` is now the single
+  entry point with subcommands `recommend`, `autotune`, `bench`, and `models`.
+  The old top-level `/recommend`, `/autotune`, `/bench`, and `/capabilities`
+  print a one-line redirect and no longer appear in `/help`.
+- **Default tool pool** is now `file_read`, `grep`, `list_dir`, `file_edit`,
+  `shell`, `update_plan`, `task`. `shell` is on by default (still
+  approval-gated); `repo_search` moved to opt-in.
+- **`commands.rs` split** into `commands/{mod,doctor,workflow}.rs` with `dispatch`
+  kept as a thin router. No behavior change.
 
 ## [0.3.0] - 2026-05-24
 
