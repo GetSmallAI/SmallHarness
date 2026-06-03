@@ -5,8 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-const GRAY: &str = "\x1b[90m";
-const RESET: &str = "\x1b[0m";
+use crate::theme::{panel_bottom, panel_top, ACCENT, PAD, RESET};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -222,18 +221,18 @@ fn read_plain(prompt: &str, history: &[String]) -> Result<String> {
 }
 
 fn read_bordered(history: &[String]) -> Result<String> {
-    let (cols, _) = crossterm::terminal::size().unwrap_or((80, 24));
-    let width = (cols.max(1)) as usize;
-    let bar = "─".repeat(width);
-    let border = format!("{GRAY}{bar}{RESET}");
+    let top = panel_top("you");
+    let bot = panel_bottom();
     let mut out = std::io::stdout();
     let mut chars: Vec<char> = Vec::new();
     let mut cursor = 0usize;
     let mut history_idx = history.len();
 
-    write!(out, "\n{border}\n")?;
-    writeln!(out, "› ")?;
-    write!(out, "{border}\x1b[1A\r\x1b[3G")?;
+    // Three lines: panel top, the input line (`  ❯ `), panel bottom. The final
+    // escape parks the cursor one row up, at column 5 — right after the prompt.
+    write!(out, "\n{top}\n")?;
+    writeln!(out, "{PAD}{ACCENT}❯{RESET} ")?;
+    write!(out, "{bot}\x1b[1A\r\x1b[5G")?;
     out.flush()?;
 
     crossterm::terminal::enable_raw_mode()?;
@@ -241,7 +240,7 @@ fn read_bordered(history: &[String]) -> Result<String> {
         let redraw = |out: &mut std::io::Stdout, chars: &[char], cursor: usize| -> Result<()> {
             let line: String = chars.iter().collect();
             let display = render_value(&line);
-            write!(out, "\r\x1b[2K› {display}")?;
+            write!(out, "\r\x1b[2K{PAD}{ACCENT}❯{RESET} {display}")?;
             let right = chars.len().saturating_sub(cursor);
             if right > 0 {
                 write!(out, "\x1b[{right}D")?;

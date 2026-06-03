@@ -7,14 +7,19 @@ use std::time::Instant;
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const BOLD: &str = "\x1b[1m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const GRAY: &str = "\x1b[90m";
-const MAGENTA: &str = "\x1b[35m";
+use crate::theme::{panel_bottom, panel_top, ACCENT, PAD, TEXT};
+
+// Map the renderer's palette onto the shared theme. Notably `DIM` no longer
+// means ANSI faint (which was the unreadable culprit) — it's now the theme's
+// readable bright-black, same as `GRAY`.
+const RESET: &str = crate::theme::RESET;
+const BOLD: &str = crate::theme::BOLD;
+const GREEN: &str = crate::theme::SUCCESS;
+const YELLOW: &str = crate::theme::WARN;
+const RED: &str = crate::theme::ERROR;
+const GRAY: &str = crate::theme::MUTED;
+const DIM: &str = crate::theme::MUTED;
+const MAGENTA: &str = "\x1b[95m";
 
 fn trunc(s: &str, max: usize) -> String {
     if s.chars().count() > max {
@@ -163,6 +168,9 @@ pub struct TuiRenderer {
     /// current burst of reasoning deltas? Reset at end_turn so each turn
     /// gets its own header.
     reasoning_header_shown: bool,
+    /// True while the assistant's answer panel (`╭─ response … ╰─`) is open and
+    /// streaming. Closed when a tool call/reasoning interrupts or the turn ends.
+    answer_open: bool,
 }
 
 impl TuiRenderer {
@@ -175,6 +183,7 @@ impl TuiRenderer {
             grouped_category: String::new(),
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
+            answer_open: false,
         }
     }
 
@@ -195,17 +204,25 @@ impl TuiRenderer {
                 name,
                 call_id,
                 args,
-            } => self.render_tool_call(&name, &call_id, args),
+            } => {
+                self.end_answer();
+                self.render_tool_call(&name, &call_id, args)
+            }
             AgentEvent::ToolResult {
                 name,
                 call_id,
                 output,
             } => self.render_tool_result(&name, &call_id, &output),
-            AgentEvent::Reasoning { delta } => self.render_reasoning(&delta),
+            AgentEvent::Reasoning { delta } => {
+                self.end_answer();
+                self.render_reasoning(&delta)
+            }
             AgentEvent::ContextCompacted { notice, .. } => {
+                self.end_answer();
                 println!("{notice}");
             }
             AgentEvent::StepLimitReached { max_steps } => {
+                self.end_answer();
                 self.end_streaming();
                 println!(
                     "  {YELLOW}⚠ stopped after {max_steps} steps (step budget){RESET} {DIM}— the task may be unfinished. Send \"continue\" to resume, or raise maxSteps in config.{RESET}"
@@ -215,11 +232,25 @@ impl TuiRenderer {
     }
 
     pub fn end_turn(&mut self) {
+        self.end_answer();
         self.flush_grouped();
         self.flush_minimal();
         self.end_reasoning();
         self.end_streaming();
         self.reasoning_header_shown = false;
+    }
+
+    /// Open the assistant answer panel on first text, gutter the streamed
+    /// content, and close it with a matching rounded footer.
+    fn end_answer(&mut self) {
+        if !self.answer_open {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "{RESET}");
+        let _ = writeln!(out, "{}", panel_bottom());
+        let _ = out.flush();
+        self.answer_open = false;
     }
 
     /// Close out the reasoning panel before switching to other output (text,
@@ -249,9 +280,16 @@ impl TuiRenderer {
             self.end_reasoning();
             self.reasoning_header_shown = false;
         }
-        self.streaming = true;
         let mut out = std::io::stdout();
-        let _ = write!(out, "{delta}");
+        if !self.answer_open {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "{}", panel_top("response"));
+            let _ = write!(out, "{PAD}{TEXT}");
+            self.answer_open = true;
+        }
+        // Keep every wrapped line aligned to the transcript's gutter.
+        let guttered = delta.replace('\n', &format!("\n{PAD}"));
+        let _ = write!(out, "{guttered}");
         let _ = out.flush();
     }
 
@@ -315,6 +353,7 @@ impl TuiRenderer {
     /// Draw the model's task plan as a checklist box. Flushes any in-flight
     /// grouped/minimal output first so the plan sits on its own.
     fn render_plan(&mut self, args: &Value) {
+        self.end_answer();
         self.flush_grouped();
         self.flush_minimal();
         self.end_streaming();
@@ -329,18 +368,18 @@ impl TuiRenderer {
             .filter(|s| s.get("status").and_then(Value::as_str) == Some("done"))
             .count();
         println!(
-            "{GREEN}●{RESET} {BOLD}Plan{RESET} {DIM}({done}/{} done){RESET}",
+            "{PAD}{ACCENT}●{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
             steps.len()
         );
         for s in steps {
             let text = s.get("step").and_then(Value::as_str).unwrap_or("");
             let status = s.get("status").and_then(Value::as_str).unwrap_or("pending");
             let (mark, body) = match status {
-                "done" => (format!("{GREEN}✔{RESET}"), format!("{DIM}{text}{RESET}")),
+                "done" => (format!("{GREEN}✔{RESET}"), format!("{GRAY}{text}{RESET}")),
                 "in_progress" => (format!("{YELLOW}▸{RESET}"), format!("{BOLD}{text}{RESET}")),
-                _ => (format!("{GRAY}☐{RESET}"), format!("{GRAY}{text}{RESET}")),
+                _ => (format!("{GRAY}○{RESET}"), format!("{GRAY}{text}{RESET}")),
             };
-            println!("  {mark} {body}");
+            println!("{PAD}  {mark} {body}");
         }
         println!();
     }
@@ -388,15 +427,15 @@ impl TuiRenderer {
 
         if pending.len() == 1 {
             let arg_str = formatter_for(&first.name, &first.args);
-            println!("{GREEN}●{RESET} {BOLD}{label}{RESET} {DIM}{arg_str}{RESET}");
+            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
             if let Some(out) = &first.output {
                 let summary = summarize_output(out);
                 if !summary.is_empty() {
-                    println!("  {GRAY}└ {summary}{RESET}");
+                    println!("{PAD}  {GRAY}└ {summary}{RESET}");
                 }
             }
         } else {
-            println!("{GREEN}●{RESET} {BOLD}{label}{RESET}");
+            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}");
             let n = pending.len();
             for (i, p) in pending.iter().enumerate() {
                 let is_last = i == n - 1;
@@ -405,9 +444,9 @@ impl TuiRenderer {
                 let summary = p
                     .output
                     .as_ref()
-                    .map(|o| format!(" {GRAY}{}{RESET}", summarize_output(o)))
+                    .map(|o| format!("  {GRAY}{}{RESET}", summarize_output(o)))
                     .unwrap_or_default();
-                println!("  {GRAY}{branch}{RESET} {DIM}{arg_str}{RESET}{summary}");
+                println!("{PAD}  {GRAY}{branch}{RESET} {TEXT}{arg_str}{RESET}{summary}");
             }
         }
         println!();

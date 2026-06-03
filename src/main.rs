@@ -30,6 +30,7 @@ mod session;
 mod session_paths;
 mod session_turn;
 mod setup;
+mod theme;
 mod shipcheck;
 mod test_integration;
 mod tools;
@@ -540,7 +541,7 @@ async fn main() -> anyhow::Result<()> {
             InputStyle::Bordered => bordered_read_line(input_history.entries().to_vec()).await?,
             _ => {
                 plain_read_line_with_history(
-                    format!("{GREEN}>{RESET} "),
+                    format!("{}{}❯{} ", crate::theme::PAD, crate::theme::ACCENT, RESET),
                     input_history.entries().to_vec(),
                 )
                 .await?
@@ -562,7 +563,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 cwd
             };
-            println!("  {DIM}{display_cwd}{RESET}");
+            println!("{}{}{display_cwd}{RESET}", crate::theme::PAD, crate::theme::MUTED);
         }
 
         if trimmed == "exit" || trimmed == "quit" || trimmed == ".exit" {
@@ -571,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
                 let _ = state.path_store.flush_if_dirty(current);
             }
             let _ = state.save_active_path_metadata();
-            println!("  {DIM}bye.{RESET}");
+            println!("{}{}bye.{RESET}", crate::theme::PAD, crate::theme::MUTED);
             std::process::exit(0);
         }
 

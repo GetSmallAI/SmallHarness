@@ -1,8 +1,4 @@
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const CYAN: &str = "\x1b[36m";
-const GRAY: &str = "\x1b[90m";
+use crate::theme::{rule, ACCENT, ACCENT_DEEP, BOLD, MUTED, PAD, RESET};
 
 const LOGO: &str = r"   ███████╗███╗   ███╗ █████╗ ██╗     ██╗
    ██╔════╝████╗ ████║██╔══██╗██║     ██║
@@ -24,19 +20,24 @@ pub struct BannerInfo<'a> {
     pub approval: &'a str,
 }
 
+/// One `label  value` row with an aligned, readable label.
+fn row(label: &str, value: &str) -> String {
+    format!("{PAD}{MUTED}{label:<9}{RESET}{ACCENT}{value}{RESET}")
+}
+
 pub fn print_banner(info: BannerInfo<'_>) {
     println!();
-    println!("{CYAN}{BOLD}{LOGO}{RESET}");
+    println!("{ACCENT_DEEP}{BOLD}{LOGO}{RESET}");
     println!();
-    println!("   {BOLD}Small Harness{RESET}  {DIM}local LLM TUI{RESET}");
+    println!("{PAD}{BOLD}Small Harness{RESET}  {MUTED}— a small, terminal-first coding harness{RESET}");
+    println!();
+    println!("{}", row("backend", info.backend));
+    println!("{}", row("model", info.model));
+    println!("{}", row("profile", info.profile));
+    println!("{}", row("approval", info.approval));
+    println!("{}", rule());
     println!(
-        "   {DIM}backend{RESET}   {CYAN}{}{RESET}  {DIM}·{RESET}  {DIM}profile{RESET}  {CYAN}{}{RESET}",
-        info.backend, info.profile
-    );
-    println!("   {DIM}model{RESET}     {CYAN}{}{RESET}", info.model);
-    println!("   {DIM}approval{RESET}  {CYAN}{}{RESET}", info.approval);
-    println!(
-        "   {GRAY}/help for commands · /backend, /profile, /model to switch · exit to quit{RESET}"
+        "{PAD}{MUTED}/help{RESET} commands  {MUTED}·{RESET}  {MUTED}/backend /model{RESET} switch  {MUTED}·{RESET}  {MUTED}exit{RESET} quit"
     );
     println!();
 }

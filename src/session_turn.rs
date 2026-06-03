@@ -26,12 +26,14 @@ use crate::tools::{
 use crate::turn_checkpoint::{active_tools_need_checkpoints, should_push_checkpoint, TurnCapturer};
 use crate::warmup::warmup;
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const GRAY: &str = "\x1b[90m";
+// Routed through the shared theme so secondary text is readable bright-black
+// instead of ANSI faint.
+const RESET: &str = crate::theme::RESET;
+const DIM: &str = crate::theme::MUTED;
+const GREEN: &str = crate::theme::SUCCESS;
+const YELLOW: &str = crate::theme::WARN;
+const RED: &str = crate::theme::ERROR;
+const GRAY: &str = crate::theme::MUTED;
 
 pub struct TurnOptions {
     pub user_prompt: String,
