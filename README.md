@@ -35,8 +35,8 @@ MLX, llama.cpp) — same tools, same commands, same session log either way. It
 ships with the usual tool kit — read, edit, grep, shell, run tests — plus a
 few that aren't usual:
 
-- **Six backends, one TUI.** Switch with `/backend openai`, `/backend ollama`,
-  whatever. Same tools, same commands, same session log.
+- **Local or cloud, one TUI.** Switch providers mid-session with
+  `/backend <name>` — the tools, commands, and session log don't change.
 - **Per-turn cost on the status line.** `$0.003 this turn · $0.41 session`
   when you're on a cloud backend with a cataloged model. Local turns just
   show tokens.
@@ -57,69 +57,85 @@ few that aren't usual:
 
 ## Install
 
-```bash
-# Homebrew (macOS)
-brew install getsmallai/tap/small-harness
+**Homebrew (macOS):**
 
-# Or from source — Rust 1.75+
+```bash
+brew install getsmallai/tap/small-harness
+```
+
+**From source** (Rust 1.75+):
+
+```bash
 git clone https://github.com/GetSmallAI/SmallHarness.git
-cd SmallHarness && cargo build --release   # binary at target/release/small-harness
+cd SmallHarness
+cargo build --release    # binary at target/release/small-harness
 ```
 
 ---
 
 ## Run it
 
-Start the app:
+Launch the interactive session:
 
 ```bash
-small-harness          # if installed via Homebrew
-# — or, from a source checkout —
-cargo run --release
-```
-
-That drops you into an interactive prompt. On the **first** launch a short
-wizard writes `agent.config.json` (backend, model, approval policy); skip it
-with `SMALL_HARNESS_NO_WIZARD=true`. After that, `small-harness` just opens a
-session.
-
-Small Harness talks to one **backend** — choose whichever you prefer. Most
-people start with a cloud key; reach for local when you want privacy or zero
-cost.
-
-### Option A — a cloud API key (fastest to start)
-
-No local model to install, frontier-model quality. Bring an OpenAI or
-OpenRouter key:
-
-```bash
-export OPENAI_API_KEY=sk-...        # or: export OPENROUTER_API_KEY=sk-or-...
 small-harness
-> /backend openai                   # or pick "openai" in the first-run wizard
 ```
 
-Prefer not to use an env var? Launch first, then run `/auth set openai` and
-paste your key once — it's saved to a `0600` file under
-`~/.config/small-harness/`. Per-turn and session **cost show live** on the
-status line.
+> From a source checkout without installing, use `cargo run --release` instead.
 
-### Option B — a local model (private, free, offline)
+The first launch runs a short setup wizard (it writes `agent.config.json` —
+backend, model, approval policy). Skip it with `SMALL_HARNESS_NO_WIZARD=true`.
+Every launch after that opens straight into a session.
 
-Runs entirely on your machine, no key, no data leaving your laptop. Easiest is
-Ollama:
+Small Harness talks to **one backend at a time** — pick the path that fits.
 
-```bash
-brew install ollama
-brew services start ollama
-ollama pull qwen2.5-coder:7b
+### Path A — Cloud API key
 
-small-harness                       # ollama is the default backend
-```
+*Fastest to start, frontier-model quality, nothing to install locally.*
 
-LM Studio, MLX, and llama.cpp work too — see [Backends](#backends) for ports.
+1. Set your key — OpenAI **or** OpenRouter:
 
-Switch backends any time mid-session with `/backend <name>`, and run
-`/doctor` if something isn't connecting.
+   ```bash
+   export OPENAI_API_KEY=sk-...
+   # or
+   export OPENROUTER_API_KEY=sk-or-...
+   ```
+
+2. Launch, then select the provider in the first-run wizard (or any time with
+   `/backend openai`):
+
+   ```bash
+   small-harness
+   ```
+
+Prefer not to put the key in your environment? Launch first, then run
+`/auth set openai` inside the app and paste it once — it's stored in a `0600`
+file under `~/.config/small-harness/`. Cost per turn and per session shows
+live on the status line.
+
+### Path B — Local model
+
+*Private, free, offline — runs entirely on your machine.*
+
+1. Install [Ollama](https://ollama.com), start it, and pull a coding model:
+
+   ```bash
+   brew install ollama
+   brew services start ollama
+   ollama pull qwen2.5-coder:7b
+   ```
+
+2. Launch — Ollama is the default backend, so there's nothing else to set:
+
+   ```bash
+   small-harness
+   ```
+
+LM Studio, MLX, and llama.cpp work the same way — see [Backends](#backends)
+for their ports and start commands.
+
+> **Tip:** switch backends mid-session with `/backend <name>`, and run
+> `/doctor` if a backend won't connect.
 
 ---
 
@@ -132,7 +148,7 @@ Switch backends any time mid-session with `/backend <name>`, and run
 
 src/ has 24 Rust files: main.rs is the entry point (input loop, banner,
 warmup); agent.rs runs the chat-completions loop; backends.rs handles the
-six providers; tools/ contains the tool implementations…
+providers; tools/ contains the tool implementations…
 
   1.2k in · 87 out · $0.0003 this turn · $0.0003 session
 
@@ -573,7 +589,7 @@ Install Rust via [rustup](https://rustup.rs):
 ```
 
 Source layout in [`src/`](src/) — `agent.rs` runs the loop, `backends.rs`
-holds the six providers, `tools/` holds tool implementations, `mcp.rs` is
+holds the backend providers, `tools/` holds tool implementations, `mcp.rs` is
 the stdio MCP client, `catalog.rs` has the per-model context + pricing
 table, `auth.rs` manages the credential file, `session.rs` writes the JSONL
 log. `cargo doc --open` for module-level docs.
