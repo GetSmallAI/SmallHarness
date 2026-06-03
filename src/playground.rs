@@ -371,6 +371,7 @@ mod tests {
             checks: Vec::new(),
             elapsed_ms: 42,
             steps: 2,
+            hit_step_limit: false,
             tool_calls: vec!["file_edit".into()],
             input_tokens: 10,
             output_tokens: 20,

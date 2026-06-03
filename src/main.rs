@@ -264,6 +264,9 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             AgentEvent::ContextCompacted { notice, .. } => {
                 let _ = writeln!(out, "\n{notice}");
             }
+            AgentEvent::StepLimitReached { max_steps } => {
+                let _ = writeln!(out, "\n[stopped after {max_steps} steps — task may be unfinished]");
+            }
             _ => {}
         },
         Some(&mut approval as &mut dyn crate::agent::ApprovalProvider),

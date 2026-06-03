@@ -38,6 +38,11 @@ pub enum AgentEvent {
         notice: String,
         conversation_summary: Option<String>,
     },
+    /// The loop ran out its step budget while the model still wanted to call
+    /// tools — the task is likely unfinished and can be resumed.
+    StepLimitReached {
+        max_steps: usize,
+    },
 }
 
 #[async_trait]
@@ -51,6 +56,9 @@ pub struct RunResult {
     pub output_tokens: u32,
     pub transcript_rewritten: bool,
     pub conversation_summary: Option<String>,
+    /// True when the loop stopped because it hit `max_steps` while the model
+    /// still had pending tool calls (i.e. it was cut off, not finished).
+    pub hit_step_limit: bool,
 }
 
 pub fn to_openai_tools(tools: &[Arc<dyn Tool>]) -> Vec<ToolDef> {
@@ -182,6 +190,9 @@ where
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
     let mut transcript_rewritten = false;
+    // Set when the model stops on its own (no more tool calls). If the loop
+    // instead exhausts `max_steps`, this stays false and we flag the cutoff.
+    let mut natural_stop = false;
     let mut conversation_summary = guard
         .as_ref()
         .map(|(params, _)| params.conversation_summary.clone())
@@ -303,6 +314,7 @@ where
         });
 
         if final_calls.is_empty() {
+            natural_stop = true;
             break;
         }
 
@@ -470,12 +482,19 @@ where
         }
     }
 
+    let cancelled = cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false);
+    let hit_step_limit = !natural_stop && !cancelled && max_steps > 0;
+    if hit_step_limit {
+        on_event(AgentEvent::StepLimitReached { max_steps });
+    }
+
     Ok(RunResult {
         messages,
         input_tokens: total_in,
         output_tokens: total_out,
         transcript_rewritten,
         conversation_summary,
+        hit_step_limit,
     })
 }
 

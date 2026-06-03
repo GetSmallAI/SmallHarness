@@ -202,6 +202,12 @@ impl TuiRenderer {
             AgentEvent::ContextCompacted { notice, .. } => {
                 println!("{notice}");
             }
+            AgentEvent::StepLimitReached { max_steps } => {
+                self.end_streaming();
+                println!(
+                    "  {YELLOW}⚠ stopped after {max_steps} steps (step budget){RESET} {DIM}— the task may be unfinished. Send \"continue\" to resume, or raise maxSteps in config.{RESET}"
+                );
+            }
         }
     }
 

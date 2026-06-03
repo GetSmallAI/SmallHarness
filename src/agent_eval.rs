@@ -53,6 +53,8 @@ pub struct AgentEvalRunResult {
     pub checks: Vec<AgentEvalCheckResult>,
     pub elapsed_ms: u128,
     pub steps: usize,
+    #[serde(default)]
+    pub hit_step_limit: bool,
     pub tool_calls: Vec<String>,
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -384,6 +386,7 @@ pub async fn run_agent_eval(
                 checks,
                 elapsed_ms,
                 steps: count_assistant_steps(&result.messages),
+                hit_step_limit: result.hit_step_limit,
                 tool_calls,
                 input_tokens: result.input_tokens,
                 output_tokens: result.output_tokens,
@@ -399,6 +402,7 @@ pub async fn run_agent_eval(
             checks: Vec::new(),
             elapsed_ms,
             steps: 0,
+            hit_step_limit: false,
             tool_calls,
             input_tokens: 0,
             output_tokens: 0,
@@ -500,6 +504,7 @@ mod tests {
                 output_tokens: 0,
                 transcript_rewritten: false,
                 conversation_summary: None,
+                hit_step_limit: false,
             },
             &[],
         );
