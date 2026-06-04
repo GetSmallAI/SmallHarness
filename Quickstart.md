@@ -27,7 +27,6 @@ local setup, choose:
 
 ```text
 backend: ollama
-profile: mac-mini-16gb
 model override: blank
 approval policy: dangerous-only
 tool mode: auto

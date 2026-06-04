@@ -105,7 +105,6 @@ pub struct ModelRecommendation {
 
 pub fn apply_recommendation_to_config(config: &mut AgentConfig, rec: &ModelRecommendation) {
     config.backend = rec.backend;
-    config.profile = rec.profile.clone();
     config.model_override = Some(rec.model.clone());
     config.tool_selection = ToolSelection::Auto;
 }
@@ -189,7 +188,7 @@ fn score_candidate(
         rationale.push("installed on a reachable backend".into());
     } else if candidate.is_default {
         score += 70;
-        rationale.push("default model for inferred hardware profile".into());
+        rationale.push("default model for your detected hardware".into());
     }
     if candidate.is_current {
         score += 25;
@@ -542,7 +541,6 @@ mod tests {
         apply_recommendation_to_config(&mut config, &rec);
 
         assert_eq!(config.backend, BackendName::LmStudio);
-        assert_eq!(config.profile, "mac-studio-32gb");
         assert_eq!(
             config.model_override.as_deref(),
             Some("qwen2.5-coder-14b-instruct")

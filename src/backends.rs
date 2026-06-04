@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -54,25 +53,6 @@ impl BackendName {
             Self::Ollama | Self::LmStudio | Self::Mlx | Self::LlamaCpp => true,
             Self::Openrouter | Self::OpenAi => false,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProfileName {
-    MacMini16gb,
-    MacStudio32gb,
-}
-
-impl ProfileName {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ProfileName::MacMini16gb => "mac-mini-16gb",
-            ProfileName::MacStudio32gb => "mac-studio-32gb",
-        }
-    }
-    pub fn all() -> &'static [ProfileName] {
-        &[Self::MacMini16gb, Self::MacStudio32gb]
     }
 }
 
@@ -132,33 +112,21 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
     }
 }
 
-pub fn default_model(
-    b: &BackendDescriptor,
-    profile: &str,
-    override_: Option<&str>,
-    custom_profiles: &BTreeMap<String, BTreeMap<String, String>>,
-) -> String {
+/// The default model for a backend when the user hasn't set an override
+/// (`modelOverride` / `AGENT_MODEL` / `/model`). One sensible default per
+/// backend — local backends default to a 7B coder that runs on modest
+/// hardware; bump it with `/model` if you have the headroom.
+pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
     if let Some(m) = override_ {
         return m.to_string();
     }
-    if let Some(models) = custom_profiles.get(profile) {
-        if let Some(model) = models.get(b.name.as_str()) {
-            return model.clone();
-        }
-    }
-    match (b.name, profile) {
-        (BackendName::Ollama, "mac-mini-16gb") => "qwen2.5-coder:7b",
-        (BackendName::Ollama, "mac-studio-32gb") => "qwen2.5-coder:14b",
-        (BackendName::LmStudio, "mac-mini-16gb") => "qwen2.5-coder-7b-instruct",
-        (BackendName::LmStudio, "mac-studio-32gb") => "qwen2.5-coder-14b-instruct",
-        (BackendName::Mlx, "mac-mini-16gb") => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
-        (BackendName::Mlx, "mac-studio-32gb") => "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
-        (BackendName::LlamaCpp, _) => "gpt-3.5-turbo",
-        (BackendName::Openrouter, _) => "qwen/qwen-2.5-coder-32b-instruct",
-        (BackendName::OpenAi, _) => "gpt-4o-mini",
-        (BackendName::Ollama, _) => "qwen2.5-coder:7b",
-        (BackendName::LmStudio, _) => "qwen2.5-coder-7b-instruct",
-        (BackendName::Mlx, _) => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+    match b.name {
+        BackendName::Ollama => "qwen2.5-coder:7b",
+        BackendName::LmStudio => "qwen2.5-coder-7b-instruct",
+        BackendName::Mlx => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+        BackendName::LlamaCpp => "gpt-3.5-turbo",
+        BackendName::Openrouter => "qwen/qwen-2.5-coder-32b-instruct",
+        BackendName::OpenAi => "gpt-4o-mini",
     }
     .to_string()
 }
@@ -202,13 +170,7 @@ mod tests {
 
     #[test]
     fn defaults_llamacpp_to_openai_example_model() {
-        let profiles = BTreeMap::new();
-        let model = default_model(
-            &descriptor(BackendName::LlamaCpp),
-            "mac-mini-16gb",
-            None,
-            &profiles,
-        );
+        let model = default_model(&descriptor(BackendName::LlamaCpp), None);
         assert_eq!(model, "gpt-3.5-turbo");
     }
 
@@ -236,13 +198,7 @@ mod tests {
 
     #[test]
     fn defaults_openai_to_gpt_4o_mini() {
-        let profiles = BTreeMap::new();
-        let model = default_model(
-            &descriptor(BackendName::OpenAi),
-            "mac-mini-16gb",
-            None,
-            &profiles,
-        );
+        let model = default_model(&descriptor(BackendName::OpenAi), None);
         assert_eq!(model, "gpt-4o-mini");
     }
 

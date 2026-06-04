@@ -103,12 +103,7 @@ impl AppState {
     }
 
     pub fn resolve_model(&mut self) {
-        self.model = default_model(
-            &self.backend,
-            &self.config.profile,
-            self.config.model_override.as_deref(),
-            &self.config.profiles,
-        );
+        self.model = default_model(&self.backend, self.config.model_override.as_deref());
     }
 
     pub fn reset_session(&mut self) {

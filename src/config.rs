@@ -408,13 +408,10 @@ impl Default for ProjectMemoryConfig {
     }
 }
 
-pub type ProfileModels = BTreeMap<String, String>;
-
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub mode: OperatorMode,
     pub backend: BackendName,
-    pub profile: String,
     pub model_override: Option<String>,
     pub system_prompt: String,
     pub max_steps: usize,
@@ -432,7 +429,6 @@ pub struct AgentConfig {
     pub checkpoints: CheckpointConfig,
     pub fix: FixConfig,
     pub paths: PathsConfig,
-    pub profiles: BTreeMap<String, ProfileModels>,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
 
@@ -466,7 +462,6 @@ impl Default for AgentConfig {
         Self {
             mode: OperatorMode::Edit,
             backend: BackendName::Ollama,
-            profile: "mac-mini-16gb".into(),
             model_override: None,
             system_prompt: SYSTEM_PROMPT.into(),
             max_steps: 20,
@@ -499,7 +494,6 @@ impl Default for AgentConfig {
             checkpoints: CheckpointConfig::default(),
             fix: FixConfig::default(),
             paths: PathsConfig::default(),
-            profiles: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
         }
     }
@@ -509,7 +503,6 @@ impl Default for AgentConfig {
 struct FileConfig {
     mode: Option<String>,
     backend: Option<String>,
-    profile: Option<String>,
     #[serde(rename = "modelOverride")]
     model_override: Option<String>,
     #[serde(rename = "systemPrompt")]
@@ -537,7 +530,6 @@ struct FileConfig {
     checkpoints: Option<CheckpointConfig>,
     fix: Option<FixConfig>,
     paths: Option<PathsConfig>,
-    profiles: Option<BTreeMap<String, ProfileModels>>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
 }
@@ -704,9 +696,6 @@ pub fn load_config() -> AgentConfig {
                 if let Some(b) = file.backend.as_deref().and_then(BackendName::parse) {
                     config.backend = b;
                 }
-                if let Some(p) = file.profile {
-                    config.profile = p;
-                }
                 if let Some(m) = file.model_override {
                     config.model_override = Some(m);
                 }
@@ -773,9 +762,6 @@ pub fn load_config() -> AgentConfig {
                 if let Some(p) = file.paths {
                     config.paths = p;
                 }
-                if let Some(p) = file.profiles {
-                    config.profiles = p;
-                }
                 if let Some(s) = file.mcp_servers {
                     config.mcp_servers = s;
                 }
@@ -790,9 +776,6 @@ pub fn load_config() -> AgentConfig {
         if let Some(b) = BackendName::parse(&s) {
             config.backend = b;
         }
-    }
-    if let Some(s) = layered_env(&dotenv, "PROFILE") {
-        config.profile = s;
     }
     if let Some(m) = layered_env(&dotenv, "AGENT_MODEL") {
         config.model_override = Some(m);

@@ -199,19 +199,22 @@ A handful of moves worth knowing right away:
 Switch at runtime with `/backend <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
 `OPENAI_BASE_URL`. Cloud backends require an API key (set via
-[`/auth`](#cost-and-credentials) or env var). The catalog ships sensible
-defaults per backend and hardware profile; override with `/model` or
-`AGENT_MODEL`.
+[`/auth`](#cost-and-credentials) or env var).
 
-### Hardware profiles
+### Default model per backend
 
-| Profile | Ollama | LM Studio | MLX | llama.cpp |
-|---------|--------|-----------|-----|-----------|
-| `mac-mini-16gb` | `qwen2.5-coder:7b` | `qwen2.5-coder-7b-instruct` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` | `gpt-3.5-turbo` |
-| `mac-studio-32gb` | `qwen2.5-coder:14b` | `qwen2.5-coder-14b-instruct` | `mlx-community/Qwen2.5-Coder-14B-Instruct-4bit` | `gpt-3.5-turbo` |
+Each backend has one sensible default; local backends default to a 7B coder
+that runs on modest hardware. Override any time with `/model`, `AGENT_MODEL`,
+or `modelOverride` in your config.
 
-OpenRouter defaults to `qwen/qwen-2.5-coder-32b-instruct`; OpenAI defaults to
-`gpt-4o-mini`. Switch profile with `/profile <name>`.
+| Backend | Default model |
+|---------|---------------|
+| `ollama` | `qwen2.5-coder:7b` |
+| `lm-studio` | `qwen2.5-coder-7b-instruct` |
+| `mlx` | `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` |
+| `llamacpp` | `gpt-3.5-turbo` |
+| `openrouter` | `qwen/qwen-2.5-coder-32b-instruct` |
+| `openai` | `gpt-4o-mini` |
 
 ### Recommend the right model for your box
 
@@ -286,7 +289,6 @@ this exact call`. The session cache resets on `/new`.
 **Backend, model, tools**
 ```
 /backend <name>        switch backend
-/profile <name>        switch hardware profile
 /model [id]            list / pick a model (shows context + cost when known)
 /tools auto|fixed|<…>  show or set the active tool pool
 /auth                  manage API keys (list, set, clear)
@@ -431,8 +433,7 @@ Resolution order (later overrides earlier):
 
 ```bash
 BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai
-PROFILE=mac-mini-16gb                                   # or mac-studio-32gb
-AGENT_MODEL=qwen2.5-coder:14b                           # overrides the profile default
+AGENT_MODEL=qwen2.5-coder:14b                           # overrides the backend default model
 
 OPENAI_API_KEY=sk-...                                   # required for openai
 OPENROUTER_API_KEY=sk-or-...                            # required for openrouter / /compare
@@ -457,7 +458,7 @@ root. Common shape:
 ```json
 {
   "backend": "ollama",
-  "profile": "mac-mini-16gb",
+  "modelOverride": "qwen2.5-coder:14b",
   "approvalPolicy": "dangerous-only",
   "tools": ["file_read", "grep", "list_dir", "file_edit", "shell", "update_plan", "task"],
   "toolSelection": "auto",
@@ -485,12 +486,6 @@ root. Common shape:
   },
   "mcpServers": {
     "fs": { "command": "/usr/local/bin/some-mcp-server", "args": [] }
-  },
-  "profiles": {
-    "mac-studio-fast": {
-      "ollama": "qwen2.5-coder:14b",
-      "openrouter": "qwen/qwen-2.5-coder-32b-instruct"
-    }
   }
 }
 ```
@@ -539,9 +534,9 @@ native tool calls, inline JSON fallback). Reports land under `.sessions/doctor/`
 
 ### First prompt is slow even with warmup
 
-The cache becomes stale when you change `/backend`, `/model`, `/tools`, or
-the hardware profile. The next prompt re-evaluates the new system prompt
-and tools. One-time per change.
+The cache becomes stale when you change `/backend`, `/model`, or `/tools`.
+The next prompt re-evaluates the new system prompt and tools. One-time per
+change.
 
 ### Model returns tool calls as text JSON
 
@@ -612,7 +607,7 @@ Guidelines:
 - Mutating tools implement `require_approval` on the `Tool` trait (return
   `true`, or compute from args — see `shell.rs`).
 - New backends need an OpenAI-compatible `/v1/chat/completions` endpoint
-  and a profile-default model map in `backends.rs`.
+  and a default model in `backends.rs`.
 - Before opening a PR, run the full check suite: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 

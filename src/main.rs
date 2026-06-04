@@ -227,12 +227,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
     let http = crate::openai::build_http_client();
     let backend_desc = backend(config.backend);
     validate(&backend_desc)?;
-    let model = default_model(
-        &backend_desc,
-        &config.profile,
-        config.model_override.as_deref(),
-        &config.profiles,
-    );
+    let model = default_model(&backend_desc, config.model_override.as_deref());
     init_session_dir(&config.session_dir)?;
     if config.project_memory.enabled
         && config.project_memory.auto_index
@@ -387,17 +382,11 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("{e}");
         std::process::exit(1);
     }
-    let model = default_model(
-        &backend_desc,
-        &config.profile,
-        config.model_override.as_deref(),
-        &config.profiles,
-    );
+    let model = default_model(&backend_desc, config.model_override.as_deref());
 
     if config.display.show_banner {
         print_banner(BannerInfo {
             backend: config.backend.as_str(),
-            profile: config.profile.as_str(),
             model: &model,
             approval: config.approval_policy.as_str(),
         });

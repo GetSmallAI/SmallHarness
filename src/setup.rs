@@ -37,9 +37,6 @@ pub async fn maybe_run_first_run_setup(base: &AgentConfig) -> Result<Option<Agen
     if should_run_first_run_setup(Path::new(CONFIG_PATH)) {
         let mut first_run_defaults = base.clone();
         let spec = detect_hardware_spec();
-        if layered_env(&dotenv_values(), "PROFILE").is_none() {
-            first_run_defaults.profile = spec.recommended_profile().into();
-        }
         let _ = save_hardware_summary(&first_run_defaults.session_dir, &spec);
         first_run_defaults.approval_policy = ApprovalPolicy::DangerousOnly;
         run_setup_wizard(&first_run_defaults).await
@@ -67,12 +64,7 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
     // probe succeeds instead of failing on a missing key.
     prompt_api_key(chosen_backend).await?;
 
-    let model_default = default_model(
-        &backend(chosen_backend),
-        &base.profile,
-        None,
-        &base.profiles,
-    );
+    let model_default = default_model(&backend(chosen_backend), None);
     let Some(model_override) = prompt_model(&model_default, base.model_override.as_deref()).await?
     else {
         println!("  {DIM}Setup cancelled.{RESET}");
@@ -110,7 +102,6 @@ fn setup_config_value(config: &AgentConfig) -> Value {
     let mut obj = Map::new();
     obj.insert("mode".into(), json!(config.mode.as_str()));
     obj.insert("backend".into(), json!(config.backend.as_str()));
-    obj.insert("profile".into(), json!(config.profile));
     if let Some(model) = &config.model_override {
         obj.insert("modelOverride".into(), json!(model));
     }
@@ -138,9 +129,6 @@ fn setup_config_value(config: &AgentConfig) -> Value {
     obj.insert("context".into(), json!(&config.context));
     obj.insert("history".into(), json!(&config.history));
     obj.insert("projectMemory".into(), json!(&config.project_memory));
-    if !config.profiles.is_empty() {
-        obj.insert("profiles".into(), json!(config.profiles));
-    }
     Value::Object(obj)
 }
 
@@ -362,12 +350,7 @@ async fn prompt_tool_selection(default: ToolSelection) -> Result<Option<ToolSele
 async fn probe_setup_backend(config: &AgentConfig) {
     let http = build_http_client();
     let backend_desc = backend(config.backend);
-    let model = default_model(
-        &backend_desc,
-        &config.profile,
-        config.model_override.as_deref(),
-        &config.profiles,
-    );
+    let model = default_model(&backend_desc, config.model_override.as_deref());
     println!(
         "  {DIM}Probing {} at {} with {CYAN}{}{RESET}{DIM}…{RESET}",
         config.backend.as_str(),
@@ -473,7 +456,6 @@ mod tests {
     fn setup_config_json_uses_public_contract_names() {
         let config = AgentConfig {
             backend: BackendName::LlamaCpp,
-            profile: "mac-studio-32gb".into(),
             model_override: Some("local-gguf".into()),
             approval_policy: ApprovalPolicy::DangerousOnly,
             tool_selection: ToolSelection::Fixed,
@@ -483,7 +465,6 @@ mod tests {
         let value = setup_config_value(&config);
 
         assert_eq!(value["backend"], "llamacpp");
-        assert_eq!(value["profile"], "mac-studio-32gb");
         assert_eq!(value["modelOverride"], "local-gguf");
         assert_eq!(value["approvalPolicy"], "dangerous-only");
         assert_eq!(value["toolSelection"], "fixed");

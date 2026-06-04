@@ -298,12 +298,8 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
                 // can run an independent loop. Its toolset is curated read-only
                 // (see SubagentTool), so this never recurses into another `task`.
                 let backend = crate::backends::backend(config.backend);
-                let model = crate::backends::default_model(
-                    &backend,
-                    &config.profile,
-                    config.model_override.as_deref(),
-                    &config.profiles,
-                );
+                let model =
+                    crate::backends::default_model(&backend, config.model_override.as_deref());
                 Some(Arc::new(SubagentTool {
                     http: reqwest::Client::new(),
                     backend,

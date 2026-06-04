@@ -136,14 +136,10 @@ fn doctor_backend_model(
     if backend_desc.name == state.backend.name {
         return state.model.clone();
     }
-    listed_models.first().cloned().unwrap_or_else(|| {
-        default_model(
-            backend_desc,
-            &state.config.profile,
-            None,
-            &state.config.profiles,
-        )
-    })
+    listed_models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| default_model(backend_desc, None))
 }
 
 async fn probe_streaming(
@@ -842,19 +838,17 @@ async fn refresh_recommendation_capabilities(
 
 async fn collect_recommendation_candidates(
     state: &AppState,
-    spec: &HardwareSpec,
     all: bool,
     include_cloud: bool,
 ) -> Result<Vec<ModelCandidate>> {
     let mut candidates = Vec::new();
-    let profile = spec.recommended_profile();
     for name in recommend_backend_names(state, all, include_cloud) {
         let backend_desc = if name == state.backend.name {
             state.backend.clone()
         } else {
             backend(name)
         };
-        let default = default_model(&backend_desc, profile, None, &state.config.profiles);
+        let default = default_model(&backend_desc, None);
         let mut default_candidate =
             ModelCandidate::new(backend_desc.name, backend_desc.base_url.clone(), default);
         default_candidate.is_default = true;
@@ -905,13 +899,12 @@ fn hardware_summary(spec: &HardwareSpec) -> String {
     let chip = spec.chip_name.as_deref().unwrap_or("unknown chip");
     let machine = spec.machine_name.as_deref().unwrap_or("unknown machine");
     format!(
-        "{} {} · {} · {} · {} · profile {}",
+        "{} {} · {} · {} · {}",
         spec.os,
         spec.arch,
         machine,
         chip,
-        spec.memory_label(),
-        spec.recommended_profile()
+        spec.memory_label()
     )
 }
 
@@ -1010,7 +1003,7 @@ async fn cmd_recommend(args: &str, state: &mut AppState) -> Result<()> {
         );
     }
 
-    let candidates = collect_recommendation_candidates(state, &spec, all, include_cloud).await?;
+    let candidates = collect_recommendation_candidates(state, all, include_cloud).await?;
     let recommendations = recommend_models(&spec, candidates, include_cloud);
     if recommendations.is_empty() {
         println!("  {DIM}No model candidates found. Start a local backend, then rerun /doctor recommend refresh.{RESET}");
@@ -1051,10 +1044,9 @@ async fn cmd_recommend(args: &str, state: &mut AppState) -> Result<()> {
     state.rebuild_client()?;
     state.resolve_model();
     println!(
-        "  {GREEN}✓{RESET} {DIM}active session recommendation applied → {} · {} · profile {}{RESET}",
+        "  {GREEN}✓{RESET} {DIM}active session recommendation applied → {} · {}{RESET}",
         state.config.backend.as_str(),
-        state.model,
-        state.config.profile
+        state.model
     );
     Ok(())
 }

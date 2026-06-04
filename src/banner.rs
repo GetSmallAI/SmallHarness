@@ -16,7 +16,6 @@ const LOGO: &str = r"   ███████╗███╗   ███╗ █�
 pub struct BannerInfo<'a> {
     pub model: &'a str,
     pub backend: &'a str,
-    pub profile: &'a str,
     pub approval: &'a str,
 }
 
@@ -35,7 +34,6 @@ pub fn print_banner(info: BannerInfo<'_>) {
     println!();
     println!("{}", row("backend", info.backend));
     println!("{}", row("model", info.model));
-    println!("{}", row("profile", info.profile));
     println!("{}", row("approval", info.approval));
     println!("{}", rule());
     println!(

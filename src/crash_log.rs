@@ -103,7 +103,6 @@ fn write_crash_report(
             k.starts_with("SMALL_HARNESS_")
                 || k.starts_with("AGENT_")
                 || k.starts_with("BACKEND")
-                || k.starts_with("PROFILE")
                 || k.starts_with("APPROVAL_")
                 || k.starts_with("WARMUP")
                 || k.starts_with("WORKSPACE_")

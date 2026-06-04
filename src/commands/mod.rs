@@ -10,9 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::agent::to_openai_tools;
 use crate::agent_eval::{builtin_fixtures, render_agent_eval_markdown, run_agent_eval};
 use crate::app_state::AppState;
-use crate::backends::{
-    backend, default_model, validate, BackendDescriptor, BackendName, ProfileName,
-};
+use crate::backends::{backend, default_model, validate, BackendDescriptor, BackendName};
 use crate::batch_operations::{
     execute_batch_operations, find_cross_file_references, find_related_files,
     preview_batch_operations, BatchEditOperation, EditOperation,
@@ -134,10 +132,6 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter)",
     ),
     (
-        "/profile",
-        "Switch hardware profile (mac-mini-16gb, mac-studio-32gb)",
-    ),
-    (
         "/model",
         "List models from the current backend and pick one",
     ),
@@ -218,7 +212,6 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/image" => cmd_image(&args, state),
         "/reasoning" => cmd_reasoning(&args, state),
         "/backend" => cmd_backend(&args, state).await?,
-        "/profile" => cmd_profile(&args, state).await?,
         "/model" => cmd_model(&args, state).await?,
         "/tools" => cmd_tools(&args, state),
         "/compare" => cmd_compare(&args, state).await?,
@@ -274,12 +267,7 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
         );
         return Ok(());
     }
-    let model = default_model(
-        &backend_desc,
-        &config.profile,
-        config.model_override.as_deref(),
-        &config.profiles,
-    );
+    let model = default_model(&backend_desc, config.model_override.as_deref());
     let old_session_dir = state.session_dir.clone();
     state.config = config;
     state.backend = backend_desc;
@@ -558,10 +546,6 @@ fn cmd_config(state: &AppState) {
         state.config.backend.as_str()
     );
     println!(
-        "  {DIM}profile{RESET}          {CYAN}{}{RESET}",
-        state.config.profile
-    );
-    println!(
         "  {DIM}model{RESET}            {CYAN}{}{RESET}",
         state.model
     );
@@ -625,18 +609,6 @@ fn cmd_config(state: &AppState) {
             state.config.paths.max_paths
         );
     }
-    if !state.config.profiles.is_empty() {
-        println!(
-            "  {DIM}customProfiles{RESET}   {}",
-            state
-                .config
-                .profiles
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
 }
 
 fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
@@ -660,10 +632,6 @@ fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
     println!(
         "  {DIM}backend{RESET}   {CYAN}{}{RESET}",
         state.config.backend.as_str()
-    );
-    println!(
-        "  {DIM}profile{RESET}   {CYAN}{}{RESET}",
-        state.config.profile.as_str()
     );
     println!("  {DIM}model{RESET}     {CYAN}{}{RESET}", state.model);
     println!(
@@ -1470,57 +1438,6 @@ async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
-fn profile_names(state: &AppState) -> Vec<String> {
-    let mut names: Vec<String> = ProfileName::all()
-        .iter()
-        .map(|p| p.as_str().to_string())
-        .collect();
-    for name in state.config.profiles.keys() {
-        if !names.contains(name) {
-            names.push(name.clone());
-        }
-    }
-    names
-}
-
-async fn cmd_profile(args: &str, state: &mut AppState) -> Result<()> {
-    let names = profile_names(state);
-    let chosen: Option<String> = if !args.is_empty() {
-        if names.iter().any(|n| n == args) || state.config.profiles.contains_key(args) {
-            Some(args.to_string())
-        } else {
-            None
-        }
-    } else {
-        println!(
-            "  {DIM}Current:{RESET} {CYAN}{}{RESET}",
-            state.config.profile.as_str()
-        );
-        for (i, p) in names.iter().enumerate() {
-            println!("  {DIM}{}){RESET} {}", i + 1, p);
-        }
-        let prompt = format!("  {DIM}Select (1-{}):{RESET} ", names.len());
-        let pick = plain_read_line(prompt).await?.trim().to_string();
-        pick.parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| names.get(i).cloned())
-    };
-    let Some(chosen) = chosen else {
-        println!("  {DIM}Cancelled.{RESET}");
-        return Ok(());
-    };
-    state.config.profile = chosen.clone();
-    state.config.model_override = None;
-    state.resolve_model();
-    println!(
-        "  {GREEN}✓{RESET} {DIM}profile →{RESET} {CYAN}{}{RESET} {DIM}· model →{RESET} {CYAN}{}{RESET}",
-        chosen,
-        state.model
-    );
-    Ok(())
-}
-
 async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     use std::io::Write;
     if !args.is_empty() {
@@ -1675,12 +1592,7 @@ async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
     let cloud_model = if !args.is_empty() {
         args.to_string()
     } else {
-        default_model(
-            &cloud_backend,
-            &state.config.profile,
-            None,
-            &state.config.profiles,
-        )
+        default_model(&cloud_backend, None)
     };
     println!("  {YELLOW}⇆{RESET} {BOLD}cloud{RESET} {DIM}{cloud_model}{RESET}");
     println!();
