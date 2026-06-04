@@ -40,10 +40,6 @@ impl HardwareSpec {
         classify_memory(self.memory_bytes)
     }
 
-    pub fn recommended_profile(&self) -> &'static str {
-        self.tier().recommended_profile()
-    }
-
     pub fn memory_gb(&self) -> Option<f32> {
         self.memory_bytes
             .map(|bytes| bytes as f32 / 1024.0 / 1024.0 / 1024.0)
@@ -92,13 +88,6 @@ impl HardwareTier {
             HardwareTier::Medium => "medium",
             HardwareTier::Large => "large",
             HardwareTier::Unknown => "unknown",
-        }
-    }
-
-    pub fn recommended_profile(&self) -> &'static str {
-        match self {
-            HardwareTier::Tiny | HardwareTier::Small | HardwareTier::Unknown => "mac-mini-16gb",
-            HardwareTier::Medium | HardwareTier::Large => "mac-studio-32gb",
         }
     }
 
@@ -338,16 +327,5 @@ mod tests {
         assert!(!serialized.contains("SECRET"));
         assert!(!serialized.contains("serial"));
         assert!(!serialized.contains("UDID"));
-    }
-
-    #[test]
-    fn maps_tiers_to_existing_profiles() {
-        assert_eq!(HardwareTier::Tiny.recommended_profile(), "mac-mini-16gb");
-        assert_eq!(HardwareTier::Small.recommended_profile(), "mac-mini-16gb");
-        assert_eq!(
-            HardwareTier::Medium.recommended_profile(),
-            "mac-studio-32gb"
-        );
-        assert_eq!(HardwareTier::Large.recommended_profile(), "mac-studio-32gb");
     }
 }

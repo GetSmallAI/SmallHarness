@@ -92,7 +92,6 @@ pub struct ModelRecommendation {
     pub backend: BackendName,
     pub base_url: String,
     pub model: String,
-    pub profile: String,
     pub score: i64,
     pub confidence: RecommendationConfidence,
     pub memory_fit: MemoryFit,
@@ -114,11 +113,10 @@ pub fn recommend_models(
     candidates: Vec<ModelCandidate>,
     include_cloud: bool,
 ) -> Vec<ModelRecommendation> {
-    let profile = spec.recommended_profile().to_string();
     let mut recommendations: Vec<ModelRecommendation> = merge_candidates(candidates)
         .into_values()
         .filter(|candidate| include_cloud || candidate.backend.is_local())
-        .map(|candidate| score_candidate(spec, &profile, candidate))
+        .map(|candidate| score_candidate(spec, candidate))
         .collect();
     recommendations.sort_by(|a, b| {
         b.score
@@ -157,11 +155,7 @@ pub fn memory_fit(spec: &HardwareSpec, metadata: &ModelMetadata) -> MemoryFit {
     }
 }
 
-fn score_candidate(
-    spec: &HardwareSpec,
-    profile: &str,
-    candidate: ModelCandidate,
-) -> ModelRecommendation {
+fn score_candidate(spec: &HardwareSpec, candidate: ModelCandidate) -> ModelRecommendation {
     let metadata = parse_model_metadata(&candidate.model);
     let fit = memory_fit(spec, &metadata);
     let mut score = 0i64;
@@ -243,7 +237,6 @@ fn score_candidate(
         backend: candidate.backend,
         base_url: candidate.base_url,
         model: candidate.model,
-        profile: profile.into(),
         score,
         confidence,
         memory_fit: fit,
@@ -526,7 +519,6 @@ mod tests {
             backend: BackendName::LmStudio,
             base_url: "http://localhost:1234/v1".into(),
             model: "qwen2.5-coder-14b-instruct".into(),
-            profile: "mac-studio-32gb".into(),
             score: 100,
             confidence: RecommendationConfidence::High,
             memory_fit: MemoryFit::Good,
