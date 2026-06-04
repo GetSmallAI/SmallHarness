@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-06-04
+
+### Changed
+
+- Finished removing the profile concept: the internal `mac-mini-16gb` /
+  `mac-studio-32gb` labels are gone from the recommender and no longer appear
+  anywhere in the codebase or the compiled binary. Model recommendation scores
+  off detected hardware tier + memory directly.
+
 ## [0.4.7] - 2026-06-04
 
 ### Changed
