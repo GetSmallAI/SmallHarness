@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-03
+
+No user-facing changes. Release-infrastructure only: tagging a release now
+auto-updates the Homebrew tap formula (version + checksums) via the release
+workflow, so `brew upgrade small-harness` tracks new releases automatically.
+
 ## [0.4.2] - 2026-06-03
 
 ### Fixed
