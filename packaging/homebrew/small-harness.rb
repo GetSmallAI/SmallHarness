@@ -4,9 +4,10 @@
 # (.github/workflows/release.yml) builds the tarballs, creates the GitHub
 # release, and then regenerates `Formula/small-harness.rb` in the
 # `getsmallai/homebrew-tap` repo with the new version + checksums and pushes
-# it. That step authenticates with a `TAP_DEPLOY_KEY` repo secret — the
-# private half of an SSH deploy key that has write access to the tap repo.
-# Without the secret the step is skipped and the release still publishes.
+# it. That step authenticates with a `TAP_GITHUB_TOKEN` repo secret — a
+# fine-grained PAT owned by the GetSmallAI org with `contents: write` on the
+# tap repo. Without the secret the step is skipped and the release still
+# publishes.
 #
 # This file is kept as a reference and manual fallback: to bump the tap by
 # hand, copy it into the tap repo and set `version` + the two `sha256` values
