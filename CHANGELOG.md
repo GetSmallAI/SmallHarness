@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-06-04
+
+### Changed
+
+- **Turn rendering redesigned.** Dropped the rounded response/input boxes in
+  favor of a minimal header: a short top rule (~20% width) that fades from
+  cyan to dark, with the `you`/`response` label and no bottom or side bars.
+  Body text now wraps to the real terminal width so it fills the window like
+  naturally-wrapped text rather than overflowing a fixed-width box.
+- The raw-mode bordered input box was retired in favor of a `you` header plus
+  the standard line reader (more robust, no half-drawn borders).
+
 ## [0.4.5] - 2026-06-03
 
 ### Fixed
