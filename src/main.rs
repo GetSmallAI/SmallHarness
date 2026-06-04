@@ -94,6 +94,22 @@ fn parse_completions_arg() -> Option<String> {
     args.next()
 }
 
+fn print_usage() {
+    println!("small-harness {}", env!("CARGO_PKG_VERSION"));
+    println!("A small, terminal-first coding harness.");
+    println!();
+    println!("USAGE:");
+    println!("  small-harness                      Start an interactive session");
+    println!("  small-harness --print <text>       Run one prompt and exit (also reads stdin)");
+    println!("  small-harness --continue           Resume the most recent session here");
+    println!("  small-harness completions <shell>  Print a completion script (bash|zsh|fish)");
+    println!();
+    println!("FLAGS:");
+    println!("  --allow-tools, --yes   Auto-approve tool calls in one-shot mode");
+    println!("  -V, --version          Print version and exit");
+    println!("  -h, --help             Print this help and exit");
+}
+
 fn run_completions(shell: &str) -> anyhow::Result<()> {
     let script = match shell {
         "bash" => COMPLETIONS_BASH,
@@ -336,6 +352,18 @@ async fn probe_backend(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Handle informational flags first — these must never touch config or
+    // validate a backend (otherwise `--version` fails when no API key is set).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("small-harness {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return Ok(());
+    }
+
     crate::auth::hydrate_env_from_file();
     crate::crash_log::install_panic_hook();
     if let Some(shell) = parse_completions_arg() {
