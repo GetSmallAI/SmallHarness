@@ -1,17 +1,17 @@
-# Homebrew formula template for Small Harness.
+# Homebrew formula template / reference for Small Harness.
 #
-# How to publish:
+# Publishing is AUTOMATED. On every `vX.Y.Z` tag, the release workflow
+# (.github/workflows/release.yml) builds the tarballs, creates the GitHub
+# release, and then regenerates `Formula/small-harness.rb` in the
+# `getsmallai/homebrew-tap` repo with the new version + checksums and pushes
+# it. That step requires a `TAP_GITHUB_TOKEN` repo secret — a fine-grained PAT
+# with `contents: write` on the tap repo. Without the secret the step is
+# skipped and the release still publishes.
 #
-#   1. Tag a release in the SmallHarness repo (e.g. `git tag v0.3.0 && git
-#      push --tags`). The release workflow at
-#      .github/workflows/release.yml builds aarch64 + x86_64 tarballs and
-#      attaches them to the GitHub release.
-#   2. Copy this file into a separate tap repo named
-#      `getsmallai/homebrew-tap`, under `Formula/small-harness.rb`.
-#   3. Bump `VERSION`, `ARM64_SHA256`, and `X86_64_SHA256` below to match the
-#      published release. Tarball checksums are in the release's SHA256SUMS
-#      file (the release workflow generates one).
-#   4. Users install with `brew install getsmallai/tap/small-harness`.
+# This file is kept as a reference and manual fallback: to bump the tap by
+# hand, copy it into the tap repo and set `version` + the two `sha256` values
+# from the release's SHA256SUMS. Users install with
+# `brew install getsmallai/tap/small-harness`.
 #
 # Notes:
 #   - This formula installs a pre-built binary, not a Cargo build, so users
