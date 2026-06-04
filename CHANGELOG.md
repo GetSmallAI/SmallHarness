@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-03
+
+A UI and onboarding polish pass.
+
+### Added
+
+- **TUI visual refresh.** A shared `theme` module drives a high-contrast
+  palette and rounded-panel helpers. Input is now a framed `you` panel with an
+  accent `❯` prompt; the assistant answer streams inside a framed `response`
+  panel; tool calls use accent bullets, gutter-aligned. Crucially, secondary
+  text no longer uses ANSI *faint* (the main reason the old TUI was hard to
+  read) — it's readable bright-black.
+- **API-key prompt in setup.** Choosing a cloud backend (`openai`/
+  `openrouter`) in the wizard now prompts for the key and saves it to the
+  `0600` auth file, so the end-of-setup probe no longer fails on a missing key.
+
+### Changed
+
+- The setup wizard no longer asks for a hardware profile (it keeps the
+  existing/default profile silently).
+
+### Docs
+
+- README: a clear **Run it** section with the launch command, cloud and local
+  presented as two equal paths, cleaner layout, and no hardcoded backend count.
+- Moved internal AI-workflow checklists out of the public repo.
+
 ## [0.4.0] - 2026-06-03
 
 A core-power + bare-bones pass: the agent loop got faster and more capable,
