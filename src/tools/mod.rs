@@ -72,125 +72,69 @@ pub trait Tool: Send + Sync {
     }
 }
 
-fn enabled(config: &AgentConfig, name: &str) -> bool {
-    config.tools.iter().any(|t| t == name)
-}
-
-fn push_if_enabled(out: &mut Vec<String>, config: &AgentConfig, name: &str) {
-    if enabled(config, name) && !out.iter().any(|t| t == name) {
-        out.push(name.to_string());
-    }
-}
-
+/// Choose the tools to expose for a given prompt.
+///
+/// `Fixed` always sends the whole configured pool. `Auto` (the default) keeps
+/// the full working set available for any real request and sends *no* tools
+/// only for obvious small talk (greetings, thanks) — the model still decides
+/// whether to call them. This mirrors how modern harnesses work: the agent
+/// always has read/edit/write/shell on hand, so "build me a site" results in
+/// files written to disk instead of code dumped into the chat. The old
+/// keyword-bucket heuristic guessed wrong on phrasings like "build a bio site"
+/// (no edit tools surfaced), which forced the model to print code it couldn't
+/// save.
 pub fn select_tool_names(config: &AgentConfig, prompt: &str) -> Vec<String> {
-    if config.tool_selection == ToolSelection::Fixed {
+    if config.tool_selection == ToolSelection::Fixed || !is_small_talk(prompt) {
         return config.tools.clone();
     }
+    Vec::new()
+}
 
-    let lower = prompt.to_lowercase();
-    let fileish = [
-        "file",
-        "files",
-        "repo",
-        "repository",
-        "code",
-        "src",
-        "read",
-        "open",
-        "search",
-        "grep",
-        "find",
-        "list",
-        "directory",
-        "folder",
-        "where is",
-        "inspect",
-        "review",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let editish = [
-        "edit",
-        "change",
-        "modify",
-        "update",
-        "fix",
-        "implement",
-        "add support",
-        "refactor",
-        "write",
-        "create",
-        "delete",
-        "patch",
-        "build it",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let shellish = [
-        "run ", "execute", "command", "terminal", "shell", "test", "cargo ", "npm ", "git ",
-        "build", "lint", "check",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let testish = ["failing", "verify", "unit test", "test suite"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-        || (lower.contains("test") && !lower.contains("latest"));
-    let shipish = [
-        "ship",
-        "ready to commit",
-        "ready to ship",
-        "shipcheck",
-        "handoff",
-        "release",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let batchish = [
-        "multi-file",
-        "multiple files",
-        "across files",
-        "batch edit",
-        "coordinated",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-
-    let mut out = Vec::new();
-    if fileish || editish {
-        if config.project_memory.enabled {
-            push_if_enabled(&mut out, config, "repo_search");
-        }
-        push_if_enabled(&mut out, config, "file_read");
-        push_if_enabled(&mut out, config, "grep");
-        push_if_enabled(&mut out, config, "list_dir");
-        push_if_enabled(&mut out, config, "glob");
-        // Delegated read-only investigation keeps deep exploration out of the
-        // parent context.
-        push_if_enabled(&mut out, config, "task");
+/// Conservatively detect throwaway social messages (greetings, thanks) so we
+/// can skip sending tool schemas for them. Deliberately narrow: a false
+/// negative just sends tools the model won't use, but a false positive would
+/// starve a real request of its tools, so we only match very short, clearly
+/// social inputs.
+fn is_small_talk(prompt: &str) -> bool {
+    let t = prompt.trim().to_lowercase();
+    let t = t.trim_end_matches(['.', '!', '?', ' ']);
+    if t.is_empty() {
+        return true;
     }
-    if editish {
-        push_if_enabled(&mut out, config, "file_edit");
-        push_if_enabled(&mut out, config, "apply_patch");
-        push_if_enabled(&mut out, config, "file_write");
-    }
-    // Multi-step work (editing or running things) benefits from a visible plan.
-    if editish || shellish {
-        push_if_enabled(&mut out, config, "update_plan");
-    }
-    if shellish {
-        push_if_enabled(&mut out, config, "shell");
-    }
-    if testish || shellish {
-        push_if_enabled(&mut out, config, "run_tests");
-    }
-    if batchish && editish {
-        push_if_enabled(&mut out, config, "batch_edit");
-    }
-    if shipish {
-        push_if_enabled(&mut out, config, "ship_status");
-    }
-    out
+    const EXACT: &[&str] = &[
+        "hi",
+        "hii",
+        "hey",
+        "hello",
+        "yo",
+        "sup",
+        "thanks",
+        "thank you",
+        "thx",
+        "ty",
+        "ok",
+        "okay",
+        "k",
+        "cool",
+        "nice",
+        "great",
+        "awesome",
+        "hi there",
+        "hey there",
+        "hello there",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "how are you",
+        "how's it going",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "gm",
+        "bye",
+        "goodbye",
+    ];
+    EXACT.contains(&t)
 }
 
 /// Returns true when a tool result indicates the workspace was mutated (for ship-loop hooks).
@@ -329,85 +273,73 @@ mod tests {
     use crate::config::ToolSelection;
 
     #[test]
-    fn auto_chat_uses_no_tools() {
+    fn small_talk_sends_no_tools() {
         let config = AgentConfig {
             tool_selection: ToolSelection::Auto,
             ..Default::default()
         };
-        assert!(select_tool_names(&config, "hello there").is_empty());
+        for greeting in [
+            "hi",
+            "hello there",
+            "thanks",
+            "ok",
+            "  hey!  ",
+            "Good morning",
+        ] {
+            assert!(
+                select_tool_names(&config, greeting).is_empty(),
+                "{greeting:?} should be treated as small talk"
+            );
+        }
     }
 
     #[test]
-    fn auto_file_question_uses_read_tools() {
+    fn real_request_sends_the_full_pool() {
         let config = AgentConfig {
             tool_selection: ToolSelection::Auto,
             ..Default::default()
         };
-        let names = select_tool_names(&config, "search the repo for config");
-        assert!(names.contains(&"file_read".to_string()));
-        assert!(names.contains(&"grep".to_string()));
-        assert!(names.contains(&"list_dir".to_string()));
+        assert_eq!(
+            select_tool_names(&config, "what files are in src?"),
+            config.tools
+        );
     }
 
     #[test]
-    fn repo_search_is_opt_in_not_default() {
-        // repo_search is no longer in the default pool; auto-selection can't
-        // surface it unless the user enables it.
+    fn build_request_includes_write_tools() {
+        // Regression: "build a bio site" used to surface no edit tools, forcing
+        // the model to dump code into the chat. It must now get file_write +
+        // file_edit + shell so it can actually create files.
         let config = AgentConfig {
             tool_selection: ToolSelection::Auto,
             ..Default::default()
         };
-        assert!(!config.tools.contains(&"repo_search".to_string()));
-        let names = select_tool_names(&config, "search the repo for config");
-        assert!(!names.contains(&"repo_search".to_string()));
+        let names = select_tool_names(&config, "build a bio site");
+        assert!(names.contains(&"file_write".to_string()));
+        assert!(names.contains(&"file_edit".to_string()));
+        assert!(names.contains(&"shell".to_string()));
     }
 
     #[test]
-    fn auto_repo_search_requires_memory_enabled() {
-        // When repo_search IS enabled, auto-selection still gates it on memory.
-        let base_tools = vec![
-            "repo_search".to_string(),
-            "file_read".to_string(),
-            "grep".to_string(),
-            "list_dir".to_string(),
-        ];
-        let enabled = AgentConfig {
-            tools: base_tools.clone(),
-            ..Default::default()
-        };
-        assert!(select_tool_names(&enabled, "search the repo for config")
-            .contains(&"repo_search".to_string()));
-
-        let disabled = AgentConfig {
-            tools: base_tools,
-            project_memory: crate::config::ProjectMemoryConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(!select_tool_names(&disabled, "search the repo for config")
-            .contains(&"repo_search".to_string()));
-    }
-
-    #[test]
-    fn auto_verify_prompt_includes_run_tests() {
+    fn auto_only_sends_configured_tools() {
         let config = AgentConfig {
-            tools: vec!["run_tests".into(), "file_read".into(), "file_edit".into()],
+            tool_selection: ToolSelection::Auto,
+            tools: vec!["file_read".into(), "shell".into()],
             ..Default::default()
         };
-        let names = select_tool_names(&config, "verify the failing unit test");
-        assert!(names.contains(&"run_tests".to_string()));
+        assert_eq!(
+            select_tool_names(&config, "do some real work"),
+            vec!["file_read".to_string(), "shell".to_string()]
+        );
     }
 
     #[test]
-    fn auto_ship_prompt_includes_ship_status() {
+    fn fixed_mode_sends_full_pool_even_for_greetings() {
         let config = AgentConfig {
-            tools: vec!["ship_status".into(), "file_read".into()],
+            tool_selection: ToolSelection::Fixed,
             ..Default::default()
         };
-        let names = select_tool_names(&config, "is this ready to ship?");
-        assert!(names.contains(&"ship_status".to_string()));
+        assert_eq!(select_tool_names(&config, "hi"), config.tools);
     }
 
     #[test]

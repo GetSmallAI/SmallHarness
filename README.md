@@ -241,11 +241,11 @@ All model-tuning lives under `/doctor`:
 | Workflow | `run_tests`, `ship_status`, `web_fetch`, `update_plan`, `task` |
 | MCP | anything an MCP server exposes, surfaced as `mcp__<server>__<tool>` |
 
-Each tool definition costs prompt-eval time on small local models. The
-default `toolSelection: "auto"` sends only the tools that look relevant to
-each prompt; switch to `fixed` to always send the full set. Toggle the
-active pool with `/tools file_read,grep,list_dir`, or persistently in
-`agent.config.json`.
+The default `toolSelection: "auto"` keeps the full working pool available for
+any real request (so "build me a site" writes files instead of dumping code
+into the chat) and sends no tools only for plain greetings. `fixed` always
+sends the pool. Set the pool with `/tools file_read,grep,list_dir`, or
+persistently in `agent.config.json`.
 
 ### Approval policies
 
@@ -440,7 +440,7 @@ OPENROUTER_API_KEY=sk-or-...                            # required for openroute
 OPENAI_BASE_URL=https://api.openai.com/v1               # point at a compatible proxy if needed
 
 APPROVAL_POLICY=always                                  # always | dangerous-only | never
-AGENT_TOOLS=file_read,grep,list_dir,file_edit,shell,update_plan,task
+AGENT_TOOLS=file_read,grep,list_dir,file_edit,file_write,shell,update_plan,task
 AGENT_TOOL_SELECTION=auto                               # auto | fixed
 
 WARMUP=true                                             # pre-warm prompt cache at startup
@@ -460,7 +460,7 @@ root. Common shape:
   "backend": "ollama",
   "modelOverride": "qwen2.5-coder:14b",
   "approvalPolicy": "dangerous-only",
-  "tools": ["file_read", "grep", "list_dir", "file_edit", "shell", "update_plan", "task"],
+  "tools": ["file_read", "grep", "list_dir", "file_edit", "file_write", "shell", "update_plan", "task"],
   "toolSelection": "auto",
   "maxSteps": 20,
   "workspaceRoot": "/path/to/project",
