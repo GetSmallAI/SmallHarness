@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-06-03
+
+### Added
+
+- The first-run **setup wizard** now matches the themed TUI: accent title +
+  rule, bold section headers, readable (non-faint) text, and an accent `❯` on
+  each prompt. Previously it was the one screen still using the old plain
+  styling.
+
 ## [0.4.3] - 2026-06-03
 
 No user-facing changes. Release-infrastructure only: tagging a release now
