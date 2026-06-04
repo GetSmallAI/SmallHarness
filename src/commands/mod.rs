@@ -128,6 +128,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Toggle the streaming reasoning panel (on, off, status)",
     ),
     (
+        "/verbose",
+        "Show every tool call with full args + result (on, off, status)",
+    ),
+    (
         "/backend",
         "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter)",
     ),
@@ -211,6 +215,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/auth" => cmd_auth(&args).await?,
         "/image" => cmd_image(&args, state),
         "/reasoning" => cmd_reasoning(&args, state),
+        "/verbose" => cmd_verbose(&args, state),
         "/backend" => cmd_backend(&args, state).await?,
         "/model" => cmd_model(&args, state).await?,
         "/tools" => cmd_tools(&args, state),
@@ -1383,6 +1388,34 @@ fn cmd_reasoning(args: &str, state: &mut AppState) {
     state.config.display.reasoning = new_state;
     println!(
         "  {GREEN}✓{RESET} {DIM}reasoning panel →{RESET} {CYAN}{}{RESET}",
+        if new_state { "on" } else { "off" }
+    );
+}
+
+/// `/verbose [on|off|status]` — switch the tool view between the normal grouped
+/// summary and a detailed debug view that prints every tool call with its full
+/// arguments and a large result preview.
+fn cmd_verbose(args: &str, state: &mut AppState) {
+    let arg = args.trim().to_lowercase();
+    let new_state = match arg.as_str() {
+        "" | "status" => {
+            let cur = state.renderer.verbose_enabled();
+            println!(
+                "  {DIM}verbose tool view:{RESET} {} {DIM}(usage: /verbose on|off){RESET}",
+                if cur { "on" } else { "off" }
+            );
+            return;
+        }
+        "on" | "true" | "1" => true,
+        "off" | "false" | "0" => false,
+        other => {
+            println!("  {RED}✗{RESET} {DIM}unknown value: {other} (use on, off, status){RESET}");
+            return;
+        }
+    };
+    state.renderer.set_verbose(new_state);
+    println!(
+        "  {GREEN}✓{RESET} {DIM}verbose tool view →{RESET} {CYAN}{}{RESET}{DIM} — every tool call with full args + result{RESET}",
         if new_state { "on" } else { "off" }
     );
 }

@@ -294,6 +294,7 @@ this exact call`. The session cache resets on `/new`.
 /auth                  manage API keys (list, set, clear)
 /image <path>          attach an image to the next user turn
 /reasoning on|off      toggle the streaming reasoning panel
+/verbose on|off        show every tool call with its full args + result
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 ```
 
@@ -503,6 +504,9 @@ runtime.
   you can source.
 - **`/reasoning on|off`** toggles the streaming reasoning panel — adds a
   dim "thinking…" block above the answer for o-series and similar models.
+- **`/verbose on|off`** switches to a debug tool view: every tool call is
+  printed with its full arguments and a large result preview, so you can see
+  exactly what the agent is doing. `/verbose off` restores the normal view.
 - **Update check.** Once a day, Small Harness checks GitHub for a newer
   release and shows a one-line notice in the banner if there is one.
   Background, cached, opt-out with `SMALL_HARNESS_NO_UPDATE_CHECK=true`.

@@ -57,6 +57,9 @@ pub enum ToolDisplay {
     Grouped,
     Minimal,
     Hidden,
+    /// Debug view: every tool call printed with its full arguments and a large
+    /// result preview, so you can see exactly what the agent is doing.
+    Verbose,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

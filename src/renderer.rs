@@ -295,10 +295,13 @@ pub struct TuiRenderer {
     /// and streaming. Holds the word-wrap state so content stays inside the
     /// panel. Closed when a tool call/reasoning interrupts or the turn ends.
     answer_wrap: Option<StreamWrap>,
+    /// The configured tool display, remembered so `/verbose off` can restore it.
+    base_tool_display: ToolDisplay,
 }
 
 impl TuiRenderer {
     pub fn new(display: DisplayConfig) -> Self {
+        let base_tool_display = display.tool_display;
         Self {
             display,
             tool_start: HashMap::new(),
@@ -308,6 +311,7 @@ impl TuiRenderer {
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
             answer_wrap: None,
+            base_tool_display,
         }
     }
 
@@ -319,6 +323,20 @@ impl TuiRenderer {
 
     pub fn reasoning_enabled(&self) -> bool {
         self.display.reasoning
+    }
+
+    /// Toggle the verbose tool view at runtime. `on` switches to the detailed
+    /// per-call view; `off` restores the configured display.
+    pub fn set_verbose(&mut self, on: bool) {
+        self.display.tool_display = if on {
+            ToolDisplay::Verbose
+        } else {
+            self.base_tool_display
+        };
+    }
+
+    pub fn verbose_enabled(&self) -> bool {
+        matches!(self.display.tool_display, ToolDisplay::Verbose)
     }
 
     pub fn handle(&mut self, event: AgentEvent) {
@@ -474,6 +492,21 @@ impl TuiRenderer {
             ToolDisplay::Minimal => {
                 *self.minimal_batch.entry(name.to_string()).or_insert(0) += 1;
             }
+            ToolDisplay::Verbose => {
+                println!("{PAD}{ACCENT}→{RESET} {BOLD}{name}{RESET}");
+                if let Some(obj) = args.as_object() {
+                    for (k, v) in obj {
+                        let vs = match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let vs = vs.replace('\n', "⏎");
+                        println!("{PAD}    {GRAY}{k}:{RESET} {}", trunc(&vs, 160));
+                    }
+                } else if !args.is_null() {
+                    println!("{PAD}    {GRAY}{}{RESET}", trunc(&args.to_string(), 160));
+                }
+            }
             ToolDisplay::Hidden => {}
         }
     }
@@ -539,6 +572,12 @@ impl TuiRenderer {
                     .find(|p| p.call_id == call_id)
                 {
                     p.output = Some(output.to_string());
+                }
+            }
+            ToolDisplay::Verbose => {
+                println!("{PAD}  {GRAY}←{RESET} {DIM}{dur}{RESET}");
+                for line in trunc(output, 1200).lines() {
+                    println!("{PAD}    {GRAY}{line}{RESET}");
                 }
             }
             _ => {}
@@ -680,5 +719,22 @@ mod tests {
         out.push_str(&w.feed("ta gamma delta"));
         out.push_str(&w.finish());
         assert_eq!(out, "alpha beta\ngamma delta");
+    }
+}
+
+#[cfg(test)]
+mod verbose_tests {
+    use super::*;
+    use crate::config::{DisplayConfig, ToolDisplay};
+
+    #[test]
+    fn verbose_toggle_restores_configured_display() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+        assert!(!r.verbose_enabled());
+        r.set_verbose(true);
+        assert!(r.verbose_enabled());
+        r.set_verbose(false);
+        assert!(!r.verbose_enabled());
+        assert!(matches!(r.display.tool_display, ToolDisplay::Grouped));
     }
 }
