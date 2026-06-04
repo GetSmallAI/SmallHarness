@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-06-04
+
+### Changed
+
+- **The agent now writes files instead of printing code into the chat.** Three
+  fixes together: (1) `auto` tool-selection no longer guesses tools from
+  keywords — it keeps the full working pool available for any real request and
+  sends nothing only for greetings, so prompts like "build a bio site" get the
+  edit tools they need; (2) `file_write` is in the core defaults so new files
+  can be created from scratch; (3) the system prompt instructs the model to
+  write changes to disk and reply with a short summary rather than pasting file
+  contents. No more token-wasting code dumps.
+
 ## [0.4.9] - 2026-06-04
 
 ### Added
