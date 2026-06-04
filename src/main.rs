@@ -45,8 +45,8 @@ use crate::approval::ApprovalCache;
 use crate::backends::{backend, default_model, validate};
 use crate::banner::{print_banner, BannerInfo};
 use crate::commands::dispatch;
-use crate::config::{load_config, InputStyle};
-use crate::input::{bordered_read_line, plain_read_line_with_history, InputHistory};
+use crate::config::load_config;
+use crate::input::{plain_read_line_with_history, InputHistory};
 use crate::project_memory::{build_project_index, load_project_index, prompt_looks_repo_related};
 use crate::renderer::TuiRenderer;
 use crate::session::{init_session_dir, load_session_metadata, new_session_path};
@@ -565,38 +565,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     loop {
-        let input = match state.config.display.input_style {
-            InputStyle::Bordered => bordered_read_line(input_history.entries().to_vec()).await?,
-            _ => {
-                plain_read_line_with_history(
-                    format!("{}{}❯{} ", crate::theme::PAD, crate::theme::ACCENT, RESET),
-                    input_history.entries().to_vec(),
-                )
-                .await?
-            }
-        };
+        // Header-only turn marker (a short fading rule), then a clean accent
+        // prompt. The same robust line reader is used regardless of the
+        // configured input style.
+        println!();
+        println!("{}", crate::theme::fade_header("you"));
+        let input = plain_read_line_with_history(
+            format!("{}{}❯{} ", crate::theme::PAD, crate::theme::ACCENT, RESET),
+            input_history.entries().to_vec(),
+        )
+        .await?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
             continue;
         }
         let _ = input_history.push(&input);
-
-        if matches!(state.config.display.input_style, InputStyle::Bordered) {
-            let cwd = std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let home = std::env::var("HOME").unwrap_or_default();
-            let display_cwd = if !home.is_empty() && cwd.starts_with(&home) {
-                cwd.replacen(&home, "~", 1)
-            } else {
-                cwd
-            };
-            println!(
-                "{}{}{display_cwd}{RESET}",
-                crate::theme::PAD,
-                crate::theme::MUTED
-            );
-        }
 
         if trimmed == "exit" || trimmed == "quit" || trimmed == ".exit" {
             if state.path_store.dirty {

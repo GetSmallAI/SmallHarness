@@ -5,8 +5,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{panel_bottom, panel_top, ACCENT, PAD, RESET};
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
     value: String,
@@ -82,10 +80,6 @@ impl InputHistory {
         f.write_all(b"\n")?;
         Ok(())
     }
-}
-
-pub async fn bordered_read_line(history: Vec<String>) -> Result<String> {
-    tokio::task::spawn_blocking(move || read_bordered(&history)).await?
 }
 
 pub async fn plain_read_line(prompt: String) -> Result<String> {
@@ -169,122 +163,6 @@ fn read_plain(prompt: &str, history: &[String]) -> Result<String> {
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         writeln!(out)?;
-                        out.flush()?;
-                        crossterm::terminal::disable_raw_mode().ok();
-                        std::process::exit(0);
-                    }
-                    KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => {
-                        cursor = prev_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => {
-                        cursor = next_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Left if cursor > 0 => {
-                        cursor -= 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Right if cursor < chars.len() => {
-                        cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Up if !history.is_empty() => {
-                        history_idx = history_idx.saturating_sub(1);
-                        chars = history[history_idx].chars().collect();
-                        cursor = chars.len();
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Down if !history.is_empty() => {
-                        if history_idx + 1 < history.len() {
-                            history_idx += 1;
-                            chars = history[history_idx].chars().collect();
-                        } else {
-                            history_idx = history.len();
-                            chars.clear();
-                        }
-                        cursor = chars.len();
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Char(c) => {
-                        chars.insert(cursor, c);
-                        cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    })();
-    crossterm::terminal::disable_raw_mode()?;
-    result
-}
-
-fn read_bordered(history: &[String]) -> Result<String> {
-    let top = panel_top("you");
-    let bot = panel_bottom();
-    let mut out = std::io::stdout();
-    let mut chars: Vec<char> = Vec::new();
-    let mut cursor = 0usize;
-    let mut history_idx = history.len();
-
-    // Three lines: panel top, the input line (`  ❯ `), panel bottom. The final
-    // escape parks the cursor one row up, at column 5 — right after the prompt.
-    write!(out, "\n{top}\n")?;
-    writeln!(out, "{PAD}{ACCENT}❯{RESET} ")?;
-    write!(out, "{bot}\x1b[1A\r\x1b[5G")?;
-    out.flush()?;
-
-    crossterm::terminal::enable_raw_mode()?;
-    let result = (|| -> Result<String> {
-        let redraw = |out: &mut std::io::Stdout, chars: &[char], cursor: usize| -> Result<()> {
-            let line: String = chars.iter().collect();
-            let display = render_value(&line);
-            write!(out, "\r\x1b[2K{PAD}{ACCENT}❯{RESET} {display}")?;
-            let right = chars.len().saturating_sub(cursor);
-            if right > 0 {
-                write!(out, "\x1b[{right}D")?;
-            }
-            out.flush()?;
-            Ok(())
-        };
-        loop {
-            if let Event::Key(KeyEvent {
-                code,
-                modifiers,
-                kind,
-                ..
-            }) = crossterm::event::read()?
-            {
-                if kind == KeyEventKind::Release {
-                    continue;
-                }
-                match code {
-                    KeyCode::Enter => {
-                        if chars.is_empty() {
-                            write!(out, "\x1b[1A\x1b[2K\x1b[1A\x1b[2K\r")?;
-                        } else {
-                            // Keep the panel's bottom border (it's already on
-                            // screen one row down) and move past it, so the
-                            // submitted "you" box stays closed instead of
-                            // losing its bottom edge.
-                            write!(out, "\x1b[1B\r\n")?;
-                        }
-                        out.flush()?;
-                        return Ok(chars.iter().collect());
-                    }
-                    KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        chars.insert(cursor, '\n');
-                        cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Backspace if cursor > 0 => {
-                        chars.remove(cursor - 1);
-                        cursor -= 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        writeln!(out, "{RESET}")?;
                         out.flush()?;
                         crossterm::terminal::disable_raw_mode().ok();
                         std::process::exit(0);

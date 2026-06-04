@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
 
-use crate::theme::{panel_bottom, panel_top, ACCENT, PAD, TEXT};
+use crate::theme::{content_width, fade_header, ACCENT, PAD, TEXT};
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
 // means ANSI faint (which was the unreadable culprit) — it's now the theme's
@@ -364,8 +364,9 @@ impl TuiRenderer {
         self.reasoning_header_shown = false;
     }
 
-    /// Close the assistant answer panel: flush the last buffered word, then
-    /// print the rounded footer. No-op if no panel is open.
+    /// Close the assistant answer: flush the last buffered word and end the
+    /// line. No footer/border — the header-only treatment needs no closing rule.
+    /// No-op if no answer is open.
     fn end_answer(&mut self) {
         let Some(mut wrap) = self.answer_wrap.take() else {
             return;
@@ -374,7 +375,6 @@ impl TuiRenderer {
         let tail = wrap.finish();
         let _ = write!(out, "{tail}");
         let _ = writeln!(out, "{RESET}");
-        let _ = writeln!(out, "{}", panel_bottom());
         let _ = out.flush();
     }
 
@@ -408,13 +408,11 @@ impl TuiRenderer {
         let mut out = std::io::stdout();
         if self.answer_wrap.is_none() {
             let _ = writeln!(out);
-            let _ = writeln!(out, "{}", panel_top("response"));
+            let _ = writeln!(out, "{}", fade_header("response"));
             let _ = write!(out, "{PAD}{TEXT}");
-            // Wrap content to the panel's inner width: terminal width minus the
-            // 2-col gutter and a 2-col right margin so lines stop before the
-            // panel's right edge instead of overflowing.
-            let inner = crate::theme::width().saturating_sub(4).max(20);
-            self.answer_wrap = Some(StreamWrap::new(inner, PAD));
+            // Wrap to the real content width so the answer fills the terminal
+            // (like naturally-wrapped text) instead of overflowing.
+            self.answer_wrap = Some(StreamWrap::new(content_width(), PAD));
         }
         if let Some(wrap) = self.answer_wrap.as_mut() {
             let chunk = wrap.feed(delta);
