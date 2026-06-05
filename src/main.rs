@@ -452,8 +452,8 @@ async fn main() -> anyhow::Result<()> {
         config.history.max_entries,
         config.history.enabled,
     );
-    // Slash-command names for inline tab-completion as the user types.
-    let command_names = crate::commands::command_names();
+    // Slash commands (name + description) for the completion menu.
+    let command_names = crate::commands::command_list();
     let session_path = new_session_path(&config.session_dir);
     let session_dir = config.session_dir.clone();
     let paths_config = config.paths.clone();

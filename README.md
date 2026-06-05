@@ -507,6 +507,10 @@ runtime.
 - **`/verbose on|off`** switches to a debug tool view: every tool call is
   printed with its full arguments and a large result preview, so you can see
   exactly what the agent is doing. `/verbose off` restores the normal view.
+- **Slash-command completion.** Type `/` and a menu of matching commands (with
+  descriptions) appears beneath the prompt; the best match also shows as dim
+  ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**
+  accepts inline, **Esc** dismisses. It narrows live as you type.
 - **Update check.** Once a day, Small Harness checks GitHub for a newer
   release and shows a one-line notice in the banner if there is one.
   Background, cached, opt-out with `SMALL_HARNESS_NO_UPDATE_CHECK=true`.

@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{MUTED, RESET};
+use crate::theme::{ACCENT, BOLD, MUTED, RESET};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -88,12 +88,12 @@ pub async fn plain_read_line(prompt: String) -> Result<String> {
     plain_read_line_with_history(prompt, Vec::new(), Vec::new()).await
 }
 
-/// `commands` is the list of slash-commands offered as ghost-text completions
+/// `commands` are `(name, description)` slash-commands offered as completions
 /// (empty for sub-prompts that don't want completion).
 pub async fn plain_read_line_with_history(
     prompt: String,
     history: Vec<String>,
-    commands: Vec<String>,
+    commands: Vec<(String, String)>,
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || read_plain(&prompt, &history, &commands)).await?
 }
@@ -102,21 +102,152 @@ fn render_value(value: &str) -> String {
     value.replace('\n', "⏎")
 }
 
-/// The dim "ghost" completion shown after the cursor: the remainder of the
-/// first slash-command the typed text is a prefix of. Empty unless the cursor
-/// is at the end of a line that starts with `/`.
-fn ghost_suffix(line: &str, cursor: usize, len: usize, commands: &[String]) -> String {
-    if cursor != len || !line.starts_with('/') {
-        return String::new();
-    }
-    for c in commands {
-        if let Some(rest) = c.strip_prefix(line) {
-            if !rest.is_empty() {
-                return rest.to_string();
+/// Maximum number of command rows shown in the completion menu at once.
+const MENU_MAX_ROWS: usize = 8;
+
+/// Visible width of a string, ignoring ANSI escape sequences (`ESC [ … m`).
+fn visible_width(s: &str) -> usize {
+    let mut n = 0;
+    let mut in_esc = false;
+    for ch in s.chars() {
+        if in_esc {
+            if ch == 'm' {
+                in_esc = false;
             }
+        } else if ch == '\x1b' {
+            in_esc = true;
+        } else {
+            n += 1;
         }
     }
-    String::new()
+    n
+}
+
+/// Slash-commands the current line is a prefix of, for the completion menu.
+/// Empty when: not a `/`-line, the cursor isn't at the end, completion was
+/// dismissed, or the only match is exactly what's already typed.
+fn completion_matches<'a>(
+    line: &str,
+    cursor: usize,
+    len: usize,
+    commands: &'a [(String, String)],
+    dismissed: bool,
+) -> Vec<&'a (String, String)> {
+    if dismissed || cursor != len || !line.starts_with('/') {
+        return Vec::new();
+    }
+    let matches: Vec<&(String, String)> = commands
+        .iter()
+        .filter(|(n, _)| n.starts_with(line))
+        .collect();
+    if matches.len() == 1 && matches[0].0 == line {
+        return Vec::new();
+    }
+    matches
+}
+
+/// Build the full redraw string for the input line plus (optionally) the
+/// completion menu, leaving the cursor parked at the logical edit position.
+///
+/// Sequence: clear the input line and everything below it, draw the prompt +
+/// text + dim ghost (the selected match's remainder), then — if there are
+/// matches — draw the menu on the lines beneath and move the cursor back up to
+/// the input line. Pure (returns the bytes to write) so it can be unit-tested.
+#[allow(clippy::too_many_arguments)]
+fn render_input(
+    prompt: &str,
+    prompt_cols: usize,
+    chars: &[char],
+    cursor: usize,
+    commands: &[(String, String)],
+    sel: usize,
+    dismissed: bool,
+    term_cols: usize,
+) -> String {
+    let line: String = chars.iter().collect();
+    let display = render_value(&line);
+    let matches = completion_matches(&line, cursor, chars.len(), commands, dismissed);
+    let sel = if matches.is_empty() {
+        0
+    } else {
+        sel.min(matches.len() - 1)
+    };
+    let ghost = matches
+        .get(sel)
+        .and_then(|(n, _)| n.strip_prefix(line.as_str()))
+        .filter(|r| !r.is_empty())
+        .unwrap_or("")
+        .to_string();
+
+    let mut s = String::new();
+    // Clear current line + everything below (removes a previously drawn menu).
+    s.push_str("\r\x1b[0J");
+    s.push_str(prompt);
+    s.push_str(&display);
+    if !ghost.is_empty() {
+        s.push_str(MUTED);
+        s.push_str(&ghost);
+        s.push_str(RESET);
+    }
+
+    if matches.is_empty() {
+        // No menu: park the cursor at the logical position.
+        let back = ghost.chars().count() + chars.len().saturating_sub(cursor);
+        if back > 0 {
+            s.push_str(&format!("\x1b[{back}D"));
+        }
+        return s;
+    }
+
+    // Draw the menu beneath the input line.
+    let name_w = matches
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(8)
+        .min(18);
+    let shown = matches.len().min(MENU_MAX_ROWS);
+    let mut rows = 0;
+    for (i, (name, desc)) in matches.iter().take(shown).enumerate() {
+        s.push_str("\r\n");
+        rows += 1;
+        // Leave room for: 2 gutter + 2 marker + name_w + 2 gap.
+        let desc_room = term_cols.saturating_sub(6 + name_w);
+        let desc = truncate(desc, desc_room);
+        if i == sel {
+            s.push_str(&format!(
+                "  {ACCENT}▸ {BOLD}{name:<name_w$}{RESET}  {MUTED}{desc}{RESET}"
+            ));
+        } else {
+            s.push_str(&format!("    {name:<name_w$}  {MUTED}{desc}{RESET}"));
+        }
+    }
+    if matches.len() > shown {
+        s.push_str(&format!(
+            "\r\n  {MUTED}… +{} more{RESET}",
+            matches.len() - shown
+        ));
+        rows += 1;
+    }
+    // Move cursor back up to the input line, then to the logical column.
+    s.push_str(&format!("\x1b[{rows}A\r"));
+    let col = prompt_cols + cursor;
+    if col > 0 {
+        s.push_str(&format!("\x1b[{col}C"));
+    }
+    s
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn prev_word(chars: &[char], mut cursor: usize) -> usize {
@@ -139,32 +270,62 @@ fn next_word(chars: &[char], mut cursor: usize) -> usize {
     cursor
 }
 
-fn read_plain(prompt: &str, history: &[String], commands: &[String]) -> Result<String> {
+fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -> Result<String> {
     let mut out = std::io::stdout();
     write!(out, "{prompt}")?;
     out.flush()?;
     crossterm::terminal::enable_raw_mode()?;
+    let prompt_cols = visible_width(prompt);
+    let term_cols = crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(80);
+
     let result = (|| -> Result<String> {
         let mut chars: Vec<char> = Vec::new();
         let mut cursor = 0usize;
         let mut history_idx = history.len();
-        let redraw = |out: &mut std::io::Stdout, chars: &[char], cursor: usize| -> Result<()> {
-            let line: String = chars.iter().collect();
-            let display = render_value(&line);
-            let ghost = ghost_suffix(&line, cursor, chars.len(), commands);
-            write!(out, "\r\x1b[2K{prompt}{display}")?;
-            if !ghost.is_empty() {
-                write!(out, "{MUTED}{ghost}{RESET}")?;
-            }
-            // Park the cursor at the logical position: step back past the ghost
-            // (if shown) and any text to the right of the cursor.
-            let back = ghost.chars().count() + chars.len().saturating_sub(cursor);
-            if back > 0 {
-                write!(out, "\x1b[{back}D")?;
-            }
+        // Completion-menu state: which row is selected, and whether the menu was
+        // dismissed (Esc) until the next edit.
+        let mut sel = 0usize;
+        let mut dismissed = false;
+
+        let redraw = |out: &mut std::io::Stdout,
+                      chars: &[char],
+                      cursor: usize,
+                      sel: usize,
+                      dismissed: bool|
+         -> Result<()> {
+            let s = render_input(
+                prompt,
+                prompt_cols,
+                chars,
+                cursor,
+                commands,
+                sel,
+                dismissed,
+                term_cols,
+            );
+            write!(out, "{s}")?;
             out.flush()?;
             Ok(())
         };
+        // Number of completion matches for the current edit state (0 = no menu).
+        let match_count = |chars: &[char], cursor: usize, dismissed: bool| -> usize {
+            let line: String = chars.iter().collect();
+            completion_matches(&line, cursor, chars.len(), commands, dismissed).len()
+        };
+        // Name of the currently selected completion, if the menu is open.
+        let selected_name =
+            |chars: &[char], cursor: usize, sel: usize, dismissed: bool| -> Option<String> {
+                let line: String = chars.iter().collect();
+                let m = completion_matches(&line, cursor, chars.len(), commands, dismissed);
+                if m.is_empty() {
+                    None
+                } else {
+                    Some(m[sel.min(m.len() - 1)].0.clone())
+                }
+            };
+
         loop {
             if let Event::Key(KeyEvent {
                 code,
@@ -178,6 +339,8 @@ fn read_plain(prompt: &str, history: &[String], commands: &[String]) -> Result<S
                 }
                 match code {
                     KeyCode::Enter => {
+                        // Clear any open menu, then drop to the next line.
+                        redraw(&mut out, &chars, cursor, sel, true)?;
                         writeln!(out)?;
                         out.flush()?;
                         return Ok(chars.iter().collect());
@@ -185,62 +348,82 @@ fn read_plain(prompt: &str, history: &[String], commands: &[String]) -> Result<S
                     KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
                         chars.insert(cursor, '\n');
                         cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
-                    }
-                    KeyCode::Backspace if cursor > 0 => {
-                        chars.remove(cursor - 1);
-                        cursor -= 1;
-                        redraw(&mut out, &chars, cursor)?;
+                        sel = 0;
+                        dismissed = false;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        redraw(&mut out, &chars, cursor, sel, true)?;
                         writeln!(out)?;
                         out.flush()?;
                         crossterm::terminal::disable_raw_mode().ok();
                         std::process::exit(0);
                     }
+                    KeyCode::Esc => {
+                        dismissed = true;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                    }
+                    KeyCode::Backspace if cursor > 0 => {
+                        chars.remove(cursor - 1);
+                        cursor -= 1;
+                        sel = 0;
+                        dismissed = false;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                    }
                     KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => {
                         cursor = prev_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor)?;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => {
                         cursor = next_word(&chars, cursor);
-                        redraw(&mut out, &chars, cursor)?;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Left if cursor > 0 => {
                         cursor -= 1;
-                        redraw(&mut out, &chars, cursor)?;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Right if cursor < chars.len() => {
                         cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
-                    // Tab accepts the ghost completion and adds a trailing space
-                    // (ready to type args or submit). Right at end-of-line
-                    // accepts it without the space.
+                    // Tab accepts the selected completion (+ trailing space, ready
+                    // for args). Right at end-of-line accepts it without the space.
                     KeyCode::Tab => {
-                        let line: String = chars.iter().collect();
-                        let g = ghost_suffix(&line, cursor, chars.len(), commands);
-                        if !g.is_empty() {
-                            chars.extend(g.chars());
+                        if let Some(name) = selected_name(&chars, cursor, sel, dismissed) {
+                            chars = name.chars().collect();
                             chars.push(' ');
                             cursor = chars.len();
-                            redraw(&mut out, &chars, cursor)?;
+                            sel = 0;
+                            dismissed = false;
+                            redraw(&mut out, &chars, cursor, sel, dismissed)?;
                         }
                     }
                     KeyCode::Right => {
-                        let line: String = chars.iter().collect();
-                        let g = ghost_suffix(&line, cursor, chars.len(), commands);
-                        if !g.is_empty() {
-                            chars.extend(g.chars());
+                        if let Some(name) = selected_name(&chars, cursor, sel, dismissed) {
+                            chars = name.chars().collect();
                             cursor = chars.len();
-                            redraw(&mut out, &chars, cursor)?;
+                            sel = 0;
+                            dismissed = false;
+                            redraw(&mut out, &chars, cursor, sel, dismissed)?;
                         }
+                    }
+                    // Up/Down navigate the menu when it's open, else the history.
+                    KeyCode::Up if match_count(&chars, cursor, dismissed) > 0 => {
+                        sel = sel.saturating_sub(1);
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
+                    }
+                    KeyCode::Down if match_count(&chars, cursor, dismissed) > 0 => {
+                        let n = match_count(&chars, cursor, dismissed);
+                        sel = (sel + 1).min(n - 1);
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Up if !history.is_empty() => {
                         history_idx = history_idx.saturating_sub(1);
                         chars = history[history_idx].chars().collect();
                         cursor = chars.len();
-                        redraw(&mut out, &chars, cursor)?;
+                        sel = 0;
+                        dismissed = false;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Down if !history.is_empty() => {
                         if history_idx + 1 < history.len() {
@@ -251,12 +434,16 @@ fn read_plain(prompt: &str, history: &[String], commands: &[String]) -> Result<S
                             chars.clear();
                         }
                         cursor = chars.len();
-                        redraw(&mut out, &chars, cursor)?;
+                        sel = 0;
+                        dismissed = false;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     KeyCode::Char(c) => {
                         chars.insert(cursor, c);
                         cursor += 1;
-                        redraw(&mut out, &chars, cursor)?;
+                        sel = 0;
+                        dismissed = false;
+                        redraw(&mut out, &chars, cursor, sel, dismissed)?;
                     }
                     _ => {}
                 }
@@ -283,28 +470,63 @@ mod tests {
         assert_eq!(history.entries(), &["two".to_string(), "three".to_string()]);
     }
 
-    #[test]
-    fn ghost_completes_first_matching_command() {
-        let cmds = vec![
-            "/compact".to_string(),
-            "/compare".to_string(),
-            "/config".to_string(),
-        ];
-        // "/co" → first match "/compact" → ghost "mpact"
-        assert_eq!(ghost_suffix("/co", 3, 3, &cmds), "mpact");
-        // exact-but-shorter unique-ish prefix
-        assert_eq!(ghost_suffix("/config", 7, 7, &cmds), "");
+    fn cmds() -> Vec<(String, String)> {
+        vec![
+            ("/compact".into(), "compact".into()),
+            ("/compare".into(), "compare".into()),
+            ("/config".into(), "config".into()),
+            ("/help".into(), "help".into()),
+        ]
     }
 
     #[test]
-    fn ghost_only_for_slash_at_end_of_line() {
-        let cmds = vec!["/help".to_string()];
+    fn matches_only_for_slash_prefix_at_end() {
+        let c = cmds();
+        assert_eq!(completion_matches("/co", 3, 3, &c, false).len(), 3);
         // not a slash command
-        assert_eq!(ghost_suffix("hel", 3, 3, &cmds), "");
-        // cursor not at end → no ghost (don't fight mid-line editing)
-        assert_eq!(ghost_suffix("/he", 1, 3, &cmds), "");
-        // no matching command
-        assert_eq!(ghost_suffix("/zzz", 4, 4, &cmds), "");
+        assert!(completion_matches("co", 2, 2, &c, false).is_empty());
+        // cursor not at end → no menu (don't fight mid-line editing)
+        assert!(completion_matches("/co", 1, 3, &c, false).is_empty());
+        // dismissed (Esc)
+        assert!(completion_matches("/co", 3, 3, &c, true).is_empty());
+        // exact unique match → already complete, no menu
+        assert!(completion_matches("/help", 5, 5, &c, false).is_empty());
+        // no matches
+        assert!(completion_matches("/zzz", 4, 4, &c, false).is_empty());
+    }
+
+    #[test]
+    fn render_shows_selected_ghost_and_menu_rows() {
+        let chars: Vec<char> = "/co".chars().collect();
+        let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 1, false, 80);
+        // Selected row is index 1 (/compare) → ghost is its remainder "mpare".
+        assert!(out.contains("mpare"), "ghost of selected match: {out:?}");
+        // All three matches appear as menu rows.
+        for name in ["/compact", "/compare", "/config"] {
+            assert!(out.contains(name), "menu row {name} missing: {out:?}");
+        }
+        // The selected row is marked with the accent pointer.
+        assert!(out.contains("▸"), "selected marker missing: {out:?}");
+        // It clears below and restores the cursor up onto the input line.
+        assert!(out.starts_with("\r\x1b[0J"));
+        assert!(
+            out.contains("\x1b[3A"),
+            "cursor moves back up 3 rows: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_no_menu_when_no_matches() {
+        let chars: Vec<char> = "hello".chars().collect();
+        let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 0, false, 80);
+        assert!(!out.contains('▸'));
+        assert!(!out.contains("\r\n"));
+    }
+
+    #[test]
+    fn visible_width_ignores_ansi() {
+        assert_eq!(visible_width("  \x1b[96m❯\x1b[0m "), 4);
+        assert_eq!(visible_width("abc"), 3);
     }
 
     #[test]
