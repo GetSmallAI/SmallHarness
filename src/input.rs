@@ -5,6 +5,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use crate::theme::{MUTED, RESET};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
     value: String,
@@ -83,15 +85,38 @@ impl InputHistory {
 }
 
 pub async fn plain_read_line(prompt: String) -> Result<String> {
-    plain_read_line_with_history(prompt, Vec::new()).await
+    plain_read_line_with_history(prompt, Vec::new(), Vec::new()).await
 }
 
-pub async fn plain_read_line_with_history(prompt: String, history: Vec<String>) -> Result<String> {
-    tokio::task::spawn_blocking(move || read_plain(&prompt, &history)).await?
+/// `commands` is the list of slash-commands offered as ghost-text completions
+/// (empty for sub-prompts that don't want completion).
+pub async fn plain_read_line_with_history(
+    prompt: String,
+    history: Vec<String>,
+    commands: Vec<String>,
+) -> Result<String> {
+    tokio::task::spawn_blocking(move || read_plain(&prompt, &history, &commands)).await?
 }
 
 fn render_value(value: &str) -> String {
     value.replace('\n', "⏎")
+}
+
+/// The dim "ghost" completion shown after the cursor: the remainder of the
+/// first slash-command the typed text is a prefix of. Empty unless the cursor
+/// is at the end of a line that starts with `/`.
+fn ghost_suffix(line: &str, cursor: usize, len: usize, commands: &[String]) -> String {
+    if cursor != len || !line.starts_with('/') {
+        return String::new();
+    }
+    for c in commands {
+        if let Some(rest) = c.strip_prefix(line) {
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn prev_word(chars: &[char], mut cursor: usize) -> usize {
@@ -114,7 +139,7 @@ fn next_word(chars: &[char], mut cursor: usize) -> usize {
     cursor
 }
 
-fn read_plain(prompt: &str, history: &[String]) -> Result<String> {
+fn read_plain(prompt: &str, history: &[String], commands: &[String]) -> Result<String> {
     let mut out = std::io::stdout();
     write!(out, "{prompt}")?;
     out.flush()?;
@@ -126,10 +151,16 @@ fn read_plain(prompt: &str, history: &[String]) -> Result<String> {
         let redraw = |out: &mut std::io::Stdout, chars: &[char], cursor: usize| -> Result<()> {
             let line: String = chars.iter().collect();
             let display = render_value(&line);
+            let ghost = ghost_suffix(&line, cursor, chars.len(), commands);
             write!(out, "\r\x1b[2K{prompt}{display}")?;
-            let right = chars.len().saturating_sub(cursor);
-            if right > 0 {
-                write!(out, "\x1b[{right}D")?;
+            if !ghost.is_empty() {
+                write!(out, "{MUTED}{ghost}{RESET}")?;
+            }
+            // Park the cursor at the logical position: step back past the ghost
+            // (if shown) and any text to the right of the cursor.
+            let back = ghost.chars().count() + chars.len().saturating_sub(cursor);
+            if back > 0 {
+                write!(out, "\x1b[{back}D")?;
             }
             out.flush()?;
             Ok(())
@@ -183,6 +214,28 @@ fn read_plain(prompt: &str, history: &[String]) -> Result<String> {
                         cursor += 1;
                         redraw(&mut out, &chars, cursor)?;
                     }
+                    // Tab accepts the ghost completion and adds a trailing space
+                    // (ready to type args or submit). Right at end-of-line
+                    // accepts it without the space.
+                    KeyCode::Tab => {
+                        let line: String = chars.iter().collect();
+                        let g = ghost_suffix(&line, cursor, chars.len(), commands);
+                        if !g.is_empty() {
+                            chars.extend(g.chars());
+                            chars.push(' ');
+                            cursor = chars.len();
+                            redraw(&mut out, &chars, cursor)?;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let line: String = chars.iter().collect();
+                        let g = ghost_suffix(&line, cursor, chars.len(), commands);
+                        if !g.is_empty() {
+                            chars.extend(g.chars());
+                            cursor = chars.len();
+                            redraw(&mut out, &chars, cursor)?;
+                        }
+                    }
                     KeyCode::Up if !history.is_empty() => {
                         history_idx = history_idx.saturating_sub(1);
                         chars = history[history_idx].chars().collect();
@@ -228,6 +281,30 @@ mod tests {
         history.push("three").unwrap();
         let history = InputHistory::load(path.display().to_string(), 2, true);
         assert_eq!(history.entries(), &["two".to_string(), "three".to_string()]);
+    }
+
+    #[test]
+    fn ghost_completes_first_matching_command() {
+        let cmds = vec![
+            "/compact".to_string(),
+            "/compare".to_string(),
+            "/config".to_string(),
+        ];
+        // "/co" → first match "/compact" → ghost "mpact"
+        assert_eq!(ghost_suffix("/co", 3, 3, &cmds), "mpact");
+        // exact-but-shorter unique-ish prefix
+        assert_eq!(ghost_suffix("/config", 7, 7, &cmds), "");
+    }
+
+    #[test]
+    fn ghost_only_for_slash_at_end_of_line() {
+        let cmds = vec!["/help".to_string()];
+        // not a slash command
+        assert_eq!(ghost_suffix("hel", 3, 3, &cmds), "");
+        // cursor not at end → no ghost (don't fight mid-line editing)
+        assert_eq!(ghost_suffix("/he", 1, 3, &cmds), "");
+        // no matching command
+        assert_eq!(ghost_suffix("/zzz", 4, 4, &cmds), "");
     }
 
     #[test]

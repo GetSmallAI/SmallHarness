@@ -452,6 +452,8 @@ async fn main() -> anyhow::Result<()> {
         config.history.max_entries,
         config.history.enabled,
     );
+    // Slash-command names for inline tab-completion as the user types.
+    let command_names = crate::commands::command_names();
     let session_path = new_session_path(&config.session_dir);
     let session_dir = config.session_dir.clone();
     let paths_config = config.paths.clone();
@@ -562,6 +564,7 @@ async fn main() -> anyhow::Result<()> {
         let input = plain_read_line_with_history(
             format!("{}{}❯{} ", crate::theme::PAD, crate::theme::ACCENT, RESET),
             input_history.entries().to_vec(),
+            command_names.clone(),
         )
         .await?;
         let trimmed = input.trim();

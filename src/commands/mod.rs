@@ -254,6 +254,18 @@ fn redirect_to_doctor(old: &str, sub: &str) {
     println!("  {DIM}{old} is now {CYAN}/doctor {sub}{RESET}{DIM}. Run that instead.{RESET}");
 }
 
+/// All slash commands offered for tab-completion, sorted for predictable
+/// ghost suggestions. Includes `/exit` and `/quit`, which are handled in the
+/// input loop rather than via `COMMANDS`.
+pub fn command_names() -> Vec<String> {
+    let mut names: Vec<String> = COMMANDS.iter().map(|(n, _)| (*n).to_string()).collect();
+    names.push("/exit".to_string());
+    names.push("/quit".to_string());
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn help() {
     for (n, d) in COMMANDS {
         println!("  {CYAN}{:<12}{RESET} {DIM}{}{RESET}", n, d);
