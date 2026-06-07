@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::agent::to_openai_tools;
 use crate::agent_eval::{builtin_fixtures, render_agent_eval_markdown, run_agent_eval};
 use crate::app_state::AppState;
+use crate::auto_loop::{parse_auto_args, run_auto_loop};
 use crate::backends::{backend, default_model, validate, BackendDescriptor, BackendName};
 use crate::batch_operations::{
     execute_batch_operations, find_cross_file_references, find_related_files,
@@ -201,6 +202,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/iterate",
         "Generate→evaluate→improve loop on a goal (rubric-scored, --max, --threshold, --yolo)",
     ),
+    (
+        "/auto",
+        "Autonomous overnight run: chains /iterate + auto /reset toward a goal/spec with budget/deadline guardrails",
+    ),
 ];
 
 fn fmt_tokens(n: u32) -> String {
@@ -259,6 +264,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/play" => cmd_play(&args, state).await?,
         "/fix" => cmd_fix(&args, state).await?,
         "/iterate" => cmd_iterate(&args, state).await?,
+        "/auto" => cmd_auto(&args, state).await?,
         // These model-tuning commands were folded into `/doctor` subcommands.
         "/bench" => redirect_to_doctor("/bench", "bench"),
         "/capabilities" => redirect_to_doctor("/capabilities", "models"),
@@ -1111,6 +1117,17 @@ async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
         return Ok(());
     }
 
+    perform_reset(state, args.dry_run).await
+}
+
+/// The shared `/reset` recipe: draft a continuation artifact from the live
+/// conversation, write it to `.small-harness/continue.md`, then (unless
+/// `dry_run`) clear the session and seed a fresh one with only that artifact.
+///
+/// Extracted so `/auto` can drive the same reset between rounds. Callers are
+/// responsible for the cloud-handoff refusal and the "nothing to reset" guard
+/// before invoking this — it assumes there is a conversation worth handing off.
+pub(crate) async fn perform_reset(state: &mut AppState, dry_run: bool) -> Result<()> {
     println!(
         "  {DIM}drafting continuation with {} · {}{RESET}",
         state.config.backend.as_str(),
@@ -1149,6 +1166,8 @@ async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
     })
     .await;
 
+    // Build the artifact fully before any teardown — it borrows state.messages,
+    // which cmd_new clears.
     let body = match result {
         Ok(_) if !draft.trim().is_empty() => ensure_continuation_sections(&draft),
         Ok(_) => render_fallback_continuation(&state.messages, Some("empty model response")),
@@ -1177,7 +1196,7 @@ async fn cmd_reset(args: &str, state: &mut AppState) -> Result<()> {
         out_path.display()
     );
 
-    if args.dry_run {
+    if dry_run {
         println!("  {DIM}dry run — conversation left intact.{RESET}");
         return Ok(());
     }

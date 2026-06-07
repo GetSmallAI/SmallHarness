@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.13-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.0-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -293,6 +293,7 @@ this exact call`. The session cache resets on `/new`.
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop
 /iterate <goal>                  generate→evaluate→improve loop (rubric-scored)
+/auto <goal> | --spec            autonomous overnight run (iterate + auto-reset, budget/deadline)
 /batch / /refactor               coordinated multi-file edits
 /play fix-failing-test           bundled demo in an isolated sandbox
 ```
@@ -414,6 +415,46 @@ better over long runs. `/reset --dry-run` writes the artifact without clearing;
 cloud backends require `--cloud`, since drafting the note sends the
 conversation to the model.
 
+### Run it overnight with `/auto`
+
+`/auto` is the unattended version of the loop above: it runs `/iterate`'s
+generate→evaluate round repeatedly and, when the context window fills, **fires
+`/reset` automatically** — drafting a handoff and continuing in a fresh session
+— so a run can go for hours without blowing its budget. The goal and the latest
+feedback carry across each reset.
+
+```
+/auto "add retry logic to web_fetch" --budget 2.00 --deadline 6h
+/auto --spec --max 20 --yolo        # drive the spec.md from /plan to done
+```
+
+Give it an inline goal, or `--spec` to read the goal and **Done Criteria** from
+`.small-harness/spec.md` (written by `/plan`). With criteria present, each round
+also checks them against the working-tree diff, and "done" means the rubric
+threshold *and* every criterion is met — a lightweight spec-validator folded in.
+
+| Flag | Meaning |
+|------|---------|
+| `--spec` | Read goal + Done Criteria from `.small-harness/spec.md` |
+| `--max N` | Round ceiling (default 12, hard cap 40) |
+| `--threshold X` | Per-round rubric pass bar (default `rubric.passThreshold`) |
+| `--budget $` | Stop after this much **generator** spend |
+| `--deadline 6h` | Wall-clock cap (`h`/`m`/`s`) |
+| `--reset-at 0.75` | Context-fill ratio that triggers an auto-reset (0.50–0.95) |
+| `--yolo` | Auto-approve mutations for the whole run |
+| `--cloud` | Allow sending workspace context to a cloud backend |
+
+The run is **always finitely bounded** (a `--max` ceiling applies even with no
+other flag) and stops early on a stall — no score gain and no diff change for
+three rounds. However it ends — goal met, budget/deadline/rounds exhausted,
+stall, error, or Ctrl-C — it leaves a morning report at
+`.small-harness/auto-report.md` with the verdict, per-round scores, the Done
+Criteria checklist, cost, elapsed time, and reset count. Same guards as
+`/iterate`: it runs on a local backend unless you pass `--cloud`, needs
+`rubric.enabled`, and won't run inside a `/play` session. Defaults live in the
+`auto` config block. `/undo` reaches back only to the last reset boundary, so
+keep `checkpoints.enabled` on for an unattended run.
+
 ### Project-specific system prompt
 
 Drop a markdown file at `.small-harness/prompt.md` in your repo and Small
@@ -534,6 +575,7 @@ root. Common shape:
   "checkpoints": { "enabled": true, "maxTurns": 10 },
   "rubric": { "enabled": true, "passThreshold": 7.0, "allowCloud": false, "liveVerify": false },
   "iterate": { "maxIters": 6, "evaluatorModel": null },
+  "auto": { "maxRounds": 12, "budgetUsd": null, "resetRatio": 0.75, "deadline": null },
   "paths": {
     "enabled": true,
     "maxPaths": 5,

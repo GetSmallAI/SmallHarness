@@ -3,6 +3,7 @@ mod agent_eval;
 mod app_state;
 mod approval;
 mod auth;
+mod auto_loop;
 mod backends;
 mod banner;
 mod batch_operations;

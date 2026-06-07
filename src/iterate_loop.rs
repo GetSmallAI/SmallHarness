@@ -38,7 +38,7 @@ pub struct IterateOptions {
 
 /// Swap into a full-toolkit working mode for the duration of the loop (like
 /// `/fix`), returning a snapshot to restore afterward.
-fn apply_iterate_mode(state: &mut AppState) -> FixRestoreSnapshot {
+pub(crate) fn apply_iterate_mode(state: &mut AppState) -> FixRestoreSnapshot {
     let restore = FixRestoreSnapshot {
         config: state.config.clone(),
         checkpoints_enabled: state.checkpoints_enabled,
@@ -51,12 +51,12 @@ fn apply_iterate_mode(state: &mut AppState) -> FixRestoreSnapshot {
     restore
 }
 
-fn restore_iterate_mode(state: &mut AppState, restore: FixRestoreSnapshot) {
+pub(crate) fn restore_iterate_mode(state: &mut AppState, restore: FixRestoreSnapshot) {
     state.config = restore.config;
     state.checkpoints_enabled = restore.checkpoints_enabled;
 }
 
-fn build_iterate_prompt(iter: usize, goal: &str, feedback: Option<&str>) -> String {
+pub(crate) fn build_iterate_prompt(iter: usize, goal: &str, feedback: Option<&str>) -> String {
     match feedback {
         None => format!("Work toward this goal, writing the changes to disk:\n\n{goal}"),
         Some(fb) => format!(
@@ -68,7 +68,7 @@ fn build_iterate_prompt(iter: usize, goal: &str, feedback: Option<&str>) -> Stri
     }
 }
 
-fn render_feedback(verdict: &EvalVerdict) -> String {
+pub(crate) fn render_feedback(verdict: &EvalVerdict) -> String {
     let mut out = String::new();
     if !verdict.verdict.is_empty() {
         out.push_str(&verdict.verdict);
@@ -86,7 +86,7 @@ fn render_feedback(verdict: &EvalVerdict) -> String {
 }
 
 /// Collect the current working-tree diff as the critic's evaluation context.
-fn collect_diff_context(workspace_root: &str) -> String {
+pub(crate) fn collect_diff_context(workspace_root: &str) -> String {
     match collect_shipcheck(workspace_root).and_then(|snap| collect_handoff_context(&snap)) {
         Ok(Some(ctx)) => ctx.content,
         Ok(None) => "No changes detected in the working tree.".to_string(),

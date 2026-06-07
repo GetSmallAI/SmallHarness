@@ -345,6 +345,48 @@ impl Default for IterateConfig {
     }
 }
 
+/// Configures the `/auto` autonomous overnight run. `/auto` chains the
+/// `/iterate` loop with automatic `/reset` so a multi-hour run never blows its
+/// context budget; these are the default guardrails, overridable per-run by CLI
+/// flags. The per-round pass bar is the rubric's `passThreshold`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoConfig {
+    /// Round ceiling when no `--max`/`--budget`/`--deadline` is given. There is
+    /// always a finite bound; the loop additionally hard-clamps to its own
+    /// runaway ceiling regardless of this value.
+    #[serde(rename = "maxRounds", default = "default_auto_max_rounds")]
+    pub max_rounds: usize,
+    /// Optional default dollar cap on generator spend (`--budget` overrides).
+    #[serde(rename = "budgetUsd", default)]
+    pub budget_usd: Option<f64>,
+    /// Context-fill ratio (0.50..=0.95) at which an automatic `/reset` fires.
+    #[serde(rename = "resetRatio", default = "default_auto_reset_ratio")]
+    pub reset_ratio: f64,
+    /// Optional default wall-clock deadline (e.g. "6h", "30m"); `--deadline`
+    /// overrides. Parsed at run time so an invalid value fails loudly there.
+    #[serde(rename = "deadline", default)]
+    pub deadline: Option<String>,
+}
+
+fn default_auto_max_rounds() -> usize {
+    12
+}
+
+fn default_auto_reset_ratio() -> f64 {
+    0.75
+}
+
+impl Default for AutoConfig {
+    fn default() -> Self {
+        Self {
+            max_rounds: default_auto_max_rounds(),
+            budget_usd: None,
+            reset_ratio: default_auto_reset_ratio(),
+            deadline: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathsConfig {
     #[serde(default = "default_true")]
@@ -509,6 +551,7 @@ pub struct AgentConfig {
     pub fix: FixConfig,
     pub rubric: RubricConfig,
     pub iterate: IterateConfig,
+    pub auto: AutoConfig,
     pub paths: PathsConfig,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
@@ -585,6 +628,7 @@ impl Default for AgentConfig {
             fix: FixConfig::default(),
             rubric: RubricConfig::default(),
             iterate: IterateConfig::default(),
+            auto: AutoConfig::default(),
             paths: PathsConfig::default(),
             mcp_servers: BTreeMap::new(),
         }
@@ -623,6 +667,7 @@ struct FileConfig {
     fix: Option<FixConfig>,
     rubric: Option<RubricConfig>,
     iterate: Option<IterateConfig>,
+    auto: Option<AutoConfig>,
     paths: Option<PathsConfig>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
@@ -858,6 +903,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(i) = file.iterate {
                     config.iterate = i;
+                }
+                if let Some(a) = file.auto {
+                    config.auto = a;
                 }
                 if let Some(p) = file.paths {
                     config.paths = p;

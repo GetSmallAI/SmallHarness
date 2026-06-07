@@ -115,6 +115,25 @@ pub(super) async fn cmd_iterate(args: &str, state: &mut AppState) -> Result<()> 
     run_iterate_loop(state, opts).await
 }
 
+pub(super) async fn cmd_auto(args: &str, state: &mut AppState) -> Result<()> {
+    let mut opts = parse_auto_args(
+        args,
+        state.config.auto.max_rounds,
+        state.config.rubric.pass_threshold,
+        state.config.auto.reset_ratio,
+    )?;
+    // CLI flags win; fall back to the AutoConfig defaults otherwise.
+    if opts.budget_usd.is_none() {
+        opts.budget_usd = state.config.auto.budget_usd;
+    }
+    if opts.deadline.is_none() {
+        if let Some(d) = &state.config.auto.deadline {
+            opts.deadline = Some(crate::auto_loop::parse_duration(d)?);
+        }
+    }
+    run_auto_loop(state, opts).await
+}
+
 pub(super) async fn cmd_eval(args: &str, state: &AppState) -> Result<()> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.first() == Some(&"agent") {

@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-07
+
+### Added
+
+- **`/auto` — autonomous overnight run.** Chains the `/iterate` loop with
+  automatic `/reset` so a multi-hour, unattended run drives a goal to "done"
+  without blowing its context budget. Each round the generator works toward the
+  goal and the `critique` evaluator scores the diff; when the context window
+  fills past a ratio (`--reset-at`, default 0.75) it drafts a continuation
+  handoff and starts a fresh session, carrying the goal and latest feedback
+  forward. Takes an inline goal or `--spec` (reads `.small-harness/spec.md` from
+  `/plan`, and checks its Done Criteria against the diff each round). Always
+  finitely bounded — `--max N` (default 12, hard cap 40), an optional `--budget`
+  on generator spend, and an optional `--deadline 6h` — and stops early on a
+  stall (no score gain and no diff change for 3 rounds). Leaves a morning report
+  at `.small-harness/auto-report.md` (verdict, per-round scores, criteria,
+  cost, elapsed, resets) on every exit path, including Ctrl-C. Same refusals as
+  `/iterate` (runs on a local backend unless `--cloud`; needs `rubric.enabled`;
+  not during `/play`). Defaults configurable via the `auto` block
+  (`maxRounds`, `budgetUsd`, `resetRatio`, `deadline`).
+
+## [0.4.14] - 2026-06-06
+
+### Added
+
+- **`/plan` — spec expansion.** Expands a one- or two-sentence intent into an
+  ambitious spec (goal, user outcomes, scope, done criteria, open questions)
+  written to `.small-harness/spec.md`. Stays at the level of *what* and *why*,
+  not implementation, so an early spec doesn't lock in the wrong details.
+  `/plan show` prints it; `--export <path>` writes elsewhere.
+- **`critique` evaluator + grading rubric.** A separate, read-only critic agent
+  scores work 0–10 against a weighted rubric and returns actionable feedback.
+  The harness — not the model — computes the weighted total and pass/fail, so a
+  critic that over-rates can't pass weak work; the default rubric penalizes
+  generic "AI slop". Override the criteria with a `.small-harness/rubric.md`
+  using `## Name (weight: N)` sections. Configured via the `rubric` block; cloud
+  backends require `rubric.allowCloud` before any workspace context is sent.
+- **`/iterate` — generate→evaluate→improve loop.** Runs the generator, grades
+  the diff with the `critique` evaluator, and feeds the feedback back —
+  refining or pivoting — until the score clears the threshold or it runs out of
+  rounds (`--max N`, default 6, capped at 15; `--threshold X`). Set
+  `iterate.evaluatorModel` to grade with a different model than the generator.
+- **Live verification.** With `rubric.liveVerify`, the critic runs the project's
+  test suite — via a fixed-surface `verify` tool (no arbitrary shell,
+  timeout-bounded) — before scoring functionality, instead of reading the code
+  alone.
+- **`/reset` — context reset with a handoff artifact.** Writes a structured
+  continuation note (done / in progress / key decisions / next steps / key
+  files) to `.small-harness/continue.md`, then starts a fresh session seeded
+  with only that artifact — "reset over compaction" for coherence on long
+  tasks. `/reset --dry-run` writes without clearing; cloud backends require
+  `--cloud`.
+
 ## [0.4.13] - 2026-06-05
 
 ### Added
