@@ -206,9 +206,7 @@ fn render_input(
         .max()
         .unwrap_or(8)
         .min(18);
-    let start = if matches.len() <= MENU_MAX_ROWS {
-        0
-    } else if sel < MENU_MAX_ROWS {
+    let start = if matches.len() <= MENU_MAX_ROWS || sel < MENU_MAX_ROWS {
         0
     } else {
         // Keep the highlighted row inside the visible completion window as the

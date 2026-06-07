@@ -1759,8 +1759,8 @@ fn print_auth_status() {
         );
     } else {
         println!(
-            "  {:<12} {:<22}  {DIM}{}{RESET}",
-            "openai-codex", "(not logged in)", "/login openai-codex"
+            "  {:<12} {:<22}  {DIM}/login openai-codex{RESET}",
+            "openai-codex", "(not logged in)"
         );
     }
     if let Some(path) = auth_file_path() {

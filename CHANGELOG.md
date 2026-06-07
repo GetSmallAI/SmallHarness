@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-07
+
+### Added
+
+- **`openai-codex` backend — sign in with ChatGPT/Codex.** A new backend that
+  authenticates with a ChatGPT/Codex subscription via OAuth (Authorization Code
+  + PKCE, with a device-code fallback) instead of an API key — run
+  `/login openai-codex`. Access and refresh tokens are stored in the `0600`
+  `auth.json` beside API keys, refreshed automatically on expiry, and never
+  injected into environment variables. Requests route through a Codex Responses
+  adapter; `OPENAI_CODEX_BASE_URL` overrides the endpoint. Existing
+  `{"provider":"sk-..."}` auth files keep working unchanged. (Thanks
+  @BlockedPath.)
+
+### Security
+
+- The Codex OAuth PKCE verifier and CSRF `state` nonce are generated from the OS
+  CSPRNG (`getrandom`) on every platform, replacing a `/dev/urandom`-or-hash
+  fallback that was predictable on systems without `/dev/urandom` (notably
+  Windows).
+
 ## [0.5.0] - 2026-06-07
 
 ### Added
