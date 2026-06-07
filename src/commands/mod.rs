@@ -131,8 +131,13 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/export", "Export a session to markdown or json"),
     (
         "/auth",
-        "Manage API keys for cloud providers (list, set <provider>, clear <provider>)",
+        "Manage API keys and OAuth credentials (list, set, clear, login)",
     ),
+    (
+        "/login",
+        "Browser/device-code login for subscription providers (openai-codex)",
+    ),
+    ("/logout", "Clear an OAuth login (openai-codex)"),
     (
         "/image",
         "Attach an image to the next user prompt (vision-capable models only)",
@@ -147,7 +152,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter)",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex)",
     ),
     (
         "/model",
@@ -240,6 +245,8 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/resume" => cmd_resume(&args, state)?,
         "/export" => cmd_export(&args, state)?,
         "/auth" => cmd_auth(&args).await?,
+        "/login" => cmd_login(&args, state).await?,
+        "/logout" => cmd_logout(&args)?,
         "/image" => cmd_image(&args, state),
         "/reasoning" => cmd_reasoning(&args, state),
         "/verbose" => cmd_verbose(&args, state),
@@ -1593,6 +1600,10 @@ async fn cmd_auth(args: &str) -> Result<()> {
             }
             Ok(())
         }
+        "login" => {
+            let mut login_state = AppStateLoginOnly;
+            cmd_login(rest, &mut login_state).await
+        }
         "clear" => {
             if rest.is_empty() {
                 println!("  {DIM}usage: /auth clear <provider>{RESET}");
@@ -1615,11 +1626,101 @@ async fn cmd_auth(args: &str) -> Result<()> {
         }
         other => {
             println!(
-                "  {RED}✗{RESET} {DIM}unknown subcommand: {other} (try: list, set, clear){RESET}"
+                "  {RED}✗{RESET} {DIM}unknown subcommand: {other} (try: list, set, login, clear){RESET}"
             );
             Ok(())
         }
     }
+}
+
+struct AppStateLoginOnly;
+
+async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result<()> {
+    let provider = if args.trim().is_empty() {
+        "openai-codex"
+    } else {
+        args.trim()
+    };
+    if !matches!(provider, "openai-codex" | "codex" | "chatgpt") {
+        println!(
+            "  {RED}✗{RESET} {DIM}unknown login provider: {provider} (try: openai-codex){RESET}"
+        );
+        return Ok(());
+    }
+
+    println!("  {BOLD}ChatGPT / Codex login{RESET}");
+    println!(
+        "  {DIM}This uses your ChatGPT/Codex subscription OAuth token, not OPENAI_API_KEY.{RESET}"
+    );
+    println!("  {DIM}1) Browser login (default){RESET}");
+    println!("  {DIM}2) Device-code login (headless/SSH){RESET}");
+    let pick = plain_read_line(format!("  {DIM}Select [1]: {RESET}")).await?;
+    let result = if pick.trim() == "2" || pick.trim().eq_ignore_ascii_case("device") {
+        crate::codex_oauth::login_and_save_device_code(state.http()).await
+    } else {
+        crate::codex_oauth::login_and_save_browser(state.http()).await
+    };
+    match result {
+        Ok(path) => {
+            println!(
+                "  {GREEN}✓{RESET} {DIM}logged in to openai-codex; saved to {}{RESET}",
+                path.display()
+            );
+            state.after_login()?;
+        }
+        Err(e) => println!("  {RED}✗{RESET} {DIM}login failed: {e}{RESET}"),
+    }
+    Ok(())
+}
+
+trait LoginState {
+    fn http(&self) -> &reqwest::Client;
+    fn after_login(&mut self) -> Result<()>;
+}
+
+impl LoginState for AppState {
+    fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+    fn after_login(&mut self) -> Result<()> {
+        if matches!(self.config.backend, BackendName::OpenAiCodex) {
+            self.rebuild_client()?;
+            self.resolve_model();
+        }
+        Ok(())
+    }
+}
+
+impl LoginState for AppStateLoginOnly {
+    fn http(&self) -> &reqwest::Client {
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        CLIENT.get_or_init(crate::openai::build_http_client)
+    }
+    fn after_login(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn cmd_logout(args: &str) -> Result<()> {
+    let provider = if args.trim().is_empty() {
+        "openai-codex"
+    } else {
+        args.trim()
+    };
+    if !matches!(provider, "openai-codex" | "codex" | "chatgpt") {
+        println!(
+            "  {RED}✗{RESET} {DIM}unknown logout provider: {provider} (try: openai-codex){RESET}"
+        );
+        return Ok(());
+    }
+    let mut store = crate::auth::AuthStore::load();
+    if store.clear("openai-codex") {
+        store.save()?;
+        println!("  {GREEN}✓{RESET} {DIM}cleared openai-codex login{RESET}");
+    } else {
+        println!("  {DIM}no stored openai-codex login{RESET}");
+    }
+    Ok(())
 }
 
 fn print_auth_status() {
@@ -1636,6 +1737,31 @@ fn print_auth_status() {
             ("(not set)".into(), "—".into())
         };
         println!("  {:<12} {:<22}  {DIM}{}{RESET}", provider, display, source);
+    }
+    if let Some(oauth) = store.get_oauth("openai-codex") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let status = if oauth.expires > now + 60 {
+            "oauth logged in"
+        } else {
+            "oauth refresh needed"
+        };
+        let source = oauth
+            .account_id
+            .as_ref()
+            .map(|id| format!("auth file · account {id}"))
+            .unwrap_or_else(|| "auth file".into());
+        println!(
+            "  {:<12} {:<22}  {DIM}{}{RESET}",
+            "openai-codex", status, source
+        );
+    } else {
+        println!(
+            "  {:<12} {:<22}  {DIM}{}{RESET}",
+            "openai-codex", "(not logged in)", "/login openai-codex"
+        );
     }
     if let Some(path) = auth_file_path() {
         println!("  {DIM}file{RESET}     {}", path.display());
@@ -1789,10 +1915,24 @@ async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
         println!("  {DIM}Cancelled.{RESET}");
         return Ok(());
     };
-    if !chosen.is_local() && backend(chosen).api_key.is_empty() {
+    if matches!(chosen, BackendName::OpenAiCodex)
+        && crate::auth::AuthStore::load()
+            .get_oauth("openai-codex")
+            .is_none()
+    {
+        println!(
+            "  {RED}✗{RESET} {DIM}not logged in for openai-codex. Run /login openai-codex to sign in with ChatGPT.{RESET}"
+        );
+        return Ok(());
+    }
+    if !chosen.is_local()
+        && !matches!(chosen, BackendName::OpenAiCodex)
+        && backend(chosen).api_key.is_empty()
+    {
         let env_name = match chosen {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
             BackendName::OpenAi => "OPENAI_API_KEY",
+            BackendName::OpenAiCodex => "ChatGPT login",
             _ => "API key",
         };
         println!("  {RED}✗{RESET} {DIM}{env_name} not set in environment.{RESET}");
@@ -1813,7 +1953,19 @@ async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
 async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     use std::io::Write;
     if !args.is_empty() {
-        state.config.model_override = Some(args.to_string());
+        let model_override = if matches!(state.config.backend, BackendName::OpenAiCodex) {
+            let Some(canonical) = crate::codex_responses::canonical_codex_model(args) else {
+                println!(
+                    "  {RED}✗{RESET} {DIM}{args} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
+                    crate::codex_responses::codex_model_list().join(", ")
+                );
+                return Ok(());
+            };
+            canonical.to_string()
+        } else {
+            args.to_string()
+        };
+        state.config.model_override = Some(model_override);
         state.resolve_model();
         println!(
             "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",

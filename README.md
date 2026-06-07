@@ -120,6 +120,21 @@ Prefer not to put the key in your environment? Launch first, then run
 file under `~/.config/small-harness/`. Cost per turn and per session shows
 live on the status line.
 
+### Path A2 — ChatGPT / Codex subscription login
+
+If you want to use a ChatGPT/Codex subscription instead of OpenAI API billing,
+log in with OAuth inside the TUI:
+
+```text
+/login openai-codex
+/backend openai-codex
+```
+
+This is intentionally separate from `/auth set openai`: `openai` uses an
+`OPENAI_API_KEY` and the public OpenAI API, while `openai-codex` stores a
+refreshable ChatGPT OAuth token in `auth.json` and talks to the Codex Responses
+backend.
+
 ### Path B — Local model
 
 *Private, free, offline — runs entirely on your machine.*
@@ -204,11 +219,13 @@ A handful of moves worth knowing right away:
 | `llamacpp` | `http://localhost:8080/v1` | Direct GGUF serving (via `llama-server`) |
 | `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models |
 | `openai` | `https://api.openai.com/v1` | Direct provider access with your own key |
+| `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
 
 Switch at runtime with `/backend <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
-`OPENAI_BASE_URL`. Cloud backends require an API key (set via
-[`/auth`](#cost-and-credentials) or env var).
+`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`. API backends require an API key
+(set via [`/auth`](#cost-and-credentials) or env var); `openai-codex` requires
+`/login openai-codex`.
 
 ### Default model per backend
 
@@ -224,6 +241,7 @@ or `modelOverride` in your config.
 | `llamacpp` | `gpt-3.5-turbo` |
 | `openrouter` | `qwen/qwen-2.5-coder-32b-instruct` |
 | `openai` | `gpt-4o-mini` |
+| `openai-codex` | `gpt-5.5` |
 
 ### Recommend the right model for your box
 
@@ -303,7 +321,9 @@ this exact call`. The session cache resets on `/new`.
 /backend <name>        switch backend
 /model [id]            list / pick a model (shows context + cost when known)
 /tools auto|fixed|<…>  show or set the active tool pool
-/auth                  manage API keys (list, set, clear)
+/auth                  manage API keys and OAuth credentials
+/login openai-codex    sign in with ChatGPT/Codex subscription OAuth
+/logout openai-codex   clear the stored ChatGPT/Codex login
 /image <path>          attach an image to the next user turn
 /reasoning on|off      toggle the streaming reasoning panel
 /verbose on|off        show every tool call with its full args + result
@@ -333,19 +353,26 @@ Run `/help` in the harness for the full list with descriptions.
 
 ## Cost and credentials
 
-### Credentials with `/auth`
+### Credentials with `/auth` and `/login`
 
-Cloud backends authenticate with API keys. Paste them once and Small Harness
-stores them at `~/.config/small-harness/auth.json` (mode `0600`). Environment
-variables always win at lookup time, so CI and scripted users see no change
-in behavior.
+API-key cloud backends authenticate with API keys. Paste them once and Small
+Harness stores them at `~/.config/small-harness/auth.json` (mode `0600`).
+Environment variables always win at lookup time, so CI and scripted users see
+no change in behavior.
 
 ```text
 /auth                    show what's configured (keys are masked)
 /auth set openai         paste your OpenAI key, save to file + this session
 /auth set openrouter     paste your OpenRouter key
 /auth clear openai       remove from the file (env stays for this session)
+/login openai-codex      browser/device-code login with ChatGPT/Codex
+/logout openai-codex     remove the stored OAuth credential
 ```
+
+`openai-codex` is not an `OPENAI_API_KEY` replacement. It uses browser/device
+OAuth, stores `{access, refresh, expires, accountId}` in the same `auth.json`,
+refreshes the access token before use, and sends model traffic to the Codex
+Responses backend.
 
 ### Per-turn and session cost
 
@@ -527,12 +554,13 @@ Resolution order (later overrides earlier):
 ### Environment variables (the useful ones)
 
 ```bash
-BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai
+BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai|openai-codex
 AGENT_MODEL=qwen2.5-coder:14b                           # overrides the backend default model
 
 OPENAI_API_KEY=sk-...                                   # required for openai
 OPENROUTER_API_KEY=sk-or-...                            # required for openrouter / /compare
 OPENAI_BASE_URL=https://api.openai.com/v1               # point at a compatible proxy if needed
+OPENAI_CODEX_BASE_URL=https://chatgpt.com/backend-api    # override Codex backend base if needed
 
 APPROVAL_POLICY=always                                  # always | dangerous-only | never
 AGENT_TOOLS=file_read,grep,list_dir,file_edit,file_write,shell,update_plan,task
@@ -633,6 +661,7 @@ runtime.
 - **llama.cpp** — `llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja` (the `--jinja` flag enables native tool calls).
 - **OpenRouter** — set `OPENROUTER_API_KEY` (or use `/auth set openrouter`).
 - **OpenAI** — set `OPENAI_API_KEY` (or use `/auth set openai`). Use `OPENAI_BASE_URL` for a compatible proxy.
+- **OpenAI Codex** — run `/login openai-codex`, then `/backend openai-codex`.
 
 Run `/doctor --deep` for a fuller capability probe (streaming, usage chunks,
 native tool calls, inline JSON fallback). Reports land under `.sessions/doctor/`.
@@ -711,8 +740,9 @@ Guidelines:
 
 - Mutating tools implement `require_approval` on the `Tool` trait (return
   `true`, or compute from args — see `shell.rs`).
-- New backends need an OpenAI-compatible `/v1/chat/completions` endpoint
-  and a default model in `backends.rs`.
+- New backends usually need an OpenAI-compatible `/v1/chat/completions`
+  endpoint and a default model in `backends.rs`; non-compatible transports
+  should add an adapter like `codex_responses.rs`.
 - Before opening a PR, run the full check suite: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 

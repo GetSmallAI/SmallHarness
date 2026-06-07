@@ -206,9 +206,23 @@ fn render_input(
         .max()
         .unwrap_or(8)
         .min(18);
-    let shown = matches.len().min(MENU_MAX_ROWS);
+    let start = if matches.len() <= MENU_MAX_ROWS {
+        0
+    } else if sel < MENU_MAX_ROWS {
+        0
+    } else {
+        // Keep the highlighted row inside the visible completion window as the
+        // user arrows down past the first page.
+        sel + 1 - MENU_MAX_ROWS
+    };
+    let shown = (matches.len() - start).min(MENU_MAX_ROWS);
     let mut rows = 0;
-    for (i, (name, desc)) in matches.iter().take(shown).enumerate() {
+    if start > 0 {
+        s.push_str(&format!("\r\n  {MUTED}… {start} above{RESET}"));
+        rows += 1;
+    }
+    for (offset, (name, desc)) in matches.iter().skip(start).take(shown).enumerate() {
+        let i = start + offset;
         s.push_str("\r\n");
         rows += 1;
         // Leave room for: 2 gutter + 2 marker + name_w + 2 gap.
@@ -222,10 +236,10 @@ fn render_input(
             s.push_str(&format!("    {name:<name_w$}  {MUTED}{desc}{RESET}"));
         }
     }
-    if matches.len() > shown {
+    if start + shown < matches.len() {
         s.push_str(&format!(
             "\r\n  {MUTED}… +{} more{RESET}",
-            matches.len() - shown
+            matches.len() - start - shown
         ));
         rows += 1;
     }
@@ -521,6 +535,33 @@ mod tests {
         let out = render_input("> ", 2, &chars, chars.len(), &cmds(), 0, false, 80);
         assert!(!out.contains('▸'));
         assert!(!out.contains("\r\n"));
+    }
+
+    #[test]
+    fn render_completion_window_follows_selected_row() {
+        let commands: Vec<(String, String)> = (0..12)
+            .map(|i| (format!("/cmd{i:02}"), format!("command {i}")))
+            .collect();
+        let chars: Vec<char> = "/".chars().collect();
+        let out = render_input("> ", 2, &chars, chars.len(), &commands, 10, false, 80);
+
+        assert!(
+            out.contains("/cmd10"),
+            "selected row should be visible: {out:?}"
+        );
+        assert!(out.contains("▸"), "selected marker missing: {out:?}");
+        assert!(
+            out.contains("… 3 above"),
+            "top overflow marker missing: {out:?}"
+        );
+        assert!(
+            out.contains("/cmd03"),
+            "window should start near selected row: {out:?}"
+        );
+        assert!(
+            !out.contains("/cmd00"),
+            "first page should scroll out once selection moves below it: {out:?}"
+        );
     }
 
     #[test]

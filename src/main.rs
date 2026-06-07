@@ -11,6 +11,8 @@ mod budget;
 mod cancel;
 mod capabilities;
 mod catalog;
+mod codex_oauth;
+mod codex_responses;
 mod commands;
 mod config;
 mod context_guard;
@@ -47,7 +49,7 @@ use std::io::{IsTerminal, Read, Write};
 
 use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
-use crate::backends::{backend, default_model, validate};
+use crate::backends::{backend, default_model, validate, BackendName};
 use crate::banner::{print_banner, BannerInfo};
 use crate::commands::dispatch;
 use crate::config::load_config;
@@ -344,6 +346,9 @@ async fn probe_backend(
                 crate::backends::BackendName::OpenAi => {
                     "Check OPENAI_API_KEY (or OPENAI_BASE_URL if you're targeting a compatible proxy)."
                 }
+                crate::backends::BackendName::OpenAiCodex => {
+                    "Run `/login openai-codex` to sign in with ChatGPT/Codex."
+                }
             };
             Err(format!("{e}. {hint}"))
         }
@@ -383,9 +388,20 @@ async fn main() -> anyhow::Result<()> {
     let config = load_config();
     let http = crate::openai::build_http_client();
     let backend_desc = backend(config.backend);
+    let missing_codex_login = matches!(config.backend, BackendName::OpenAiCodex)
+        && crate::auth::AuthStore::load()
+            .get_oauth("openai-codex")
+            .is_none();
     if let Err(e) = validate(&backend_desc) {
-        eprintln!("{e}");
-        std::process::exit(1);
+        if missing_codex_login {
+            println!("  {YELLOW}!{RESET} {DIM}{e}{RESET}");
+            println!(
+                "  {DIM}Starting anyway so you can run /login openai-codex, or /backend to switch.{RESET}"
+            );
+        } else {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
     let model = default_model(&backend_desc, config.model_override.as_deref());
 
@@ -411,7 +427,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut warmed_fingerprint = None;
-    let probe = probe_backend(&http, &backend_desc).await;
+    let probe = if missing_codex_login {
+        Err("Run /login openai-codex to sign in with ChatGPT/Codex.".to_string())
+    } else {
+        probe_backend(&http, &backend_desc).await
+    };
     if let Err(hint) = probe {
         println!("  {YELLOW}!{RESET} {DIM}Backend not reachable: {hint}{RESET}");
         println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");

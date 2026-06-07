@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::backends::BackendDescriptor;
+use crate::backends::{BackendDescriptor, BackendName};
 use crate::cancel::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +199,9 @@ pub async fn list_models(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
 ) -> Result<Vec<String>> {
+    if matches!(backend.name, BackendName::OpenAiCodex) {
+        return Ok(crate::codex_responses::codex_model_list());
+    }
     let url = format!("{}/models", backend.base_url.trim_end_matches('/'));
     let resp = client.get(url).bearer_auth(&backend.api_key).send().await?;
     if !resp.status().is_success() {
@@ -221,6 +224,10 @@ pub async fn chat_oneshot(
     backend: &BackendDescriptor,
     req: &ChatRequest<'_>,
 ) -> Result<()> {
+    if matches!(backend.name, BackendName::OpenAiCodex) {
+        return crate::codex_responses::stream_codex_responses(client, backend, req, None, |_| {})
+            .await;
+    }
     let url = format!(
         "{}/chat/completions",
         backend.base_url.trim_end_matches('/')
@@ -314,6 +321,12 @@ pub async fn stream_chat<F>(
 where
     F: FnMut(StreamChunk),
 {
+    if matches!(backend.name, BackendName::OpenAiCodex) {
+        return crate::codex_responses::stream_codex_responses(
+            client, backend, req, cancel, on_chunk,
+        )
+        .await;
+    }
     let url = format!(
         "{}/chat/completions",
         backend.base_url.trim_end_matches('/')

@@ -6,14 +6,46 @@ use std::path::PathBuf;
 
 /// Persistent on-disk credential store.
 ///
-/// File format is `{"<provider>": "<api-key>"}` so users can read or edit it
-/// by hand without a CLI. Env vars always win at lookup time; this file
-/// just hydrates them at startup, so paste-once / use-everywhere works
-/// without leaking secrets into the shell's environment permanently.
+/// Legacy files used `{"<provider>": "<api-key>"}`.  New files may also store
+/// typed entries so OAuth providers (notably `openai-codex`, which uses a
+/// ChatGPT/Codex subscription login rather than an API key) can live beside API
+/// keys without changing existing user config.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AuthStore {
     #[serde(flatten)]
-    pub keys: BTreeMap<String, String>,
+    pub credentials: BTreeMap<String, StoredCredential>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StoredCredential {
+    /// Backward-compatible `"sk-..."` value from pre-OAuth auth.json files.
+    LegacyApiKey(String),
+    ApiKey(ApiKeyCredential),
+    OAuth(OAuthCredential),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyCredential {
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthCredential {
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    pub access: String,
+    pub refresh: String,
+    /// Unix timestamp in seconds when the access token expires.
+    pub expires: u64,
+    #[serde(
+        rename = "accountId",
+        alias = "account_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_id: Option<String>,
 }
 
 /// Providers that have a single API-key dimension and a fixed env var.
@@ -86,15 +118,37 @@ impl AuthStore {
     }
 
     pub fn set(&mut self, provider: impl Into<String>, key: impl Into<String>) {
-        self.keys.insert(provider.into(), key.into());
+        self.credentials.insert(
+            provider.into(),
+            StoredCredential::ApiKey(ApiKeyCredential {
+                credential_type: "api_key".into(),
+                key: key.into(),
+            }),
+        );
+    }
+
+    pub fn set_oauth(&mut self, provider: impl Into<String>, credential: OAuthCredential) {
+        self.credentials
+            .insert(provider.into(), StoredCredential::OAuth(credential));
     }
 
     pub fn clear(&mut self, provider: &str) -> bool {
-        self.keys.remove(provider).is_some()
+        self.credentials.remove(provider).is_some()
     }
 
     pub fn get(&self, provider: &str) -> Option<&str> {
-        self.keys.get(provider).map(String::as_str)
+        match self.credentials.get(provider)? {
+            StoredCredential::LegacyApiKey(key) => Some(key.as_str()),
+            StoredCredential::ApiKey(credential) => Some(credential.key.as_str()),
+            StoredCredential::OAuth(_) => None,
+        }
+    }
+
+    pub fn get_oauth(&self, provider: &str) -> Option<&OAuthCredential> {
+        match self.credentials.get(provider)? {
+            StoredCredential::OAuth(credential) => Some(credential),
+            _ => None,
+        }
     }
 }
 
@@ -119,13 +173,15 @@ fn set_secret_permissions(_path: &PathBuf) -> Result<()> {
 /// who already export OPENAI_API_KEY see no change in behavior.
 pub fn hydrate_env_from_file() {
     let store = AuthStore::load();
-    for (provider, key) in &store.keys {
+    for provider in store.credentials.keys() {
         if let Some(env_name) = env_var_for(provider) {
             let already_set = std::env::var(env_name)
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
             if !already_set {
-                std::env::set_var(env_name, key);
+                if let Some(key) = store.get(provider) {
+                    std::env::set_var(env_name, key);
+                }
             }
         }
     }
@@ -195,6 +251,38 @@ mod tests {
         assert_eq!(loaded.get("openrouter"), Some("sk-or-2"));
     }
 
+    #[test]
+    fn legacy_string_api_keys_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, r#"{"openai":"sk-legacy"}"#).unwrap();
+        let loaded = AuthStore::load_from(&path).unwrap();
+        assert_eq!(loaded.get("openai"), Some("sk-legacy"));
+    }
+
+    #[test]
+    fn oauth_credentials_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::default();
+        store.set_oauth(
+            "openai-codex",
+            OAuthCredential {
+                credential_type: "oauth".into(),
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires: 123,
+                account_id: Some("acct".into()),
+            },
+        );
+        store.save_to(&path).unwrap();
+        let loaded = AuthStore::load_from(&path).unwrap();
+        let oauth = loaded.get_oauth("openai-codex").unwrap();
+        assert_eq!(oauth.access, "access");
+        assert_eq!(oauth.account_id.as_deref(), Some("acct"));
+        assert_eq!(loaded.get("openai-codex"), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn saved_file_is_mode_0600() {
@@ -213,7 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope.json");
         let store = AuthStore::load_from(&path).unwrap();
-        assert!(store.keys.is_empty());
+        assert!(store.credentials.is_empty());
     }
 
     #[test]

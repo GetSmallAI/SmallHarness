@@ -10,6 +10,7 @@ pub enum BackendName {
     LlamaCpp,
     Openrouter,
     OpenAi,
+    OpenAiCodex,
 }
 
 impl BackendName {
@@ -21,6 +22,7 @@ impl BackendName {
             BackendName::LlamaCpp => "llamacpp",
             BackendName::Openrouter => "openrouter",
             BackendName::OpenAi => "openai",
+            BackendName::OpenAiCodex => "openai-codex",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -31,6 +33,7 @@ impl BackendName {
             "llamacpp" | "llama-cpp" | "llama.cpp" => Some(Self::LlamaCpp),
             "openrouter" => Some(Self::Openrouter),
             "openai" | "open-ai" => Some(Self::OpenAi),
+            "openai-codex" | "open-ai-codex" | "codex" | "chatgpt" => Some(Self::OpenAiCodex),
             _ => None,
         }
     }
@@ -42,6 +45,7 @@ impl BackendName {
             Self::LlamaCpp,
             Self::Openrouter,
             Self::OpenAi,
+            Self::OpenAiCodex,
         ]
     }
     /// True for backends that talk to a process on the user's machine, false
@@ -51,7 +55,7 @@ impl BackendName {
     pub fn is_local(&self) -> bool {
         match self {
             Self::Ollama | Self::LmStudio | Self::Mlx | Self::LlamaCpp => true,
-            Self::Openrouter | Self::OpenAi => false,
+            Self::Openrouter | Self::OpenAi | Self::OpenAiCodex => false,
         }
     }
 }
@@ -109,6 +113,16 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             is_local: false,
         },
+        BackendName::OpenAiCodex => BackendDescriptor {
+            name,
+            base_url: std::env::var("OPENAI_CODEX_BASE_URL")
+                .unwrap_or_else(|_| "https://chatgpt.com/backend-api".into()),
+            // OAuth access tokens are loaded/refreshed lazily from auth.json by
+            // the Codex Responses adapter.  Keep this empty so callers don't
+            // accidentally treat ChatGPT subscription auth as an API key.
+            api_key: String::new(),
+            is_local: false,
+        },
     }
 }
 
@@ -118,6 +132,11 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
 /// hardware; bump it with `/model` if you have the headroom.
 pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
     if let Some(m) = override_ {
+        if matches!(b.name, BackendName::OpenAiCodex) {
+            return crate::codex_responses::canonical_codex_model(m)
+                .unwrap_or("gpt-5.5")
+                .to_string();
+        }
         return m.to_string();
     }
     match b.name {
@@ -127,6 +146,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         BackendName::LlamaCpp => "gpt-3.5-turbo",
         BackendName::Openrouter => "qwen/qwen-2.5-coder-32b-instruct",
         BackendName::OpenAi => "gpt-4o-mini",
+        BackendName::OpenAiCodex => "gpt-5.5",
     }
     .to_string()
 }
@@ -139,6 +159,15 @@ pub fn validate(b: &BackendDescriptor) -> Result<()> {
     }
     if matches!(b.name, BackendName::OpenAi) && b.api_key.is_empty() {
         return Err(anyhow!("OPENAI_API_KEY is required when BACKEND=openai."));
+    }
+    if matches!(b.name, BackendName::OpenAiCodex)
+        && crate::auth::AuthStore::load()
+            .get_oauth("openai-codex")
+            .is_none()
+    {
+        return Err(anyhow!(
+            "ChatGPT/Codex login is required when BACKEND=openai-codex. Run `/login openai-codex`."
+        ));
     }
     Ok(())
 }
@@ -194,12 +223,50 @@ mod tests {
         assert!(BackendName::LlamaCpp.is_local());
         assert!(!BackendName::Openrouter.is_local());
         assert!(!BackendName::OpenAi.is_local());
+        assert!(!BackendName::OpenAiCodex.is_local());
     }
 
     #[test]
     fn defaults_openai_to_gpt_4o_mini() {
         let model = default_model(&descriptor(BackendName::OpenAi), None);
         assert_eq!(model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn parses_openai_codex_aliases() {
+        assert_eq!(
+            BackendName::parse("openai-codex"),
+            Some(BackendName::OpenAiCodex)
+        );
+        assert_eq!(BackendName::parse("codex"), Some(BackendName::OpenAiCodex));
+        assert_eq!(
+            BackendName::parse("chatgpt"),
+            Some(BackendName::OpenAiCodex)
+        );
+        assert_eq!(BackendName::OpenAiCodex.as_str(), "openai-codex");
+    }
+
+    #[test]
+    fn lists_openai_codex_as_switchable_backend() {
+        assert!(BackendName::all().contains(&BackendName::OpenAiCodex));
+    }
+
+    #[test]
+    fn defaults_openai_codex_to_codex_model() {
+        let model = default_model(&descriptor(BackendName::OpenAiCodex), None);
+        assert_eq!(model, "gpt-5.5");
+    }
+
+    #[test]
+    fn ignores_non_codex_override_for_openai_codex() {
+        let model = default_model(&descriptor(BackendName::OpenAiCodex), Some("gpt-5-codex"));
+        assert_eq!(model, "gpt-5.5");
+    }
+
+    #[test]
+    fn normalizes_openai_codex_model_aliases() {
+        let model = default_model(&descriptor(BackendName::OpenAiCodex), Some("5.5"));
+        assert_eq!(model, "gpt-5.5");
     }
 
     #[test]

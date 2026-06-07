@@ -60,10 +60,20 @@ async fn cmd_doctor_probe(args: &str, state: &AppState) -> Result<()> {
         Ok(_) => println!("  {GREEN}✓{RESET} {DIM}session dir writable{RESET}"),
         Err(e) => println!("  {RED}✗{RESET} {DIM}session dir not writable: {e}{RESET}"),
     }
-    if !state.config.backend.is_local() && state.backend.api_key.is_empty() {
+    if matches!(state.config.backend, BackendName::OpenAiCodex) {
+        if crate::auth::AuthStore::load()
+            .get_oauth("openai-codex")
+            .is_none()
+        {
+            println!(
+                "  {RED}✗{RESET} {DIM}openai-codex login missing; run /login openai-codex{RESET}"
+            );
+        }
+    } else if !state.config.backend.is_local() && state.backend.api_key.is_empty() {
         let env_name = match state.config.backend {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
             BackendName::OpenAi => "OPENAI_API_KEY",
+            BackendName::OpenAiCodex => "ChatGPT login",
             _ => "API key",
         };
         println!("  {RED}✗{RESET} {DIM}{env_name} missing{RESET}");
@@ -939,6 +949,7 @@ fn backend_model_hint(backend_name: BackendName, model: &str) -> String {
         }
         BackendName::Openrouter => "set OPENROUTER_API_KEY before using OpenRouter".into(),
         BackendName::OpenAi => "set OPENAI_API_KEY before using OpenAI".into(),
+        BackendName::OpenAiCodex => "run /login openai-codex before using ChatGPT/Codex".into(),
     }
 }
 
