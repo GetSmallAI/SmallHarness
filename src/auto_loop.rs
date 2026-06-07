@@ -119,15 +119,15 @@ struct RoundRecord {
 
 /// Parsed Done Criteria checked against the current diff. `met[i]` corresponds
 /// to `criteria[i]`.
-struct DoneCheck {
-    met: Vec<bool>,
+pub(crate) struct DoneCheck {
+    pub(crate) met: Vec<bool>,
 }
 
 impl DoneCheck {
-    fn met_count(&self) -> usize {
+    pub(crate) fn met_count(&self) -> usize {
         self.met.iter().filter(|m| **m).count()
     }
-    fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.met.len()
     }
     fn all_met(&self) -> bool {
@@ -448,7 +448,7 @@ fn should_auto_reset(state: &AppState, reset_ratio: f64) -> bool {
 /// separate from the 0–10 rubric verdict because coverage and quality are
 /// different questions; returns a tolerant default (nothing met) on any failure
 /// so the loop never stalls on a flaky check.
-async fn run_done_check(
+pub(crate) async fn run_done_check(
     state: &AppState,
     model: &str,
     criteria: &[String],

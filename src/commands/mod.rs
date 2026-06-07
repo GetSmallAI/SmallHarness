@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::agent::to_openai_tools;
 use crate::agent_eval::{builtin_fixtures, render_agent_eval_markdown, run_agent_eval};
 use crate::app_state::AppState;
-use crate::auto_loop::{parse_auto_args, run_auto_loop};
+use crate::auto_loop::{parse_auto_args, parse_done_criteria, run_auto_loop, run_done_check};
 use crate::backends::{backend, default_model, validate, BackendDescriptor, BackendName};
 use crate::batch_operations::{
     execute_batch_operations, find_cross_file_references, find_related_files,
@@ -39,7 +39,7 @@ use crate::handoff::{
 };
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
-use crate::iterate_loop::{parse_iterate_args, run_iterate_loop};
+use crate::iterate_loop::{collect_diff_context, parse_iterate_args, run_iterate_loop};
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
 };
@@ -123,7 +123,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/plan",
-        "Expand a short intent into a product spec (.small-harness/spec.md)",
+        "Expand a short intent into a product spec; /plan validate checks its Done Criteria against the diff",
     ),
     ("/session", "Show session info and token usage"),
     ("/sessions", "List saved sessions"),
@@ -943,6 +943,7 @@ async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
 
 enum PlanInvocation {
     Show,
+    Validate,
     Draft {
         intent: String,
         export_path: Option<PathBuf>,
@@ -953,6 +954,7 @@ enum PlanInvocation {
 ///   `/plan <intent>`                 → draft to `.small-harness/spec.md`
 ///   `/plan <intent> --export <path>` → draft to `<path>` instead
 ///   `/plan show`                     → print the saved spec
+///   `/plan validate`                 → check the spec's Done Criteria vs the diff
 fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
@@ -960,6 +962,9 @@ fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
     }
     if trimmed == "show" {
         return Some(PlanInvocation::Show);
+    }
+    if trimmed == "validate" {
+        return Some(PlanInvocation::Validate);
     }
 
     let mut export_path: Option<PathBuf> = None;
@@ -991,7 +996,7 @@ fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
 async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
     let Some(invocation) = parse_plan_args(args) else {
         println!(
-            "  {DIM}Usage: /plan <intent>  ·  /plan <intent> --export <path>  ·  /plan show{RESET}"
+            "  {DIM}Usage: /plan <intent>  ·  /plan <intent> --export <path>  ·  /plan show  ·  /plan validate{RESET}"
         );
         return Ok(());
     };
@@ -1012,6 +1017,7 @@ async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
             }
             return Ok(());
         }
+        PlanInvocation::Validate => return cmd_plan_validate(state, &default_path).await,
         PlanInvocation::Draft {
             intent,
             export_path,
@@ -1074,6 +1080,72 @@ async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// `/plan validate`: read the saved spec's Done Criteria and check each one
+/// against the current working-tree diff, printing a met/unmet checklist. The
+/// same done-check `/auto` runs each round, exposed as a one-shot command so you
+/// can ask "am I done?" by hand. Sends the diff to the model, so it honors the
+/// same cloud-handoff refusal as `/iterate`.
+async fn cmd_plan_validate(state: &AppState, spec_path: &Path) -> Result<()> {
+    let spec = match fs::read_to_string(spec_path) {
+        Ok(s) => s,
+        Err(_) => {
+            println!(
+                "  {DIM}No spec yet at {} — run /plan <intent> to create one.{RESET}",
+                spec_path.display()
+            );
+            return Ok(());
+        }
+    };
+    let criteria = parse_done_criteria(&spec);
+    if criteria.is_empty() {
+        println!(
+            "  {DIM}No Done Criteria found in {} — nothing to validate.{RESET}",
+            spec_path.display()
+        );
+        return Ok(());
+    }
+    if should_refuse_cloud_handoff(state.backend.name, state.config.rubric.allow_cloud) {
+        println!(
+            "  {RED}✗{RESET} {DIM}/plan validate sends the working diff to the model — run on a local backend or set rubric.allowCloud.{RESET}"
+        );
+        return Ok(());
+    }
+
+    let model = state
+        .config
+        .iterate
+        .evaluator_model
+        .clone()
+        .unwrap_or_else(|| state.model.clone());
+    println!(
+        "  {DIM}checking {} Done Criteria against the working tree with {}{RESET}",
+        criteria.len(),
+        model
+    );
+    let diff = collect_diff_context(&state.config.workspace_root);
+    let check = run_done_check(state, &model, &criteria, &diff).await;
+    println!();
+    print!("{}", render_validate_report(&criteria, &check.met));
+    Ok(())
+}
+
+/// Render the Done-Criteria checklist for `/plan validate`. Pure for testing.
+fn render_validate_report(criteria: &[String], met: &[bool]) -> String {
+    let mut out = String::new();
+    for (i, c) in criteria.iter().enumerate() {
+        let ok = met.get(i).copied().unwrap_or(false);
+        let (mark, color) = if ok { ("✓", GREEN) } else { ("✗", RED) };
+        out.push_str(&format!("  {color}{mark}{RESET} {c}\n"));
+    }
+    let met_count = met.iter().filter(|m| **m).count();
+    out.push_str(&format!(
+        "  {DIM}{}/{} criteria met{RESET}\n",
+        met_count,
+        criteria.len()
+    ));
+    out
 }
 
 struct ResetArgs {
@@ -2740,6 +2812,15 @@ mod tests {
             parse_plan_args("show"),
             Some(PlanInvocation::Show)
         ));
+        assert!(matches!(
+            parse_plan_args("validate"),
+            Some(PlanInvocation::Validate)
+        ));
+        // "validate" is only the bare subcommand; as an intent word it drafts.
+        assert!(matches!(
+            parse_plan_args("validate the csv export"),
+            Some(PlanInvocation::Draft { .. })
+        ));
 
         let Some(PlanInvocation::Draft {
             intent,
@@ -2773,6 +2854,20 @@ mod tests {
         assert!(parse_plan_args("   ").is_none());
         assert!(parse_plan_args("intent --export").is_none());
         assert!(parse_plan_args("--export=/tmp/x.md").is_none());
+    }
+
+    #[test]
+    fn render_validate_report_marks_met_and_unmet() {
+        let criteria = vec![
+            "retries on 5xx".to_string(),
+            "retries are logged".to_string(),
+        ];
+        let out = render_validate_report(&criteria, &[true, false]);
+        assert!(out.contains("✓"));
+        assert!(out.contains("✗"));
+        assert!(out.contains("retries on 5xx"));
+        assert!(out.contains("retries are logged"));
+        assert!(out.contains("1/2 criteria met"));
     }
 
     #[tokio::test]

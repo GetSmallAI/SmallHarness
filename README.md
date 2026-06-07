@@ -306,6 +306,7 @@ this exact call`. The session cache resets on `/new`.
 ```
 /mode explore|edit|ship|review   switch operator preset
 /plan <intent>                   expand a short intent into a spec (.small-harness/spec.md)
+/plan validate                   check the spec's Done Criteria against the working diff
 /shipcheck                       summarize git + test readiness
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
@@ -408,6 +409,12 @@ The `/model` picker shows the same data while you choose:
 `.small-harness/spec.md`. It deliberately stays at the level of *what* and
 *why*, not implementation, so an early spec doesn't lock in the wrong details.
 `/plan show` prints the saved spec; `--export <path>` writes elsewhere.
+
+`/plan validate` closes the loop: it reads the spec's **Done Criteria** and
+checks each one against the current working-tree diff (the same done-check
+`/auto` runs each round), printing a met/unmet checklist so you can ask "am I
+actually done?" by hand. Like `/iterate`, it sends the diff to the model, so it
+runs on a local backend unless you set `rubric.allowCloud`.
 
 ### Generate, evaluate, iterate
 

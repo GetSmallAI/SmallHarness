@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`/plan validate`** — checks the spec's Done Criteria against the
+  working-tree diff and prints a met/unmet checklist, closing the
+  `/plan` → `/iterate` → `/auto` loop with a one-shot "am I done?" command. It
+  reuses the same done-check `/auto` runs each round; like `/iterate` it sends
+  the diff to the model, so it runs on a local backend unless `rubric.allowCloud`
+  is set.
+
 ## [0.6.0] - 2026-06-07
 
 ### Added
