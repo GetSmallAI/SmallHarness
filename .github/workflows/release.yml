@@ -26,7 +26,7 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve tag
         id: tag
@@ -44,7 +44,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -116,7 +116,7 @@ jobs:
           echo "ARTIFACT_NAME=$NAME" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.ARTIFACT_DIR }}
@@ -131,10 +131,10 @@ jobs:
       arm_sha: ${{ steps.meta.outputs.arm_sha }}
       x86_sha: ${{ steps.meta.outputs.x86_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
@@ -162,7 +162,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*
           fail_on_unmatched_files: true
@@ -189,7 +189,7 @@ jobs:
 
       - name: Checkout tap repo
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: GetSmallAI/homebrew-tap
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
