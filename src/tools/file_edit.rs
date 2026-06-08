@@ -156,14 +156,38 @@ impl Tool for FileEditTool {
         let original = match tokio::fs::read_to_string(&resolved.normalized).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return json!({ "error": format!("File not found: {path}") });
+                // Honour the Claude Code convention: a single edit with empty old_text on a
+                // missing file means "create this file with new_text as its entire content".
+                // This avoids the retry loop where models trained on Claude Code's Edit tool
+                // send file_edit({old_text: "", new_text: <content>}) to create new files.
+                if args.edits.len() == 1 && args.edits[0].old_text.is_empty() {
+                    let content = &args.edits[0].new_text;
+                    if let Some(parent) = resolved.normalized.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                return json!({ "error": e.to_string() });
+                            }
+                        }
+                    }
+                    return match tokio::fs::write(&resolved.normalized, content.as_bytes()).await {
+                        Ok(_) => json!({
+                            "edited": true,
+                            "path": path,
+                            "diff": unified_diff("", content, &path),
+                            "verified": true,
+                            "applied_snippet": content,
+                        }),
+                        Err(e) => json!({ "error": e.to_string() }),
+                    };
+                }
+                return json!({ "error": format!("File not found: {path}. Use file_write to create new files.") });
             }
             Err(e) => return json!({ "error": e.to_string() }),
         };
         let mut working = original.clone();
         for (idx, edit) in args.edits.iter().enumerate() {
             if edit.old_text.is_empty() {
-                return json!({ "error": format!("Edit {}: old_text is empty", idx + 1) });
+                return json!({ "error": format!("Edit {}: old_text is empty. Use file_write to create new files.", idx + 1) });
             }
             let occurrences = working.matches(&edit.old_text).count();
             if occurrences == 0 {
@@ -264,6 +288,47 @@ mod tests {
         assert!(snip.contains("    4  d"));
         assert!(!snip.contains("    1  a"));
         assert!(!snip.contains("    5  e"));
+    }
+
+    #[tokio::test]
+    async fn creates_new_file_when_old_text_empty_and_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/new.html");
+
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [{ "old_text": "", "new_text": "<h1>hello</h1>" }]
+        }))
+        .await;
+
+        assert!(result["edited"].as_bool().unwrap(), "{result}");
+        assert_eq!(result["verified"].as_bool(), Some(true));
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "<h1>hello</h1>");
+    }
+
+    #[tokio::test]
+    async fn file_not_found_with_nonempty_old_text_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.txt");
+
+        let result = FileEditTool {
+            approve: false,
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "edits": [{ "old_text": "something", "new_text": "else" }]
+        }))
+        .await;
+
+        let err = result["error"].as_str().unwrap();
+        assert!(err.contains("File not found"), "{err}");
+        assert!(err.contains("file_write"), "{err}");
     }
 
     #[tokio::test]
