@@ -109,6 +109,13 @@ impl Tool for FileReadTool {
         };
         let lines: Vec<&str> = content.split('\n').collect();
         let total = lines.len();
+        if let Some(o) = args.offset {
+            if o > total {
+                return json!({
+                    "error": format!("offset {o} is past end of file ({total} lines)")
+                });
+            }
+        }
         let start = args
             .offset
             .map(|o| o.saturating_sub(1))
@@ -201,6 +208,26 @@ mod tests {
         assert_eq!(result["content"].as_str().unwrap(), "2\n3");
         assert!(result["truncated"].as_bool().unwrap());
         assert_eq!(result["nextOffset"].as_u64().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn reads_with_offset_past_end_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        tokio::fs::write(&path, "line1\nline2\nline3").await.unwrap();
+
+        let result = FileReadTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "path": path.to_str().unwrap(),
+            "offset": 100
+        }))
+        .await;
+
+        let err = result["error"].as_str().unwrap();
+        assert!(err.contains("past end of file"), "{err}");
+        assert!(err.contains("3 lines"), "{err}");
     }
 
     #[tokio::test]

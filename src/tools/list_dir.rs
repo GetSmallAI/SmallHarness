@@ -68,6 +68,7 @@ impl Tool for ListDirTool {
         json!({
             "entries": entries,
             "count": count,
+            "total": total,
             "truncated": truncated,
         })
     }
@@ -104,7 +105,29 @@ mod tests {
             .collect();
         assert_eq!(entries, vec!["a.txt", "b.txt", "subdir/"]);
         assert_eq!(result["count"].as_u64().unwrap(), 3);
+        assert_eq!(result["total"].as_u64().unwrap(), 3);
         assert!(!result["truncated"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn truncated_listing_includes_total_count() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create 501 files so the 500-entry limit is exceeded.
+        for i in 0..501usize {
+            tokio::fs::write(dir.path().join(format!("f{i:04}.txt")), "")
+                .await
+                .unwrap();
+        }
+
+        let result = ListDirTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({ "path": dir.path().to_str().unwrap() }))
+        .await;
+
+        assert!(result["truncated"].as_bool().unwrap());
+        assert_eq!(result["count"].as_u64().unwrap(), 500);
+        assert_eq!(result["total"].as_u64().unwrap(), 501);
     }
 
     #[tokio::test]
