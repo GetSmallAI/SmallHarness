@@ -1,5 +1,7 @@
 mod agent;
 mod agent_eval;
+#[cfg(test)]
+mod agent_integration_test;
 mod app_state;
 mod approval;
 mod auth;
@@ -75,6 +77,12 @@ struct CliOneShot {
     allow_tools: bool,
 }
 
+struct CliEval {
+    fixture_id: String,
+    model: Option<String>,
+    json_output: bool,
+}
+
 struct NonInteractiveApproval {
     allow: bool,
 }
@@ -109,6 +117,7 @@ fn print_usage() {
     println!("USAGE:");
     println!("  small-harness                      Start an interactive session");
     println!("  small-harness --print <text>       Run one prompt and exit (also reads stdin)");
+    println!("  small-harness --eval <fixture>       Run an agent eval fixture and exit");
     println!("  small-harness --continue           Resume the most recent session here");
     println!("  small-harness completions <shell>  Print a completion script (bash|zsh|fish)");
     println!();
@@ -186,6 +195,50 @@ fn should_continue_latest() -> bool {
     std::env::args()
         .skip(1)
         .any(|a| a == "--continue" || a == "-c")
+}
+
+fn parse_eval_args() -> Option<anyhow::Result<CliEval>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut fixture_id = None;
+    let mut model = None;
+    let mut json_output = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--eval" => {
+                fixture_id = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--model" => {
+                model = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--json" => {
+                json_output = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    fixture_id.map(|fixture_id| {
+        Ok(CliEval {
+            fixture_id,
+            model,
+            json_output,
+        })
+    })
+}
+
+async fn run_eval_cli(opts: CliEval) -> anyhow::Result<()> {
+    let config = load_config();
+    let code = crate::agent_eval::run_eval_cli(
+        &config,
+        &opts.fixture_id,
+        opts.model.as_deref(),
+        opts.json_output,
+    )
+    .await?;
+    std::process::exit(code);
 }
 
 fn parse_one_shot_args() -> Option<anyhow::Result<CliOneShot>> {
@@ -376,6 +429,9 @@ async fn main() -> anyhow::Result<()> {
     crate::crash_log::install_panic_hook();
     if let Some(shell) = parse_completions_arg() {
         return run_completions(&shell);
+    }
+    if let Some(opts) = parse_eval_args() {
+        return run_eval_cli(opts?).await;
     }
     if let Some(opts) = parse_one_shot_args() {
         return run_one_shot(opts?).await;

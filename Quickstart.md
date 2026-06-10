@@ -245,6 +245,13 @@ printf 'What changed in this branch?\n' | cargo run --release --
 Approval-gated write and shell tools are denied in one-shot mode unless you pass
 `--allow-tools`.
 
+Run a bundled agent eval from the shell (exit code 0 on pass):
+
+```bash
+cargo run --release -- --eval read-and-explain --model qwen2.5-coder:7b
+cargo run --release -- --eval fix-failing-test --json
+```
+
 ## A Good First Session
 
 Here is a simple sequence that exercises the whole product:

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   build:
@@ -19,6 +21,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --verbose
       - run: cargo test --verbose
+
+  agent-eval:
+    name: live agent eval (optional)
+    runs-on: macos-latest
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[eval]')
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install ollama
+      - run: ollama pull qwen2.5-coder:7b
+      - run: brew services start ollama
+      - run: cargo build --release
+      - run: cargo run --release -- --eval read-and-explain --model qwen2.5-coder:7b
+      - run: cargo run --release -- --eval fix-failing-test --model qwen2.5-coder:7b
 
   lint:
     name: clippy + fmt

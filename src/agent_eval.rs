@@ -463,6 +463,44 @@ pub async fn run_agent_eval_suite(
     Ok(out)
 }
 
+/// Run a single fixture from the CLI (`--eval <id>`). Returns exit code 0 on pass.
+pub async fn run_eval_cli(
+    config: &AgentConfig,
+    fixture_id: &str,
+    model_override: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<i32> {
+    let fixture = fixture_by_id(fixture_id)
+        .ok_or_else(|| anyhow!("unknown agent eval fixture: {fixture_id}"))?;
+    let backend_desc = crate::backends::backend(config.backend);
+    crate::backends::validate(&backend_desc)?;
+    let model = model_override.map(str::to_string).unwrap_or_else(|| {
+        crate::backends::default_model(&backend_desc, config.model_override.as_deref())
+    });
+    let result = run_agent_eval(config, &backend_desc, &model, &fixture).await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{} {} · {} · {}ms · {} steps",
+            if result.passed { "PASS" } else { "FAIL" },
+            result.fixture_id,
+            result.model,
+            result.elapsed_ms,
+            result.steps
+        );
+        for check in &result.checks {
+            println!(
+                "  [{}] {:?} — {}",
+                if check.passed { "x" } else { " " },
+                check.check,
+                check.detail
+            );
+        }
+    }
+    Ok(if result.passed { 0 } else { 1 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
