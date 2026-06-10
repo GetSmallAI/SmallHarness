@@ -214,7 +214,9 @@ mod tests {
     async fn reads_with_offset_past_end_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3")
+            .await
+            .unwrap();
 
         let result = FileReadTool {
             path_policy: PathPolicy::default(),

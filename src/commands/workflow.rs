@@ -2,6 +2,7 @@
 //! prompt-library commands. Split out of commands.rs; dispatch lives in
 //! mod.rs.
 
+use super::context_cmds::last_user_prompt;
 use super::*;
 
 fn parse_eval_model(spec: &str, state: &AppState) -> (BackendDescriptor, String) {
