@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::backends::BackendDescriptor;
 use crate::cancel::CancellationToken;
@@ -15,6 +15,7 @@ use crate::openai::{
 };
 use crate::tools::{is_mutation_tool, is_read_only_tool, Tool, ToolPreview};
 use crate::turn_checkpoint::TurnCapturer;
+use crate::turn_trace::{SharedTurnTrace, TracePayload, TurnMetrics};
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -25,11 +26,19 @@ pub enum AgentEvent {
         name: String,
         call_id: String,
         args: Value,
+        depth: u32,
     },
     ToolResult {
         name: String,
         call_id: String,
         output: String,
+        depth: u32,
+    },
+    ToolOutputCompacted {
+        name: String,
+        call_id: String,
+        summary: String,
+        depth: u32,
     },
     Reasoning {
         delta: String,
@@ -59,6 +68,12 @@ pub struct RunResult {
     /// True when the loop stopped because it hit `max_steps` while the model
     /// still had pending tool calls (i.e. it was cut off, not finished).
     pub hit_step_limit: bool,
+    pub metrics: TurnMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactInfo {
+    pub summary: String,
 }
 
 pub fn to_openai_tools(tools: &[Arc<dyn Tool>]) -> Vec<ToolDef> {
@@ -121,23 +136,26 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-fn compact_tool_output(name: &str, output: &str) -> String {
+fn compact_tool_output(name: &str, output: &str) -> (String, Option<CompactInfo>) {
     const MAX_TOOL_OUTPUT_CHARS: usize = 4000;
     if output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
-        return output.to_string();
+        return (output.to_string(), None);
     }
     if let Ok(mut parsed) = serde_json::from_str::<Value>(output) {
         if let Some(obj) = parsed.as_object_mut() {
             for key in ["content", "output", "diff"] {
                 if let Some(Value::String(s)) = obj.get_mut(key) {
+                    let original = s.chars().count();
                     *s = truncate_chars(s, MAX_TOOL_OUTPUT_CHARS);
                     obj.insert("compacted".into(), Value::Bool(true));
-                    obj.insert(
-                        "summary".into(),
-                        Value::String(format!("{name} output compacted for model context")),
+                    let summary =
+                        format!("{name} output compacted ({original} chars → context limit)");
+                    obj.insert("summary".into(), Value::String(summary.clone()));
+                    return (
+                        serde_json::to_string(&parsed)
+                            .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS)),
+                        Some(CompactInfo { summary }),
                     );
-                    return serde_json::to_string(&parsed)
-                        .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS));
                 }
             }
             for key in ["matches", "entries"] {
@@ -146,20 +164,23 @@ fn compact_tool_output(name: &str, output: &str) -> String {
                     items.truncate(50);
                     let kept = items.len();
                     obj.insert("compacted".into(), Value::Bool(true));
-                    obj.insert(
-                        "summary".into(),
-                        Value::String(format!(
-                            "{name} returned {original} items; kept first {}",
-                            kept
-                        )),
+                    let summary = format!("{name} returned {original} items; kept first {kept}");
+                    obj.insert("summary".into(), Value::String(summary.clone()));
+                    return (
+                        serde_json::to_string(&parsed)
+                            .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS)),
+                        Some(CompactInfo { summary }),
                     );
-                    return serde_json::to_string(&parsed)
-                        .unwrap_or_else(|_| truncate_chars(output, MAX_TOOL_OUTPUT_CHARS));
                 }
             }
         }
     }
-    truncate_chars(output, MAX_TOOL_OUTPUT_CHARS)
+    (
+        truncate_chars(output, MAX_TOOL_OUTPUT_CHARS),
+        Some(CompactInfo {
+            summary: format!("{name} output truncated for model context"),
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,6 +196,8 @@ pub async fn run_agent<F>(
     cancel: Option<CancellationToken>,
     guard: Option<(ContextGuardParams, String)>,
     mut capturer: Option<&mut TurnCapturer>,
+    trace: Option<SharedTurnTrace>,
+    depth: u32,
 ) -> Result<RunResult>
 where
     F: FnMut(AgentEvent),
@@ -190,18 +213,31 @@ where
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
     let mut transcript_rewritten = false;
-    // Set when the model stops on its own (no more tool calls). If the loop
-    // instead exhausts `max_steps`, this stays false and we flag the cutoff.
     let mut natural_stop = false;
     let mut conversation_summary = guard
         .as_ref()
         .map(|(params, _)| params.conversation_summary.clone())
         .unwrap_or_default();
 
+    let turn_started = Instant::now();
+    let mut metrics = TurnMetrics::default();
+    let mut ttft_recorded = false;
+    let mut steps_taken = 0usize;
+
+    let log_trace = |payload: TracePayload| {
+        if let Some(trace) = &trace {
+            if let Ok(guard) = trace.lock() {
+                let _ = guard.append(payload);
+            }
+        }
+    };
+
     for step in 0..max_steps {
         if cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false) {
             break;
         }
+        steps_taken += 1;
+        let step_start = Instant::now();
         let req = ChatRequest {
             model,
             messages: &messages,
@@ -220,15 +256,30 @@ where
         let mut assistant_text = String::new();
         let mut buffering_inline = false;
         let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+        let mut saw_first_token = false;
 
         stream_chat(http, backend, &req, cancel.clone(), |chunk| {
             if let Some(choice) = chunk.choices.first() {
                 if let Some(reasoning) = &choice.delta.reasoning {
+                    if !saw_first_token {
+                        saw_first_token = true;
+                        if !ttft_recorded {
+                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis());
+                            ttft_recorded = true;
+                        }
+                    }
                     on_event(AgentEvent::Reasoning {
                         delta: reasoning.clone(),
                     });
                 }
                 if let Some(content) = &choice.delta.content {
+                    if !saw_first_token && !content.is_empty() {
+                        saw_first_token = true;
+                        if !ttft_recorded {
+                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis());
+                            ttft_recorded = true;
+                        }
+                    }
                     let was_empty = assistant_text.is_empty();
                     assistant_text.push_str(content);
                     if was_empty && looks_like_start_of_tool_call(&assistant_text) {
@@ -268,6 +319,7 @@ where
             }
         })
         .await?;
+        metrics.model_ms += step_start.elapsed().as_millis();
 
         let mut final_calls: Vec<ToolCall> = tool_calls
             .into_values()
@@ -347,6 +399,13 @@ where
                 name: tc.function.name.clone(),
                 call_id: tc.id.clone(),
                 args: parsed_args.clone(),
+                depth,
+            });
+            log_trace(TracePayload::ToolCall {
+                call_id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                args: crate::turn_trace::redact_value(&parsed_args),
+                depth,
             });
 
             let entry = if let Some(tool) = tool_map.get(&tc.function.name) {
@@ -405,7 +464,9 @@ where
             }
         }
 
-        let mut outputs: Vec<Option<String>> = (0..pending.len()).map(|_| None).collect();
+        let pending_len = pending.len();
+        let mut outputs: Vec<Option<String>> = (0..pending_len).map(|_| None).collect();
+        let mut tool_durations: Vec<u128> = vec![0; pending_len];
         let mut read_idx: Vec<usize> = Vec::new();
         let mut read_futs = Vec::new();
         let mut serial: Vec<(usize, Arc<dyn Tool>, Value)> = Vec::new();
@@ -421,7 +482,9 @@ where
                     let c = cancel.clone();
                     read_idx.push(i);
                     read_futs.push(async move {
-                        value_to_string(&tool.execute_cancelable(args, c).await)
+                        let start = Instant::now();
+                        let out = value_to_string(&tool.execute_cancelable(args, c).await);
+                        (out, start.elapsed().as_millis())
                     });
                 }
                 Pending::Run {
@@ -434,24 +497,47 @@ where
 
         if !read_futs.is_empty() {
             let results = futures_util::future::join_all(read_futs).await;
-            for (i, out) in read_idx.into_iter().zip(results) {
+            for (i, (out, ms)) in read_idx.into_iter().zip(results) {
                 outputs[i] = Some(out);
+                tool_durations[i] = ms;
+                metrics.tool_ms += ms;
             }
         }
 
         for (i, tool, args) in serial {
+            let start = Instant::now();
             outputs[i] = Some(value_to_string(
                 &tool.execute_cancelable(args, cancel.clone()).await,
             ));
+            let ms = start.elapsed().as_millis();
+            tool_durations[i] = ms;
+            metrics.tool_ms += ms;
         }
 
-        for (tc, output) in tcs.into_iter().zip(outputs) {
+        for ((tc, output), duration_ms) in tcs.into_iter().zip(outputs).zip(tool_durations) {
             let output_str = output.unwrap_or_else(|| "null".into());
-            let trimmed = compact_tool_output(&tc.function.name, &output_str);
+            let (trimmed, compact_info) = compact_tool_output(&tc.function.name, &output_str);
+            if let Some(info) = &compact_info {
+                on_event(AgentEvent::ToolOutputCompacted {
+                    name: tc.function.name.clone(),
+                    call_id: tc.id.clone(),
+                    summary: info.summary.clone(),
+                    depth,
+                });
+            }
             on_event(AgentEvent::ToolResult {
                 name: tc.function.name.clone(),
                 call_id: tc.id.clone(),
                 output: trimmed.clone(),
+                depth,
+            });
+            log_trace(TracePayload::ToolResult {
+                call_id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                duration_ms,
+                compacted: compact_info.is_some(),
+                compact_summary: compact_info.as_ref().map(|i| i.summary.clone()),
+                depth,
             });
             messages.push(ChatMessage::Tool {
                 tool_call_id: tc.id,
@@ -477,6 +563,11 @@ where
                 if let Some(summary) = notice.conversation_summary {
                     conversation_summary = Some(summary);
                 }
+                log_trace(TracePayload::ContextCompacted {
+                    method: "auto".into(),
+                    before_msgs: messages.len(),
+                    after_msgs: messages.len(),
+                });
                 on_event(AgentEvent::ContextCompacted {
                     notice: notice.line,
                     conversation_summary: conversation_summary.clone(),
@@ -491,6 +582,10 @@ where
         on_event(AgentEvent::StepLimitReached { max_steps });
     }
 
+    metrics.steps = steps_taken;
+    metrics.hit_step_limit = hit_step_limit;
+    metrics.total_ms = turn_started.elapsed().as_millis();
+
     Ok(RunResult {
         messages,
         input_tokens: total_in,
@@ -498,6 +593,7 @@ where
         transcript_rewritten,
         conversation_summary,
         hit_step_limit,
+        metrics,
     })
 }
 
@@ -615,9 +711,10 @@ mod tests {
         })
         .to_string();
         let compacted = compact_tool_output("file_read", &output);
-        let parsed: Value = serde_json::from_str(&compacted).unwrap();
+        let parsed: Value = serde_json::from_str(&compacted.0).unwrap();
         assert_eq!(parsed["compacted"].as_bool(), Some(true));
         assert!(parsed["content"].as_str().unwrap().contains("[truncated]"));
+        assert!(compacted.1.is_some());
     }
 
     #[test]
@@ -627,7 +724,7 @@ mod tests {
             .collect();
         let output = serde_json::json!({ "matches": matches, "count": 1000 }).to_string();
         let compacted = compact_tool_output("grep", &output);
-        let parsed: Value = serde_json::from_str(&compacted).unwrap();
+        let parsed: Value = serde_json::from_str(&compacted.0).unwrap();
         assert_eq!(parsed["compacted"].as_bool(), Some(true));
         assert_eq!(parsed["matches"].as_array().unwrap().len(), 50);
     }

@@ -744,6 +744,7 @@ mod tests {
         let session_dir = dir.join(".sessions").display().to_string();
         fs::create_dir_all(&session_dir).unwrap();
         let session_path = Path::new(&session_dir).join("test.jsonl");
+        let trace_path = session_path.clone();
         fs::write(&session_path, "").unwrap();
         let mut config = AgentConfig {
             workspace_root: dir.display().to_string(),
@@ -777,6 +778,8 @@ mod tests {
             mcp_tools: Vec::new(),
             config,
             path_store,
+            trace: crate::turn_trace::test_trace_for(&trace_path),
+            trace_enabled: false,
         }
     }
 

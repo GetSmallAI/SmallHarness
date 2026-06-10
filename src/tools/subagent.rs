@@ -1,17 +1,20 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Instant;
 
-use super::{build_tools_for_names, Tool};
-use crate::agent::run_agent;
+use super::{build_tools_for_names, Tool, ToolRuntimeContext};
+use crate::agent::{run_agent, AgentEvent};
 use crate::backends::BackendDescriptor;
 use crate::cancel::CancellationToken;
 use crate::config::AgentConfig;
 use crate::openai::ChatMessage;
+use crate::turn_trace::TracePayload;
 
 /// Hard cap on a subagent's own loop, regardless of the parent's max_steps.
 /// Keeps a delegated investigation bounded and cheap.
 const SUBAGENT_MAX_STEPS: usize = 12;
+const SUBAGENT_DEPTH: u32 = 1;
 
 const SUBAGENT_SYSTEM_PROMPT: &str = concat!(
     "You are a focused investigation subagent. The parent agent has delegated a\n",
@@ -36,6 +39,7 @@ pub struct SubagentTool {
     pub backend: BackendDescriptor,
     pub model: String,
     pub config: AgentConfig,
+    pub runtime: Option<ToolRuntimeContext>,
 }
 
 #[derive(Deserialize)]
@@ -75,11 +79,29 @@ impl SubagentTool {
             },
         ];
 
-        let tools = build_tools_for_names(&self.config, &self.subagent_tool_names());
+        let tools = build_tools_for_names(&self.config, &self.subagent_tool_names(), None);
+        let trace = self.runtime.as_ref().map(|r| r.trace.clone());
+        let trace_enabled = self
+            .runtime
+            .as_ref()
+            .map(|r| r.trace_enabled)
+            .unwrap_or(false);
+        let event_tx = self.runtime.as_ref().and_then(|r| r.agent_events.clone());
+        let call_id = format!(
+            "subagent-{}",
+            args.task.chars().take(24).collect::<String>()
+        );
 
-        // Events are intentionally swallowed: the subagent's internal tool calls
-        // must not appear in the parent's output or context. Only the summary
-        // returned below is surfaced.
+        if let Some(trace) = &trace {
+            if let Ok(guard) = trace.lock() {
+                let _ = guard.append(TracePayload::SubagentStart {
+                    call_id: call_id.clone(),
+                    task: args.task.trim().to_string(),
+                });
+            }
+        }
+
+        let start = Instant::now();
         let result = run_agent(
             &self.http,
             &self.backend,
@@ -87,13 +109,36 @@ impl SubagentTool {
             initial,
             tools,
             SUBAGENT_MAX_STEPS,
-            |_event| {},
+            |event| {
+                if trace_enabled {
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(forward_subagent_event(event));
+                    }
+                }
+            },
             None, // no approval provider => any mutating tool would be denied
             cancel,
             None, // no context guard for a short subagent
             None, // no checkpoint capturer
+            trace.clone(),
+            SUBAGENT_DEPTH,
         )
         .await;
+
+        if let Some(trace) = &trace {
+            if let Ok(guard) = trace.lock() {
+                let (input_tokens, output_tokens) = result
+                    .as_ref()
+                    .map(|r| (r.input_tokens, r.output_tokens))
+                    .unwrap_or((0, 0));
+                let _ = guard.append(TracePayload::SubagentEnd {
+                    call_id,
+                    input_tokens,
+                    output_tokens,
+                    duration_ms: start.elapsed().as_millis(),
+                });
+            }
+        }
 
         match result {
             Ok(run) => {
@@ -118,6 +163,45 @@ impl SubagentTool {
             }
             Err(e) => json!({ "error": format!("subagent failed: {e}") }),
         }
+    }
+}
+
+pub(crate) fn forward_subagent_event(event: AgentEvent) -> AgentEvent {
+    match event {
+        AgentEvent::ToolCall {
+            name,
+            call_id,
+            args,
+            depth,
+        } => AgentEvent::ToolCall {
+            name,
+            call_id,
+            args,
+            depth: depth.max(SUBAGENT_DEPTH),
+        },
+        AgentEvent::ToolResult {
+            name,
+            call_id,
+            output,
+            depth,
+        } => AgentEvent::ToolResult {
+            name,
+            call_id,
+            output,
+            depth: depth.max(SUBAGENT_DEPTH),
+        },
+        AgentEvent::ToolOutputCompacted {
+            name,
+            call_id,
+            summary,
+            depth,
+        } => AgentEvent::ToolOutputCompacted {
+            name,
+            call_id,
+            summary,
+            depth: depth.max(SUBAGENT_DEPTH),
+        },
+        other => other,
     }
 }
 
@@ -170,6 +254,7 @@ mod tests {
             backend: crate::backends::backend(crate::backends::BackendName::Ollama),
             model: "test".into(),
             config: AgentConfig::default(),
+            runtime: None,
         }
     }
 

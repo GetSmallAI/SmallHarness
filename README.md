@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.6.1-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.7.0-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -328,6 +328,7 @@ this exact call`. The session cache resets on `/new`.
 /image <path>          attach an image to the next user turn
 /reasoning on|off      toggle the streaming reasoning panel
 /verbose on|off        show every tool call with its full args + result
+/trace on|off          show nested subagent/critic tool calls (indented)
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 ```
 
@@ -593,6 +594,10 @@ root. Common shape:
   "tools": ["file_read", "grep", "list_dir", "file_edit", "file_write", "shell", "update_plan", "task"],
   "toolSelection": "auto",
   "maxSteps": 20,
+  "display": {
+    "toolDisplay": "grouped",
+    "eventLog": { "enabled": true }
+  },
   "workspaceRoot": "/path/to/project",
   "outsideWorkspace": "prompt",
   "context": {
@@ -639,6 +644,14 @@ runtime.
 - **`/verbose on|off`** switches to a debug tool view: every tool call is
   printed with its full arguments and a large result preview, so you can see
   exactly what the agent is doing. `/verbose off` restores the normal view.
+- **`/trace on|off`** shows nested subagent and critic tool activity as
+  indented lines in the TUI (without flooding the parent context). Every turn
+  is also logged to a sidecar at `.sessions/<session-id>.events.jsonl` with
+  tool calls, approvals, compaction, warmup, and timing — enabled by default
+  via `display.eventLog.enabled` in `agent.config.json`.
+- **Turn footer timing.** After each turn the status line includes step count
+  and a breakdown when available: `TTFT`, `model`, `tools`, `approval`, and
+  `total` seconds alongside the existing token and cost stats.
 - **Slash-command completion.** Type `/` and a menu of matching commands (with
   descriptions) appears beneath the prompt; the best match also shows as dim
   ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**
@@ -652,6 +665,8 @@ runtime.
 - **One-shot mode** — `small-harness --print "summarize this repo"` or
   `printf '…\n' | small-harness` for scripts and CI. Approval-gated tools
   are denied by default; pass `--allow-tools` to allow them.
+- **Agent eval CLI** — `small-harness --eval fix-failing-test [--model M] [--json]`
+  runs a bundled eval fixture and exits 0/1 (for CI scripts).
 - **Warmup.** Small Harness sends a 1-token request with the full system
   prompt + tools at startup so llama.cpp-derived engines have a hot
   prompt-eval cache before your first prompt. Disable with `WARMUP=false`.

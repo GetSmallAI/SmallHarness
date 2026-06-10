@@ -166,14 +166,19 @@ fn parse_criterion_heading(line: &str) -> Option<(String, f32)> {
         return None;
     }
     let after_hash = line.trim_start_matches('#').trim();
-    // ASCII-only marker, so byte indices from the lowercased copy line up.
-    let lower = after_hash.to_lowercase();
-    let open = lower.rfind("(weight:")?;
+    // Match the ASCII marker case-insensitively on the original bytes:
+    // to_lowercase() can change byte lengths for some Unicode chars, which
+    // would make offsets from a lowercased copy invalid in `after_hash`.
+    const MARKER: &[u8] = b"(weight:";
+    let open = after_hash
+        .as_bytes()
+        .windows(MARKER.len())
+        .rposition(|w| w.eq_ignore_ascii_case(MARKER))?;
     let name = after_hash[..open].trim();
     if name.is_empty() {
         return None;
     }
-    let rest = &after_hash[open + "(weight:".len()..];
+    let rest = &after_hash[open + MARKER.len()..];
     let close = rest.find(')')?;
     let weight: f32 = rest[..close].trim().parse().ok()?;
     if weight <= 0.0 {

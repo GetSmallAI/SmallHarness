@@ -89,22 +89,89 @@ impl Tool for GrepTool {
         let matches: Vec<Value> = stdout
             .split('\n')
             .filter(|l| !l.is_empty())
-            .take(100)
-            .map(|line| {
+            .filter_map(|line| {
                 let parts: Vec<&str> = line.splitn(3, ':').collect();
                 if parts.len() == 3 {
                     if let Ok(n) = parts[1].parse::<u32>() {
-                        return json!({
+                        return Some(json!({
                             "file": parts[0],
                             "line": n,
                             "content": parts[2],
-                        });
+                        }));
                     }
                 }
-                json!({ "content": line })
+                // Drop lines that don't match the expected file:line:content
+                // format (e.g. binary-file notices) rather than emitting a
+                // malformed object missing the `file` and `line` fields.
+                None
             })
+            .take(100)
             .collect();
         let count = matches.len();
         json!({ "matches": matches, "count": count })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Skip a test when ripgrep is not installed rather than failing the suite.
+    fn rg_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn no_matches_returns_empty_array() {
+        if !rg_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "hello world")
+            .await
+            .unwrap();
+
+        let result = GrepTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "pattern": "ZZZNOMATCH_XYZ",
+            "path": dir.path().to_str().unwrap()
+        }))
+        .await;
+
+        assert_eq!(result["count"].as_u64().unwrap(), 0);
+        assert!(result["matches"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn finds_match_with_correct_fields() {
+        if !rg_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "foo\nbar\nbaz")
+            .await
+            .unwrap();
+
+        let result = GrepTool {
+            path_policy: PathPolicy::default(),
+        }
+        .execute(json!({
+            "pattern": "bar",
+            "path": dir.path().to_str().unwrap()
+        }))
+        .await;
+
+        assert_eq!(result["count"].as_u64().unwrap(), 1);
+        let m = &result["matches"][0];
+        assert!(m["file"].as_str().is_some(), "match missing 'file' field");
+        assert!(m["line"].as_u64().is_some(), "match missing 'line' field");
+        assert_eq!(m["content"].as_str().unwrap(), "bar");
     }
 }

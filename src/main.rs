@@ -1,5 +1,7 @@
 mod agent;
 mod agent_eval;
+#[cfg(test)]
+mod agent_integration_test;
 mod app_state;
 mod approval;
 mod auth;
@@ -42,6 +44,7 @@ mod test_integration;
 mod theme;
 mod tools;
 mod turn_checkpoint;
+mod turn_trace;
 mod update_check;
 mod warmup;
 
@@ -72,6 +75,12 @@ const RED: &str = "\x1b[31m";
 struct CliOneShot {
     prompt: String,
     allow_tools: bool,
+}
+
+struct CliEval {
+    fixture_id: String,
+    model: Option<String>,
+    json_output: bool,
 }
 
 struct NonInteractiveApproval {
@@ -108,6 +117,7 @@ fn print_usage() {
     println!("USAGE:");
     println!("  small-harness                      Start an interactive session");
     println!("  small-harness --print <text>       Run one prompt and exit (also reads stdin)");
+    println!("  small-harness --eval <fixture>       Run an agent eval fixture and exit");
     println!("  small-harness --continue           Resume the most recent session here");
     println!("  small-harness completions <shell>  Print a completion script (bash|zsh|fish)");
     println!();
@@ -187,6 +197,50 @@ fn should_continue_latest() -> bool {
         .any(|a| a == "--continue" || a == "-c")
 }
 
+fn parse_eval_args() -> Option<anyhow::Result<CliEval>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut fixture_id = None;
+    let mut model = None;
+    let mut json_output = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--eval" => {
+                fixture_id = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--model" => {
+                model = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--json" => {
+                json_output = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    fixture_id.map(|fixture_id| {
+        Ok(CliEval {
+            fixture_id,
+            model,
+            json_output,
+        })
+    })
+}
+
+async fn run_eval_cli(opts: CliEval) -> anyhow::Result<()> {
+    let config = load_config();
+    let code = crate::agent_eval::run_eval_cli(
+        &config,
+        &opts.fixture_id,
+        opts.model.as_deref(),
+        opts.json_output,
+    )
+    .await?;
+    std::process::exit(code);
+}
+
 fn parse_one_shot_args() -> Option<anyhow::Result<CliOneShot>> {
     let mut args = std::env::args().skip(1);
     let mut prompt = None;
@@ -254,7 +308,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             content: prompt.to_string().into(),
         },
     ];
-    let tools = build_tools_for_names(&config, &active_tool_names);
+    let tools = build_tools_for_names(&config, &active_tool_names, None);
     let mut approval = NonInteractiveApproval {
         allow: opts.allow_tools,
     };
@@ -295,6 +349,8 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
         None,
         None,
         None,
+        None,
+        0,
     )
     .await?;
     println!();
@@ -374,6 +430,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(shell) = parse_completions_arg() {
         return run_completions(&shell);
     }
+    if let Some(opts) = parse_eval_args() {
+        return run_eval_cli(opts?).await;
+    }
     if let Some(opts) = parse_one_shot_args() {
         return run_one_shot(opts?).await;
     }
@@ -437,7 +496,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
         let warmup_tool_names = select_tool_names(&config, "");
-        let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names);
+        let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
         let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
         let loader = crate::loader::Loader::start("Warming up".into(), config.display.loader_style);
@@ -486,6 +545,11 @@ async fn main() -> anyhow::Result<()> {
     let checkpoints_enabled = config.checkpoints.enabled;
     let display = config.display.clone();
 
+    let trace = crate::turn_trace::shared_trace(&session_path, config.display.event_log.enabled)?;
+    if let Ok(mut t) = trace.lock() {
+        t.begin_turn();
+    }
+
     let mut state = AppState {
         config,
         http,
@@ -511,6 +575,8 @@ async fn main() -> anyhow::Result<()> {
         pending_image_attachments: Vec::new(),
         mcp_tools: Vec::new(),
         path_store: PathStore::new(&session_dir, &session_path, &paths_config),
+        trace,
+        trace_enabled: false,
     };
 
     if !state.config.mcp_servers.is_empty() {

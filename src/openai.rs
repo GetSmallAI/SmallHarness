@@ -190,7 +190,11 @@ pub struct Usage {
 }
 
 pub fn build_http_client() -> reqwest::Client {
+    // Connect timeout only: a total request timeout would cut off long
+    // streaming completions, but connecting to a dead backend should fail
+    // fast rather than hang until the OS gives up.
     reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build HTTP client")
 }

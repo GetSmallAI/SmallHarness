@@ -36,6 +36,7 @@ pub struct EvaluatorTool {
     pub backend: BackendDescriptor,
     pub model: String,
     pub config: AgentConfig,
+    pub runtime: Option<super::ToolRuntimeContext>,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +126,7 @@ pub async fn run_evaluation(
     target: &str,
     context: Option<&str>,
     cancel: Option<CancellationToken>,
+    runtime: Option<super::ToolRuntimeContext>,
 ) -> EvalVerdict {
     if should_refuse_cloud_handoff(backend.name, config.rubric.allow_cloud) {
         return EvalVerdict::failed(
@@ -145,7 +147,7 @@ pub async fn run_evaluation(
             content: user.into(),
         },
     ];
-    let mut tools = build_tools_for_names(config, &evaluator_tool_names(config));
+    let mut tools = build_tools_for_names(config, &evaluator_tool_names(config), None);
     if config.rubric.live_verify {
         // A fixed-surface test runner the read-only critic may call without an
         // approval gate (see VerifyTool); bounded by a timeout.
@@ -155,8 +157,10 @@ pub async fn run_evaluation(
         }));
     }
 
-    // Events are swallowed (like the subagent): the critic's internal tool calls
-    // must not enter the parent context — only the verdict is surfaced.
+    let trace = runtime.as_ref().map(|r| r.trace.clone());
+    let trace_enabled = runtime.as_ref().map(|r| r.trace_enabled).unwrap_or(false);
+    let event_tx = runtime.as_ref().and_then(|r| r.agent_events.clone());
+
     let result = run_agent(
         http,
         backend,
@@ -164,11 +168,19 @@ pub async fn run_evaluation(
         initial,
         tools,
         EVALUATOR_MAX_STEPS,
-        |_event| {},
+        |event| {
+            if trace_enabled {
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(crate::tools::subagent::forward_subagent_event(event));
+                }
+            }
+        },
         None, // no approval provider => any mutating tool would be denied
         cancel,
         None,
         None,
+        trace,
+        1,
     )
     .await;
 
@@ -234,6 +246,7 @@ impl Tool for EvaluatorTool {
             &args.target,
             args.context.as_deref(),
             cancel,
+            self.runtime.clone(),
         )
         .await;
         serde_json::to_value(verdict)
@@ -252,6 +265,7 @@ mod tests {
             backend: backend(BackendName::Ollama),
             model: "test".into(),
             config: AgentConfig::default(),
+            runtime: None,
         }
     }
 
@@ -301,6 +315,7 @@ mod tests {
             "model",
             &config,
             "some work",
+            None,
             None,
             None,
         )

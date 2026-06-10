@@ -143,7 +143,19 @@ Useful commands:
 /sessions search dispatch
 /new          start a clean conversation
 /export current markdown
+/export current events   copy the session event log sidecar
 ```
+
+**Transparent mode** (see everything the agent did):
+
+```text
+/verbose on
+/trace on
+```
+
+The event log lives beside each transcript:
+`.sessions/<session-id>.events.jsonl` (tool calls, approvals, compaction,
+warmup, per-turn timing summary).
 
 Good habits:
 
@@ -233,6 +245,13 @@ printf 'What changed in this branch?\n' | cargo run --release --
 Approval-gated write and shell tools are denied in one-shot mode unless you pass
 `--allow-tools`.
 
+Run a bundled agent eval from the shell (exit code 0 on pass):
+
+```bash
+cargo run --release -- --eval read-and-explain --model qwen2.5-coder:7b
+cargo run --release -- --eval fix-failing-test --json
+```
+
 ## A Good First Session
 
 Here is a simple sequence that exercises the whole product:
@@ -307,6 +326,7 @@ Small Harness keeps local state under `.sessions/`:
 .sessions/
   history.jsonl          input history
   *.jsonl                session transcripts
+  *.events.jsonl         per-session structured event logs (tools, timing, approvals)
   project-memory/
     index.json           safe metadata-only repo index
     notes.jsonl          durable project notes from /remember

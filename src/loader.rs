@@ -21,12 +21,18 @@ const GRADIENT_COLORS: &[&str] = &[
 pub struct Loader {
     stop: Arc<AtomicBool>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    text: Arc<std::sync::Mutex<String>>,
 }
 
 impl Loader {
     pub fn start(text: String, style: LoaderStyle) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
+        Self::start_with_shared(text, style, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn start_with_shared(text: String, style: LoaderStyle, stop: Arc<AtomicBool>) -> Self {
         let stop_inner = stop.clone();
+        let text_shared = Arc::new(std::sync::Mutex::new(text));
+        let text_for_task = text_shared.clone();
         let interval_ms: u64 = match style {
             LoaderStyle::Gradient => 150,
             LoaderStyle::Spinner => 80,
@@ -34,19 +40,26 @@ impl Loader {
         };
         let handle = tokio::spawn(async move {
             let mut frame: usize = 0;
-            draw(frame, &text, style);
+            draw(frame, &text_for_task.lock().unwrap(), style);
             loop {
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                 if stop_inner.load(Ordering::Relaxed) {
                     break;
                 }
                 frame = frame.wrapping_add(1);
-                draw(frame, &text, style);
+                draw(frame, &text_for_task.lock().unwrap(), style);
             }
         });
         Self {
             stop,
             handle: Some(handle),
+            text: text_shared,
+        }
+    }
+
+    pub fn set_text(&self, text: String) {
+        if let Ok(mut guard) = self.text.lock() {
+            *guard = text;
         }
     }
 
