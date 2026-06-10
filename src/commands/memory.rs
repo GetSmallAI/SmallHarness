@@ -221,6 +221,8 @@ mod tests {
                 &root.join(".sessions/test.jsonl"),
                 &config.paths,
             ),
+            trace: crate::turn_trace::test_trace_for(&root.join(".sessions/test.jsonl")),
+            trace_enabled: false,
             config,
         }
     }

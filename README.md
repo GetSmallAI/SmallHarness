@@ -328,6 +328,7 @@ this exact call`. The session cache resets on `/new`.
 /image <path>          attach an image to the next user turn
 /reasoning on|off      toggle the streaming reasoning panel
 /verbose on|off        show every tool call with its full args + result
+/trace on|off          show nested subagent/critic tool calls (indented)
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 ```
 
@@ -593,6 +594,10 @@ root. Common shape:
   "tools": ["file_read", "grep", "list_dir", "file_edit", "file_write", "shell", "update_plan", "task"],
   "toolSelection": "auto",
   "maxSteps": 20,
+  "display": {
+    "toolDisplay": "grouped",
+    "eventLog": { "enabled": true }
+  },
   "workspaceRoot": "/path/to/project",
   "outsideWorkspace": "prompt",
   "context": {
@@ -639,6 +644,14 @@ runtime.
 - **`/verbose on|off`** switches to a debug tool view: every tool call is
   printed with its full arguments and a large result preview, so you can see
   exactly what the agent is doing. `/verbose off` restores the normal view.
+- **`/trace on|off`** shows nested subagent and critic tool activity as
+  indented lines in the TUI (without flooding the parent context). Every turn
+  is also logged to a sidecar at `.sessions/<session-id>.events.jsonl` with
+  tool calls, approvals, compaction, warmup, and timing — enabled by default
+  via `display.eventLog.enabled` in `agent.config.json`.
+- **Turn footer timing.** After each turn the status line includes step count
+  and a breakdown when available: `TTFT`, `model`, `tools`, `approval`, and
+  `total` seconds alongside the existing token and cost stats.
 - **Slash-command completion.** Type `/` and a menu of matching commands (with
   descriptions) appears beneath the prompt; the best match also shows as dim
   ghost text. **↑/↓** select, **Tab** accepts (with a trailing space), **→**

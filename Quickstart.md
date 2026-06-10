@@ -143,7 +143,19 @@ Useful commands:
 /sessions search dispatch
 /new          start a clean conversation
 /export current markdown
+/export current events   copy the session event log sidecar
 ```
+
+**Transparent mode** (see everything the agent did):
+
+```text
+/verbose on
+/trace on
+```
+
+The event log lives beside each transcript:
+`.sessions/<session-id>.events.jsonl` (tool calls, approvals, compaction,
+warmup, per-turn timing summary).
 
 Good habits:
 
@@ -307,6 +319,7 @@ Small Harness keeps local state under `.sessions/`:
 .sessions/
   history.jsonl          input history
   *.jsonl                session transcripts
+  *.events.jsonl         per-session structured event logs (tools, timing, approvals)
   project-memory/
     index.json           safe metadata-only repo index
     notes.jsonl          durable project notes from /remember

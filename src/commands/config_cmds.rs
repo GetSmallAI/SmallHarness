@@ -1,4 +1,4 @@
-//! Config command group: /config, /backend, /model, /tools, /mode, /verbose,
+//! Config command group: /config, /backend, /model, /tools, /mode, /verbose, /trace,
 //! /reasoning, /auth, /login, /logout, /compare, /image.
 //! Split out of mod.rs; dispatch lives in mod.rs.
 
@@ -449,6 +449,35 @@ pub(super) fn cmd_verbose(args: &str, state: &mut AppState) {
     );
 }
 
+/// `/trace [on|off|status]` — surface nested subagent/critic tool calls in the
+/// TUI (indented) and always log them to the session event sidecar.
+pub(super) fn cmd_trace(args: &str, state: &mut AppState) {
+    let arg = args.trim().to_lowercase();
+    let new_state = match arg.as_str() {
+        "" | "status" => {
+            let cur = state.trace_enabled;
+            println!(
+                "  {DIM}trace nested agents:{RESET} {} {DIM}(usage: /trace on|off · log: {}){RESET}",
+                if cur { "on" } else { "off" },
+                crate::turn_trace::events_path_for_session(&state.session_path).display()
+            );
+            return;
+        }
+        "on" | "true" | "1" => true,
+        "off" | "false" | "0" => false,
+        other => {
+            println!("  {RED}✗{RESET} {DIM}unknown value: {other} (use on, off, status){RESET}");
+            return;
+        }
+    };
+    state.trace_enabled = new_state;
+    state.renderer.set_trace(new_state);
+    println!(
+        "  {GREEN}✓{RESET} {DIM}trace nested agents →{RESET} {CYAN}{}{RESET}{DIM} — subagent/critic tool calls shown indented{RESET}",
+        if new_state { "on" } else { "off" }
+    );
+}
+
 fn guess_image_mime(path: &std::path::Path) -> &'static str {
     match path
         .extension()
@@ -775,6 +804,8 @@ mod tests {
                 &root.join(".sessions/test.jsonl"),
                 &config.paths,
             ),
+            trace: crate::turn_trace::test_trace_for(&root.join(".sessions/test.jsonl")),
+            trace_enabled: false,
             config,
         }
     }

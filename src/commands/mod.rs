@@ -158,6 +158,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Show every tool call with full args + result (on, off, status)",
     ),
     (
+        "/trace",
+        "Show nested subagent/critic tool activity (on, off, status)",
+    ),
+    (
         "/backend",
         "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex)",
     ),
@@ -249,6 +253,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/image" => config_cmds::cmd_image(&args, state),
         "/reasoning" => config_cmds::cmd_reasoning(&args, state),
         "/verbose" => config_cmds::cmd_verbose(&args, state),
+        "/trace" => config_cmds::cmd_trace(&args, state),
         "/backend" => config_cmds::cmd_backend(&args, state).await?,
         "/model" => config_cmds::cmd_model(&args, state).await?,
         "/tools" => config_cmds::cmd_tools(&args, state),
@@ -912,6 +917,8 @@ mod tests {
                 &root.join(".sessions/test.jsonl"),
                 &config.paths,
             ),
+            trace: crate::turn_trace::test_trace_for(&root.join(".sessions/test.jsonl")),
+            trace_enabled: false,
             config,
         }
     }

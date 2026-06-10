@@ -341,7 +341,7 @@ pub async fn run_agent_eval(
             content: fixture.prompt.clone().into(),
         },
     ];
-    let tools = build_tools_for_names(&eval_config, &active_tool_names);
+    let tools = build_tools_for_names(&eval_config, &active_tool_names, None);
     let http = build_http_client();
     let mut tool_calls = Vec::new();
     let start = Instant::now();
@@ -362,6 +362,8 @@ pub async fn run_agent_eval(
         None,
         None,
         None,
+        None,
+        0,
     )
     .await;
     let elapsed_ms = start.elapsed().as_millis();
@@ -505,6 +507,7 @@ mod tests {
                 transcript_rewritten: false,
                 conversation_summary: None,
                 hit_step_limit: false,
+                metrics: crate::turn_trace::TurnMetrics::default(),
             },
             &[],
         );

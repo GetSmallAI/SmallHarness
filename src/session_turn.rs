@@ -2,15 +2,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use crate::agent::{run_agent, AgentEvent, ApprovalProvider, RunResult};
 use crate::app_state::AppState;
 use crate::backends::BackendDescriptor;
+use crate::budget::{format_bytes, headroom_bytes, measure_prompt_budget, usage_ratio};
 use crate::cancel::CancellationToken;
 use crate::catalog::{format_usd, turn_cost_usd};
 use crate::config::OperatorMode;
 use crate::context_guard::{
-    maybe_auto_compact, merge_system_prompt, rewrite_session_transcript, CompactSessionContext,
+    guard_config_from, maybe_auto_compact, merge_system_prompt, rewrite_session_transcript,
+    CompactSessionContext,
 };
 use crate::loader::Loader;
 use crate::openai::{ChatMessage, ImageUrl, UserContent, UserContentPart};
@@ -22,12 +25,12 @@ use crate::test_integration::{
 };
 use crate::tools::{
     build_tools_for_names, select_tool_names, tool_output_mutated_workspace, ToolPreview,
+    ToolRuntimeContext,
 };
 use crate::turn_checkpoint::{active_tools_need_checkpoints, should_push_checkpoint, TurnCapturer};
+use crate::turn_trace::{ApprovalDecision, TracePayload, TurnMetrics};
 use crate::warmup::warmup;
 
-// Routed through the shared theme so secondary text is readable bright-black
-// instead of ANSI faint.
 const RESET: &str = crate::theme::RESET;
 const DIM: &str = crate::theme::MUTED;
 const GREEN: &str = crate::theme::SUCCESS;
@@ -64,6 +67,43 @@ impl ApprovalProvider for YoloApproval {
     }
 }
 
+struct TracingApproval<'a> {
+    inner: &'a mut crate::approval::ApprovalCache,
+    trace: crate::turn_trace::SharedTurnTrace,
+    approval_ms: std::cell::Cell<u128>,
+}
+
+#[async_trait]
+impl ApprovalProvider for TracingApproval<'_> {
+    async fn approve(&mut self, name: &str, args: &Value, preview: Option<&ToolPreview>) -> bool {
+        let start = Instant::now();
+        let cache_key = format!(
+            "{name}:{}",
+            args.get("command")
+                .and_then(Value::as_str)
+                .or_else(|| args.get("path").and_then(Value::as_str))
+                .unwrap_or("")
+        );
+        let allowed = self.inner.approve(name, args, preview).await;
+        let elapsed = start.elapsed().as_millis();
+        self.approval_ms.set(self.approval_ms.get() + elapsed);
+        let decision = if allowed {
+            ApprovalDecision::Allowed
+        } else {
+            ApprovalDecision::Denied
+        };
+        if let Ok(guard) = self.trace.lock() {
+            let _ = guard.append(TracePayload::Approval {
+                tool: name.to_string(),
+                decision,
+                cache_key,
+                duration_ms: elapsed,
+            });
+        }
+        allowed
+    }
+}
+
 fn format_tokens(n: u32) -> String {
     if n >= 1000 {
         format!("{:.1}k", n as f32 / 1000.0)
@@ -72,13 +112,6 @@ fn format_tokens(n: u32) -> String {
     }
 }
 
-/// Build the cost suffix for the end-of-turn status line.
-///
-/// Renders nothing for purely local sessions so users on Ollama/LM Studio
-/// don't see a meaningless "$0.00." For cloud sessions: shows the turn cost
-/// when the model is in the catalog, "$?" when it isn't (e.g. OpenRouter
-/// or a not-yet-cataloged OpenAI model), and prefixes the session total
-/// with `≥` whenever any turn fell into the unknown bucket.
 fn format_path_suffix(state: &AppState) -> String {
     if !state.paths_enabled() || state.path_store.path_count() <= 1 {
         return String::new();
@@ -111,6 +144,10 @@ fn format_cost_suffix(
     )
 }
 
+fn format_timing_suffix(metrics: &TurnMetrics) -> String {
+    metrics.format_footer_suffix()
+}
+
 fn prompt_fingerprint(
     backend: &BackendDescriptor,
     model: &str,
@@ -141,11 +178,36 @@ fn set_system_message(messages: &mut Vec<ChatMessage>, system_prompt: String) ->
     }
 }
 
+fn maybe_print_context_pressure(
+    state: &AppState,
+    system_prompt: &str,
+    tool_defs: &[crate::openai::ToolDef],
+) {
+    let guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
+    let budget = measure_prompt_budget(system_prompt, &state.messages, tool_defs);
+    let ratio = usage_ratio(&budget, guard.effective_limit_bytes);
+    let threshold = guard.compact_threshold * 0.7;
+    if ratio < threshold {
+        return;
+    }
+    println!(
+        "  {DIM}context {:.0}% · schema {} · headroom {}{RESET}",
+        ratio * 100.0,
+        format_bytes(budget.tool_schema_bytes),
+        format_bytes(headroom_bytes(&budget, guard.effective_limit_bytes)),
+    );
+}
+
 pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<TurnOutcome> {
     let trimmed = opts.user_prompt.trim();
     if trimmed.is_empty() {
         anyhow::bail!("turn prompt is empty");
     }
+
+    if let Ok(mut trace) = state.trace.lock() {
+        trace.begin_turn();
+    }
+    state.renderer.set_trace(state.trace_enabled);
 
     let active_tool_names = select_tool_names(&state.config, trimmed);
     let base_system_prompt = append_ship_context(
@@ -183,9 +245,17 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     state.messages.push(user_msg.clone());
     let _ = save_message(&state.session_path, &user_msg);
 
-    let mut tools = build_tools_for_names(&state.config, &active_tool_names);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let tool_runtime = ToolRuntimeContext {
+        trace: state.trace.clone(),
+        trace_enabled: state.trace_enabled,
+        agent_events: Some(tx.clone()),
+    };
+    let mut tools = build_tools_for_names(&state.config, &active_tool_names, Some(&tool_runtime));
     tools.extend(state.mcp_tools.iter().cloned());
     let tool_defs = crate::agent::to_openai_tools(&tools);
+    maybe_print_context_pressure(state, &system_prompt, &tool_defs);
+
     let mut compact_ctx = CompactSessionContext {
         messages: &mut state.messages,
         system_prompt: &base_system_prompt,
@@ -221,6 +291,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     if let Some(ChatMessage::System { content }) = state.messages.first_mut() {
         *content = system_prompt.clone();
     }
+
     let guard_params = crate::context_guard::guard_params_from(
         &state.config,
         &state.model,
@@ -249,8 +320,18 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         )
         .await;
         loader.stop();
-        if warm_result.is_ok() {
+        if let Ok(ms) = warm_result {
             state.warmed_fingerprint = Some(fingerprint);
+            println!(
+                "  {DIM}re-warming prompt cache (backend/model/tools changed) · {:.0}ms{RESET}",
+                ms
+            );
+            if let Ok(trace) = state.trace.lock() {
+                let _ = trace.append(TracePayload::Warmup {
+                    duration_ms: ms,
+                    reason: "fingerprint_changed".into(),
+                });
+            }
         }
     }
 
@@ -259,6 +340,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let model = state.model.clone();
     let backend_desc_clone = state.backend.clone();
     let http_clone = state.http.clone();
+    let trace = state.trace.clone();
 
     let loader = Loader::start(
         state.config.display.loader_text.clone(),
@@ -266,7 +348,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     );
     let mut loader_opt = Some(loader);
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let cancel = CancellationToken::new();
     let cancel_for_agent = cancel.clone();
     let cancel_for_signal = cancel.clone();
@@ -297,10 +378,15 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         };
 
     let mut yolo = YoloApproval;
+    let mut tracing_approval = TracingApproval {
+        inner: &mut state.approval_cache,
+        trace: state.trace.clone(),
+        approval_ms: std::cell::Cell::new(0),
+    };
     let approval: &mut dyn ApprovalProvider = if opts.yolo_approve {
         &mut yolo
     } else {
-        &mut state.approval_cache
+        &mut tracing_approval
     };
 
     let mut tool_calls = Vec::new();
@@ -320,11 +406,15 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             Some(cancel_for_agent),
             Some((guard_params, base_system_prompt.clone())),
             turn_capturer.as_mut(),
+            Some(trace),
+            0,
         )
         .await
     };
 
     let mut memory_changed = false;
+    let loader_style = state.config.display.loader_style;
+    let default_loader_text = state.config.display.loader_text.clone();
     let drain_fut = async {
         while let Some(e) = rx.recv().await {
             if let Some(l) = loader_opt.take() {
@@ -332,6 +422,16 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             }
             if let AgentEvent::ToolCall { name, .. } = &e {
                 tool_calls.push(name.clone());
+                if let Some(loader) = loader_opt.as_mut() {
+                    loader.set_text(format!("Running {name}…"));
+                } else {
+                    loader_opt = Some(Loader::start(format!("Running {name}…"), loader_style));
+                }
+            }
+            if let AgentEvent::ToolResult { .. } = &e {
+                if let Some(loader) = loader_opt.as_mut() {
+                    loader.set_text(default_loader_text.clone());
+                }
             }
             if let AgentEvent::ToolResult { name, output, .. } = &e {
                 if tool_output_mutated_workspace(name, output) {
@@ -362,6 +462,18 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     state.renderer.end_turn();
 
     let res = result?;
+    let mut metrics = res.metrics.clone();
+    if !opts.yolo_approve {
+        metrics.approval_ms = tracing_approval.approval_ms.get();
+    }
+    metrics.total_ms = metrics
+        .total_ms
+        .max(metrics.model_ms + metrics.tool_ms + metrics.approval_ms);
+
+    if let Ok(trace) = state.trace.lock() {
+        let _ = trace.log_turn_summary(metrics.clone());
+    }
+
     state.messages = res.messages.clone();
     if let Some(summary) = res.conversation_summary.clone() {
         state.conversation_summary = Some(summary);
@@ -372,6 +484,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         {
             println!("  {RED}✗{RESET} {DIM}session rewrite failed: {e}{RESET}");
         }
+        let _ = state.reset_trace_for_session();
     } else {
         for message in &state.messages[before..] {
             let _ = save_message(&state.session_path, message);
@@ -388,9 +501,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     match turn_cost {
         Some(c) => state.session_usd += c,
         None => {
-            // Local backends have no $ cost — silently treat as zero, don't
-            // mark the session total as a lower bound. Cloud backends with
-            // an uncataloged model are the real "unknown" case.
             if !state.config.backend.is_local() && (res.input_tokens > 0 || res.output_tokens > 0) {
                 state.session_cost_has_unknown = true;
             }
@@ -457,7 +567,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
 
     println!(
-        "{GRAY}  {} in · {} out{}{}{RESET}",
+        "{GRAY}  {} in · {} out{}{}{}{RESET}",
         format_tokens(res.input_tokens),
         format_tokens(res.output_tokens),
         format_cost_suffix(
@@ -466,6 +576,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             state.session_usd,
             state.session_cost_has_unknown
         ),
+        format_timing_suffix(&metrics),
         format_path_suffix(state),
     );
 
@@ -481,6 +592,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+    use crate::turn_trace::TurnMetrics;
 
     #[test]
     fn no_suffix_for_pure_local_session() {
@@ -508,5 +620,21 @@ mod cost_tests {
         assert!(s.contains("$0.00 this turn"));
         assert!(s.contains("$0.42 session"));
         assert!(!s.contains("≥"));
+    }
+
+    #[test]
+    fn timing_suffix_includes_steps_and_model_time() {
+        let metrics = TurnMetrics {
+            steps: 3,
+            ttft_ms: Some(500),
+            model_ms: 1200,
+            tool_ms: 800,
+            approval_ms: 0,
+            total_ms: 2500,
+            hit_step_limit: false,
+        };
+        let s = format_timing_suffix(&metrics);
+        assert!(s.contains("3 steps"));
+        assert!(s.contains("model"));
     }
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::cancel::CancellationToken;
 use crate::config::{AgentConfig, ApprovalPolicy, ToolSelection};
+use crate::turn_trace::SharedTurnTrace;
 
 mod apply_patch_tool;
 mod batch_edit;
@@ -43,6 +44,14 @@ pub use ship_status::ShipStatusTool;
 pub use subagent::SubagentTool;
 pub use update_plan::UpdatePlanTool;
 pub use web_fetch::WebFetchTool;
+
+/// Per-turn runtime handles passed into tools that spawn nested agent loops.
+#[derive(Clone)]
+pub struct ToolRuntimeContext {
+    pub trace: SharedTurnTrace,
+    pub trace_enabled: bool,
+    pub agent_events: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentEvent>>,
+}
 
 /// Base64-encode raw bytes for use in a data URL (e.g. `data:image/png;base64,...`).
 /// Re-exported from `file_read` so callers outside the tools module (like
@@ -192,7 +201,11 @@ pub fn is_read_only_tool(name: &str) -> bool {
     read_only_tool_names().contains(&name)
 }
 
-pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<dyn Tool>> {
+pub fn build_tools_for_names(
+    config: &AgentConfig,
+    names: &[String],
+    runtime: Option<&ToolRuntimeContext>,
+) -> Vec<Arc<dyn Tool>> {
     let approve_writes = config.approval_policy != ApprovalPolicy::Never;
     let path_policy = PathPolicy::new(&config.workspace_root, config.outside_workspace);
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
@@ -252,6 +265,7 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
                     backend,
                     model,
                     config: config.clone(),
+                    runtime: runtime.cloned(),
                 }))
             }
             "web_fetch" => Some(Arc::new(WebFetchTool {
@@ -269,6 +283,7 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
                     backend,
                     model,
                     config: config.clone(),
+                    runtime: runtime.cloned(),
                 }))
             }
             _ => None,
@@ -281,7 +296,7 @@ pub fn build_tools_for_names(config: &AgentConfig, names: &[String]) -> Vec<Arc<
 }
 
 pub fn build_tools(config: &AgentConfig) -> Vec<Arc<dyn Tool>> {
-    build_tools_for_names(config, &config.tools)
+    build_tools_for_names(config, &config.tools, None)
 }
 
 #[cfg(test)]

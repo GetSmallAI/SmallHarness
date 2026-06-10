@@ -163,6 +163,7 @@ pub async fn run_iterate_loop(state: &mut AppState, opts: IterateOptions) -> Res
             &target,
             Some(&diff),
             None,
+            None,
         )
         .await;
         last_total = verdict.weighted_total;
@@ -298,6 +299,8 @@ mod tests {
             pending_image_attachments: Vec::new(),
             mcp_tools: Vec::new(),
             path_store: PathStore::new(&config.session_dir, &session_path, &config.paths),
+            trace: crate::turn_trace::test_trace_for(&session_path),
+            trace_enabled: false,
             config,
         }
     }

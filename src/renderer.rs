@@ -297,6 +297,7 @@ pub struct TuiRenderer {
     answer_wrap: Option<StreamWrap>,
     /// The configured tool display, remembered so `/verbose off` can restore it.
     base_tool_display: ToolDisplay,
+    trace_enabled: bool,
 }
 
 impl TuiRenderer {
@@ -312,6 +313,7 @@ impl TuiRenderer {
             reasoning_header_shown: false,
             answer_wrap: None,
             base_tool_display,
+            trace_enabled: false,
         }
     }
 
@@ -339,6 +341,15 @@ impl TuiRenderer {
         matches!(self.display.tool_display, ToolDisplay::Verbose)
     }
 
+    pub fn set_trace(&mut self, on: bool) {
+        self.trace_enabled = on;
+    }
+
+    #[allow(dead_code)]
+    pub fn trace_enabled(&self) -> bool {
+        self.trace_enabled
+    }
+
     pub fn handle(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Text { delta } => self.render_text(&delta),
@@ -346,15 +357,23 @@ impl TuiRenderer {
                 name,
                 call_id,
                 args,
+                depth,
             } => {
                 self.end_answer();
-                self.render_tool_call(&name, &call_id, args)
+                self.render_tool_call(&name, &call_id, args, depth)
             }
             AgentEvent::ToolResult {
                 name,
                 call_id,
                 output,
-            } => self.render_tool_result(&name, &call_id, &output),
+                depth,
+            } => self.render_tool_result(&name, &call_id, &output, depth),
+            AgentEvent::ToolOutputCompacted {
+                name,
+                summary,
+                depth,
+                ..
+            } => self.render_compaction_notice(&name, &summary, depth),
             AgentEvent::Reasoning { delta } => {
                 self.end_answer();
                 self.render_reasoning(&delta)
@@ -455,8 +474,11 @@ impl TuiRenderer {
         let _ = out.flush();
     }
 
-    fn render_tool_call(&mut self, name: &str, call_id: &str, args: Value) {
+    fn render_tool_call(&mut self, name: &str, call_id: &str, args: Value, depth: u32) {
         if matches!(self.display.tool_display, ToolDisplay::Hidden) {
+            return;
+        }
+        if depth > 0 && !self.trace_enabled {
             return;
         }
         // The plan is rendered as a checklist at call time (the args carry the
@@ -468,6 +490,20 @@ impl TuiRenderer {
         }
         self.end_streaming();
         self.tool_start.insert(call_id.to_string(), Instant::now());
+
+        if depth > 0 {
+            let arg_str = formatter_for(name, &args);
+            let indent = "  ".repeat(depth as usize);
+            println!(
+                "{PAD}{indent}{DIM}↳ {name}{RESET} {GRAY}{}{RESET}",
+                if arg_str.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {arg_str}")
+                }
+            );
+            return;
+        }
 
         match self.display.tool_display {
             ToolDisplay::Emoji => {
@@ -545,8 +581,11 @@ impl TuiRenderer {
         println!();
     }
 
-    fn render_tool_result(&mut self, name: &str, call_id: &str, output: &str) {
+    fn render_tool_result(&mut self, name: &str, call_id: &str, output: &str, depth: u32) {
         if matches!(self.display.tool_display, ToolDisplay::Hidden) {
+            return;
+        }
+        if depth > 0 && !self.trace_enabled {
             return;
         }
         // The plan was already drawn at call time; its result carries no new
@@ -560,6 +599,20 @@ impl TuiRenderer {
             .map(|s| s.elapsed().as_millis() as f64 / 1000.0)
             .unwrap_or(0.0);
         let dur = format!("({:.1}s)", ms);
+
+        if depth > 0 {
+            let indent = "  ".repeat(depth as usize);
+            let summary = summarize_output(output);
+            println!(
+                "{PAD}{indent}{DIM}↳ {name} {dur}{RESET} {GRAY}{}{RESET}",
+                if summary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {summary}")
+                }
+            );
+            return;
+        }
 
         match self.display.tool_display {
             ToolDisplay::Emoji => {
@@ -582,6 +635,18 @@ impl TuiRenderer {
             }
             _ => {}
         }
+    }
+
+    fn render_compaction_notice(&mut self, name: &str, summary: &str, depth: u32) {
+        if depth > 0 && !self.trace_enabled {
+            return;
+        }
+        let indent = if depth > 0 {
+            "  ".repeat(depth as usize)
+        } else {
+            String::new()
+        };
+        println!("{PAD}{indent}{DIM}↳ {name} output compacted: {summary}{RESET}");
     }
 
     fn flush_grouped(&mut self) {

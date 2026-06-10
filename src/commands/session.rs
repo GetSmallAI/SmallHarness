@@ -23,7 +23,13 @@ pub(super) fn cmd_new(state: &mut AppState) {
     state.total_out = 0;
     state.session_usd = 0.0;
     state.session_cost_has_unknown = false;
+    state.trace_enabled = false;
+    state.renderer.set_trace(false);
     state.reset_session();
+    let _ = state.reset_trace_for_session();
+    if let Ok(mut trace) = state.trace.lock() {
+        trace.begin_turn();
+    }
     println!("  {GREEN}✓{RESET} {DIM}New session started.{RESET}");
 }
 
@@ -394,6 +400,7 @@ pub(super) fn cmd_resume(args: &str, state: &mut AppState) -> Result<()> {
     let messages = load_messages(&path)?;
     state.messages = messages;
     state.session_path = path.clone();
+    let _ = state.reset_trace_for_session();
     state.path_store =
         PathStore::load(&state.session_dir, &state.session_path, &state.config.paths);
     let metadata = load_session_metadata(&path)?;
@@ -473,6 +480,31 @@ pub(super) fn cmd_export(args: &str, state: &AppState) -> Result<()> {
             .to_string();
         (load_session(&path)?, id)
     };
+    if format == "events" {
+        let session_path = if target == "current" {
+            state.session_path.clone()
+        } else {
+            resolve_session_path(&state.session_dir, target)?
+                .ok_or_else(|| anyhow::anyhow!("session not found: {target}"))?
+        };
+        let events_src = crate::turn_trace::events_path_for_session(&session_path);
+        let out_path = explicit_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(&state.session_dir).join(format!("{id}.events.jsonl")));
+        if !events_src.exists() {
+            println!(
+                "  {RED}✗{RESET} {DIM}no event log at {}{RESET}",
+                events_src.display()
+            );
+            return Ok(());
+        }
+        fs::copy(&events_src, &out_path)?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}exported events →{RESET} {}",
+            out_path.display()
+        );
+        return Ok(());
+    }
     let ext = if format == "json" { "json" } else { "md" };
     let out_path = explicit_path
         .map(PathBuf::from)
@@ -604,6 +636,8 @@ mod tests {
                 &root.join(".sessions/test.jsonl"),
                 &config.paths,
             ),
+            trace: crate::turn_trace::test_trace_for(&root.join(".sessions/test.jsonl")),
+            trace_enabled: false,
             config,
         }
     }

@@ -176,6 +176,8 @@ pub struct DisplayConfig {
     pub reasoning: bool,
     #[serde(rename = "showBanner", default = "default_true")]
     pub show_banner: bool,
+    #[serde(rename = "eventLog", default)]
+    pub event_log: crate::turn_trace::EventLogConfig,
 }
 
 fn default_true() -> bool {
@@ -203,6 +205,7 @@ impl Default for DisplayConfig {
             loader_style: default_loader_style(),
             reasoning: false,
             show_banner: true,
+            event_log: crate::turn_trace::EventLogConfig::default(),
         }
     }
 }

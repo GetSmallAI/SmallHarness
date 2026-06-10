@@ -196,7 +196,7 @@ pub(super) fn cmd_context(args: &str, state: &mut AppState) {
     );
     let system_prompt =
         merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
-    let tools = build_tools_for_names(&state.config, &active_tool_names);
+    let tools = build_tools_for_names(&state.config, &active_tool_names, None);
     let tool_defs = to_openai_tools(&tools);
     let budget = measure_prompt_budget(&system_prompt, &state.messages, &tool_defs);
     println!("  {DIM}messages{RESET}  {}", state.messages.len());
@@ -259,7 +259,7 @@ pub(super) async fn cmd_compact(args: &str, state: &mut AppState) -> Result<()> 
         &active_tool_names,
         &last_prompt,
     );
-    let tools = build_tools_for_names(&state.config, &active_tool_names);
+    let tools = build_tools_for_names(&state.config, &active_tool_names, None);
     let tool_defs = to_openai_tools(&tools);
 
     println!("  {DIM}Compacting older messages…{RESET}");
@@ -395,6 +395,8 @@ mod tests {
                 &root.join(".sessions/test.jsonl"),
                 &config.paths,
             ),
+            trace: crate::turn_trace::test_trace_for(&root.join(".sessions/test.jsonl")),
+            trace_enabled: false,
             config,
         }
     }

@@ -10,6 +10,7 @@ use crate::renderer::TuiRenderer;
 use crate::session_paths::PathStore;
 use crate::tools::Tool;
 use crate::turn_checkpoint::CheckpointStack;
+use crate::turn_trace::SharedTurnTrace;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -79,6 +80,8 @@ pub struct AppState {
     /// each turn shares the same live JSON-RPC connection per server.
     pub mcp_tools: Vec<Arc<dyn Tool>>,
     pub path_store: PathStore,
+    pub trace: SharedTurnTrace,
+    pub trace_enabled: bool,
 }
 
 impl AppState {
@@ -109,6 +112,13 @@ impl AppState {
     pub fn reset_session(&mut self) {
         self.session_path = crate::session::new_session_path(&self.session_dir);
         self.path_store = PathStore::new(&self.session_dir, &self.session_path, &self.config.paths);
+        if let Ok(mut trace) = self.trace.lock() {
+            trace.begin_turn();
+        }
+    }
+
+    pub fn reset_trace_for_session(&mut self) -> anyhow::Result<()> {
+        crate::turn_trace::sync_trace_path(&self.session_path, &self.trace)
     }
 
     pub fn in_play_session(&self) -> bool {

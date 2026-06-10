@@ -42,6 +42,7 @@ mod test_integration;
 mod theme;
 mod tools;
 mod turn_checkpoint;
+mod turn_trace;
 mod update_check;
 mod warmup;
 
@@ -254,7 +255,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
             content: prompt.to_string().into(),
         },
     ];
-    let tools = build_tools_for_names(&config, &active_tool_names);
+    let tools = build_tools_for_names(&config, &active_tool_names, None);
     let mut approval = NonInteractiveApproval {
         allow: opts.allow_tools,
     };
@@ -295,6 +296,8 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
         None,
         None,
         None,
+        None,
+        0,
     )
     .await?;
     println!();
@@ -437,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  {DIM}You can still type /backend to switch, or fix and retry.{RESET}");
     } else if std::env::var("WARMUP").as_deref() != Ok("false") {
         let warmup_tool_names = select_tool_names(&config, "");
-        let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names);
+        let warmup_tools_vec = build_tools_for_names(&config, &warmup_tool_names, None);
         let warmup_tool_defs = crate::agent::to_openai_tools(&warmup_tools_vec);
         let warmup_prompt = config.render_system_prompt_for_tools(&warmup_tool_names);
         let loader = crate::loader::Loader::start("Warming up".into(), config.display.loader_style);
@@ -486,6 +489,11 @@ async fn main() -> anyhow::Result<()> {
     let checkpoints_enabled = config.checkpoints.enabled;
     let display = config.display.clone();
 
+    let trace = crate::turn_trace::shared_trace(&session_path, config.display.event_log.enabled)?;
+    if let Ok(mut t) = trace.lock() {
+        t.begin_turn();
+    }
+
     let mut state = AppState {
         config,
         http,
@@ -511,6 +519,8 @@ async fn main() -> anyhow::Result<()> {
         pending_image_attachments: Vec::new(),
         mcp_tools: Vec::new(),
         path_store: PathStore::new(&session_dir, &session_path, &paths_config),
+        trace,
+        trace_enabled: false,
     };
 
     if !state.config.mcp_servers.is_empty() {
