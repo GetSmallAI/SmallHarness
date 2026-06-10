@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-09
+
+### Added
+
+- **Turn tracing and session event log.** Every turn appends structured events
+  (tool calls with redacted args, approvals, output compaction, warmup, timing)
+  to a sidecar at `.sessions/<session-id>.events.jsonl`, enabled by default via
+  `display.eventLog.enabled`. `/trace on|off` shows nested subagent/critic tool
+  calls as indented lines in the TUI — previously invisible — and
+  `/export <session> events` copies the sidecar. The end-of-turn status line
+  gains a timing breakdown (TTFT, model, tools, approval, total), the loader
+  names the tool currently running, and compaction of oversized tool output is
+  reported with the original size.
+- **Agent eval CLI.** `small-harness --eval <fixture> [--model M] [--json]`
+  runs a bundled eval fixture from the shell and exits 0 on pass / 1 on fail,
+  for CI scripts. An optional `agent-eval` CI job runs two fixtures against
+  Ollama nightly or on `[eval]` in a commit message (continue-on-error, so a
+  flaky local model never blocks merges). New integration tests drive the real
+  agent loop against a mock OpenAI-compatible SSE server — no live LLM needed.
+
+### Fixed
+
+- `file_edit` can create new files via the empty-`old_text` convention used by
+  Claude Code and similar harnesses.
+- Tool responses for three model-facing edge cases: `file_read` with an offset
+  past EOF returns a clear error instead of silently-empty content, `list_dir`
+  reports the real entry `total` when a listing is truncated, and `grep` drops
+  unparseable ripgrep output lines instead of emitting malformed matches.
+- The rubric heading parser matches `(weight:` case-insensitively on raw bytes,
+  fixing potential mis-parses of criterion names containing certain Unicode
+  characters.
+- The HTTP client now uses a 10-second connect timeout so a dead backend fails
+  fast instead of hanging, without capping long streaming completions.
+
+### Changed
+
+- Internal: the 3,000-line commands module was split into focused submodules
+  (config, context, memory, session). No behavior change.
+
 ## [0.6.1] - 2026-06-07
 
 ### Added
