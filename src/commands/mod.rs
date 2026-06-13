@@ -452,6 +452,9 @@ struct ShipArgs {
     staging: Option<ShipStaging>,
     yes: bool,
     message: Option<String>,
+    pr_base: Option<String>,
+    pr_ready: bool,
+    pr_title: Option<String>,
 }
 
 fn parse_ship_args(args: &str) -> Option<ShipArgs> {
@@ -463,6 +466,9 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
         staging: None,
         yes: false,
         message: None,
+        pr_base: None,
+        pr_ready: false,
+        pr_title: None,
     };
     let mut action_seen = false;
     let mut parts = args.split_whitespace().peekable();
@@ -495,6 +501,22 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
             "--no-tests" => parsed.run_tests = Some(false),
             "--allow-behind" => parsed.allow_behind = true,
             "--cloud" => parsed.allow_cloud = true,
+            "--ready" => parsed.pr_ready = true,
+            "--draft" => parsed.pr_ready = false,
+            "--base" => {
+                let value = parts.next()?;
+                if value.trim().is_empty() {
+                    return None;
+                }
+                parsed.pr_base = Some(value.to_string());
+            }
+            p if p.starts_with("--base=") => {
+                let value = p.strip_prefix("--base=")?;
+                if value.trim().is_empty() {
+                    return None;
+                }
+                parsed.pr_base = Some(value.to_string());
+            }
             "--all" => {
                 if parsed.staging.replace(ShipStaging::All).is_some() {
                     return None;
@@ -514,6 +536,27 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
                 parsed.message = Some(rest);
                 break;
             }
+            "--title" => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                if rest.trim().is_empty() {
+                    return None;
+                }
+                parsed.pr_title = Some(rest);
+                break;
+            }
+            p if p.starts_with("--title=") => {
+                let value = p.strip_prefix("--title=")?;
+                if value.trim().is_empty() {
+                    return None;
+                }
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                parsed.pr_title = Some(if rest.trim().is_empty() {
+                    value.to_string()
+                } else {
+                    format!("{value} {rest}")
+                });
+                break;
+            }
             _ => return None,
         }
     }
@@ -524,32 +567,25 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
 async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     let Some(args) = parse_ship_args(args) else {
         println!(
-            "  {DIM}Usage: /ship [preview|commit|push] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>]{RESET}"
+            "  {DIM}Usage: /ship [preview|commit|push|pr] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>] [--base <branch>] [--ready] [--title <title>]{RESET}"
         );
         return Ok(());
     };
-
-    if args.action == ShipAction::Pr {
-        println!(
-            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview, commit, and push.{RESET}",
-            match args.action {
-                ShipAction::Preview => "preview",
-                ShipAction::Commit => "commit",
-                ShipAction::Push => "push",
-                ShipAction::Pr => "pr",
-            }
-        );
-        return Ok(());
-    }
 
     if args.action != ShipAction::Commit && args.staging.is_some() {
         println!("  {DIM}Usage: staging flags only apply to /ship commit.{RESET}");
         return Ok(());
     }
-    if args.action == ShipAction::Push && args.message.is_some() {
+    if matches!(args.action, ShipAction::Push | ShipAction::Pr) && args.message.is_some() {
         println!(
             "  {DIM}Usage: commit messages only apply to /ship preview or /ship commit.{RESET}"
         );
+        return Ok(());
+    }
+    if args.action != ShipAction::Pr
+        && (args.pr_base.is_some() || args.pr_title.is_some() || args.pr_ready)
+    {
+        println!("  {DIM}Usage: PR flags only apply to /ship pr.{RESET}");
         return Ok(());
     }
     if args.action == ShipAction::Commit && args.staging.is_none() {
@@ -574,6 +610,8 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     };
     let readiness = if args.action == ShipAction::Push {
         evaluate_ship_push_readiness(&snapshot, args.allow_behind)
+    } else if args.action == ShipAction::Pr {
+        evaluate_ship_pr_readiness(&snapshot, args.allow_behind)
     } else {
         evaluate_ship_readiness(&snapshot, args.allow_behind)
     };
@@ -614,7 +652,8 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
             run_ship_commit(args, snapshot, freshness.as_ref(), readiness, state).await
         }
         ShipAction::Push => run_ship_push(args, snapshot, readiness, state).await,
-        ShipAction::Preview | ShipAction::Pr => Ok(()),
+        ShipAction::Pr => run_ship_pr(args, snapshot, readiness, state).await,
+        ShipAction::Preview => Ok(()),
     }
 }
 
@@ -750,6 +789,360 @@ async fn run_ship_push(
         record_path.display()
     );
     Ok(())
+}
+
+async fn run_ship_pr(
+    args: ShipArgs,
+    snapshot: ShipcheckSnapshot,
+    readiness: ShipReadiness,
+    state: &AppState,
+) -> Result<()> {
+    if readiness.status == ShipReadinessStatus::Blocked {
+        println!("  {RED}✗{RESET} {DIM}PR not created{RESET}");
+        return Ok(());
+    }
+
+    let target = match resolve_ship_pr_target(
+        &state.config.workspace_root,
+        &snapshot,
+        args.pr_base.as_deref(),
+    ) {
+        Ok(target) => target,
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}PR not created: {e}{RESET}");
+            return Ok(());
+        }
+    };
+    let commit_hash = run_git_capture(
+        &state.config.workspace_root,
+        &["rev-parse", "--short", "HEAD"],
+    )?
+    .trim()
+    .to_string();
+    let title = args
+        .pr_title
+        .as_deref()
+        .and_then(normalize_commit_message)
+        .unwrap_or_else(|| latest_commit_subject(&state.config.workspace_root));
+    let commits = pr_commit_summary(&state.config.workspace_root, &target);
+    let body = render_ship_pr_body(&snapshot, &target, &commit_hash, &commits);
+    let command = build_gh_pr_command(&target, &title, &body, !args.pr_ready);
+
+    println!("  {DIM}prTarget{RESET}        {}", target.description());
+    println!("  {DIM}prTitle{RESET}         {title}");
+    println!(
+        "  {DIM}prMode{RESET}          {}",
+        if args.pr_ready { "ready" } else { "draft" }
+    );
+
+    if !gh_cli_ready(&state.config.workspace_root) {
+        println!("  {YELLOW}!{RESET} {DIM}GitHub CLI is unavailable or unauthenticated; run this manually:{RESET}");
+        println!("    {}", shell_command_display(&command));
+        let record_path = write_ship_pr_record(
+            &state.session_dir,
+            &ShipPrRecord {
+                snapshot: &snapshot,
+                target: &target,
+                title: &title,
+                body: &body,
+                command: &command,
+                url: None,
+                status: "manual command printed",
+            },
+        )?;
+        println!(
+            "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
+            record_path.display()
+        );
+        return Ok(());
+    }
+
+    let prompt = format!(
+        "  {YELLOW}?{RESET} {DIM}Create {} PR {}? [y/N]{RESET}",
+        if args.pr_ready { "ready" } else { "draft" },
+        target.description()
+    );
+    if !args.yes && !confirm_ship_action(prompt).await? {
+        println!("  {RED}✗{RESET} {DIM}ship PR cancelled{RESET}");
+        return Ok(());
+    }
+
+    let output = run_command_capture_combined(&state.config.workspace_root, &command)?;
+    let url = extract_url(&output);
+    let record_path = write_ship_pr_record(
+        &state.session_dir,
+        &ShipPrRecord {
+            snapshot: &snapshot,
+            target: &target,
+            title: &title,
+            body: &body,
+            command: &command,
+            url: url.as_deref(),
+            status: "created",
+        },
+    )?;
+    match &url {
+        Some(url) => println!("  {GREEN}✓{RESET} {DIM}PR created:{RESET} {CYAN}{url}{RESET}"),
+        None => println!("  {GREEN}✓{RESET} {DIM}PR created{RESET}"),
+    }
+    println!(
+        "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
+        record_path.display()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipPrTarget {
+    remote: String,
+    repo: String,
+    head_branch: String,
+    base_branch: String,
+}
+
+impl ShipPrTarget {
+    fn description(&self) -> String {
+        format!(
+            "{}:{} -> {}:{}",
+            self.repo, self.head_branch, self.repo, self.base_branch
+        )
+    }
+}
+
+fn resolve_ship_pr_target(
+    workspace_root: &str,
+    snapshot: &ShipcheckSnapshot,
+    explicit_base: Option<&str>,
+) -> Result<ShipPrTarget> {
+    let upstream = snapshot
+        .branch
+        .upstream
+        .as_deref()
+        .ok_or_else(|| anyhow!("branch has no upstream; run /ship push first"))?;
+    let (remote, remote_branch) = upstream
+        .split_once('/')
+        .ok_or_else(|| anyhow!("upstream `{upstream}` does not include a remote"))?;
+    let remote_url = run_git_capture(workspace_root, &["remote", "get-url", remote])?;
+    let repo = parse_github_repo(remote_url.trim())
+        .ok_or_else(|| anyhow!("remote `{remote}` is not a GitHub URL"))?;
+    let base_branch = explicit_base
+        .and_then(normalize_commit_message)
+        .unwrap_or_else(|| {
+            discover_default_branch(workspace_root, remote).unwrap_or_else(|| "main".into())
+        });
+
+    Ok(ShipPrTarget {
+        remote: remote.to_string(),
+        repo,
+        head_branch: remote_branch.to_string(),
+        base_branch,
+    })
+}
+
+fn parse_github_repo(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches(".git");
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        return normalize_repo_slug(rest);
+    }
+    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        return normalize_repo_slug(rest);
+    }
+    if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        return normalize_repo_slug(rest);
+    }
+    None
+}
+
+fn normalize_repo_slug(value: &str) -> Option<String> {
+    let mut parts = value.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn discover_default_branch(workspace_root: &str, remote: &str) -> Option<String> {
+    let output = run_git_capture(
+        workspace_root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ],
+    )
+    .ok()?;
+    let trimmed = output.trim();
+    trimmed
+        .strip_prefix(&format!("{remote}/"))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
+fn latest_commit_subject(workspace_root: &str) -> String {
+    run_git_capture(workspace_root, &["log", "-1", "--pretty=%s"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Ship Small Harness changes".into())
+}
+
+fn pr_commit_summary(workspace_root: &str, target: &ShipPrTarget) -> String {
+    let base_ref = format!("{}/{}", target.remote, target.base_branch);
+    let range = format!("{base_ref}..HEAD");
+    run_git_capture(
+        workspace_root,
+        &["log", "--oneline", "--max-count=20", &range],
+    )
+    .ok()
+    .filter(|s| !s.trim().is_empty())
+    .or_else(|| run_git_capture(workspace_root, &["log", "--oneline", "--max-count=5"]).ok())
+    .unwrap_or_else(|| "No commit summary available.".into())
+}
+
+fn render_ship_pr_body(
+    snapshot: &ShipcheckSnapshot,
+    target: &ShipPrTarget,
+    commit_hash: &str,
+    commits: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("## Summary\n\n");
+    out.push_str("- Prepared by Small Harness `/ship pr`.\n");
+    out.push_str(&format!("- Head: `{}`\n", target.head_branch));
+    out.push_str(&format!("- Base: `{}`\n", target.base_branch));
+    out.push_str(&format!("- Commit: `{commit_hash}`\n\n"));
+    out.push_str("## Commits\n\n```text\n");
+    out.push_str(commits.trim());
+    out.push_str("\n```\n\n");
+    out.push_str("## Ship Status\n\n");
+    out.push_str(&format!("- Branch: `{}`\n", snapshot.branch_label()));
+    out.push_str(&format!(
+        "- Uncommitted files: {}\n",
+        snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
+    ));
+    out.push_str(&format!("- Conflicts: {}\n", snapshot.conflict_count()));
+    out.push_str("\n## Tests\n\n");
+    match &snapshot.test_status {
+        Some(status) => {
+            out.push_str(&format!(
+                "- Framework: `{}`\n- Total: {}\n- Passed: {}\n- Failed: {}\n- Skipped: {}\n- Exit code: {}\n",
+                status.framework,
+                status.total,
+                status.passed,
+                status.failed,
+                status.skipped,
+                status.exit_code
+            ));
+            if let Some(error) = &status.error {
+                out.push_str(&format!("- Error: `{error}`\n"));
+            }
+        }
+        None => out.push_str("- Not run by `/ship pr`.\n"),
+    }
+    out
+}
+
+fn build_gh_pr_command(target: &ShipPrTarget, title: &str, body: &str, draft: bool) -> Vec<String> {
+    let mut args = vec![
+        "gh".to_string(),
+        "pr".to_string(),
+        "create".to_string(),
+        "--repo".to_string(),
+        target.repo.clone(),
+        "--base".to_string(),
+        target.base_branch.clone(),
+        "--head".to_string(),
+        target.head_branch.clone(),
+        "--title".to_string(),
+        title.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    if draft {
+        args.push("--draft".into());
+    }
+    args
+}
+
+fn gh_cli_ready(workspace_root: &str) -> bool {
+    command_success(workspace_root, &["gh", "--version"])
+        && command_success(workspace_root, &["gh", "auth", "status"])
+}
+
+fn command_success(workspace_root: &str, args: &[&str]) -> bool {
+    let Some((program, rest)) = args.split_first() else {
+        return false;
+    };
+    Command::new(program)
+        .current_dir(workspace_root)
+        .args(rest)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn run_command_capture_combined(workspace_root: &str, args: &[String]) -> Result<String> {
+    let Some((program, rest)) = args.split_first() else {
+        return Err(anyhow!("empty command"));
+    };
+    let output = Command::new(program)
+        .current_dir(workspace_root)
+        .args(rest)
+        .output()
+        .map_err(|e| anyhow!("failed to run {program}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let detail = stderr.trim();
+        return Err(anyhow!(
+            "{} failed{}",
+            shell_command_display(args),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    let mut combined = String::new();
+    combined.push_str(&stdout);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    Ok(combined)
+}
+
+fn shell_command_display(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn extract_url(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|part| part.starts_with("https://") || part.starts_with("http://"))
+        .map(|part| {
+            part.trim_matches(|c: char| c == ')' || c == '(')
+                .to_string()
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1154,6 +1547,54 @@ fn write_ship_push_record(
     Ok(path)
 }
 
+struct ShipPrRecord<'a> {
+    snapshot: &'a ShipcheckSnapshot,
+    target: &'a ShipPrTarget,
+    title: &'a str,
+    body: &'a str,
+    command: &'a [String],
+    url: Option<&'a str>,
+    status: &'a str,
+}
+
+fn write_ship_pr_record(session_dir: &str, record: &ShipPrRecord<'_>) -> Result<PathBuf> {
+    let path = default_ship_record_path(session_dir);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# Small Harness Ship PR\n\n");
+    out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
+    out.push_str("## GitHub\n\n");
+    out.push_str(&format!("- Status: `{}`\n", record.status));
+    out.push_str(&format!("- Repository: `{}`\n", record.target.repo));
+    out.push_str(&format!("- Head: `{}`\n", record.target.head_branch));
+    out.push_str(&format!("- Base: `{}`\n", record.target.base_branch));
+    if let Some(url) = record.url {
+        out.push_str(&format!("- URL: {url}\n"));
+    }
+    out.push_str(&format!(
+        "- Uncommitted files left: {}\n\n",
+        record.snapshot.staged_count()
+            + record.snapshot.unstaged_count()
+            + record.snapshot.untracked_count()
+    ));
+    out.push_str("## Command\n\n```bash\n");
+    out.push_str(&shell_command_display(record.command));
+    out.push_str("\n```\n\n");
+    out.push_str("## Title\n\n");
+    out.push_str(record.title.trim());
+    out.push_str("\n\n## Body\n\n");
+    out.push_str(record.body.trim());
+    out.push('\n');
+
+    fs::write(&path, out)?;
+    Ok(path)
+}
+
 fn extract_markdown_section(markdown: &str, section: &str) -> Option<String> {
     let mut in_section = false;
     let mut out = String::new();
@@ -1298,6 +1739,70 @@ fn evaluate_ship_push_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool
     }
     if snapshot.test_status.is_none() {
         warnings.push("tests were not run for this push; use /ship push --tests if desired".into());
+    }
+    if let Some(tests) = &snapshot.test_status {
+        if tests.failed > 0 || tests.exit_code != 0 {
+            blockers.push(format!(
+                "tests failed: {} failed, exit code {}",
+                tests.failed, tests.exit_code
+            ));
+        }
+        if let Some(error) = &tests.error {
+            blockers.push(format!("test execution error: {error}"));
+        }
+    }
+
+    let status = if !blockers.is_empty() {
+        ShipReadinessStatus::Blocked
+    } else if !warnings.is_empty() {
+        ShipReadinessStatus::NeedsReview
+    } else {
+        ShipReadinessStatus::Ready
+    };
+
+    ShipReadiness {
+        status,
+        blockers,
+        warnings,
+    }
+}
+
+fn evaluate_ship_pr_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> ShipReadiness {
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    if snapshot.branch.head.as_deref() == Some("(detached)") || snapshot.branch.head.is_none() {
+        blockers.push("cannot create a PR from a detached or unknown HEAD".into());
+    }
+    if snapshot.branch.upstream.is_none() {
+        blockers.push("branch has no upstream; run /ship push first".into());
+    }
+    if snapshot.branch.ahead > 0 {
+        blockers.push(format!(
+            "branch has {} unpushed commit(s); run /ship push first",
+            snapshot.branch.ahead
+        ));
+    }
+    if snapshot.branch.behind > 0 && !allow_behind {
+        blockers.push(format!(
+            "branch is behind upstream by {} commit(s); pull/rebase or pass --allow-behind",
+            snapshot.branch.behind
+        ));
+    }
+    if snapshot.conflict_count() > 0 {
+        blockers.push(format!(
+            "{} conflicted file(s) must be resolved before opening a PR",
+            snapshot.conflict_count()
+        ));
+    }
+    if snapshot.staged_count() + snapshot.unstaged_count() > 0 || snapshot.untracked_count() > 0 {
+        warnings.push(format!(
+            "{} uncommitted file(s) are not part of this PR",
+            snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
+        ));
+    }
+    if snapshot.test_status.is_none() {
+        warnings.push("tests were not run for this PR; use /ship pr --tests if desired".into());
     }
     if let Some(tests) = &snapshot.test_status {
         if tests.failed > 0 || tests.exit_code != 0 {
@@ -1991,6 +2496,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_ship_pr_args() {
+        let args =
+            parse_ship_args("pr --base main --ready --yes --title Add ship PR flow").unwrap();
+        assert_eq!(args.action, ShipAction::Pr);
+        assert_eq!(args.pr_base.as_deref(), Some("main"));
+        assert!(args.pr_ready);
+        assert!(args.yes);
+        assert_eq!(args.pr_title.as_deref(), Some("Add ship PR flow"));
+
+        let args = parse_ship_args("pr --base=develop --draft --title=Draft title").unwrap();
+        assert_eq!(args.pr_base.as_deref(), Some("develop"));
+        assert!(!args.pr_ready);
+        assert_eq!(args.pr_title.as_deref(), Some("Draft title"));
+    }
+
+    #[test]
     fn extracts_commit_message_section() {
         let markdown =
             "## Commit Message\n\nfeat: ship preview\n\nBody line\n\n## Testing\n\ncargo test";
@@ -2079,6 +2600,35 @@ mod tests {
 
         let allowed = evaluate_ship_push_readiness(&snapshot, true);
         assert_eq!(allowed.status, ShipReadinessStatus::Ready);
+    }
+
+    #[test]
+    fn ship_pr_readiness_requires_upstream_and_pushed_branch() {
+        let mut snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        snapshot.branch.upstream = None;
+        let no_upstream = evaluate_ship_pr_readiness(&snapshot, false);
+        assert_eq!(no_upstream.status, ShipReadinessStatus::Blocked);
+        assert!(no_upstream
+            .blockers
+            .iter()
+            .any(|b| b.contains("no upstream")));
+
+        snapshot.branch.upstream = Some("origin/feature".into());
+        snapshot.branch.ahead = 1;
+        let unpushed = evaluate_ship_pr_readiness(&snapshot, false);
+        assert_eq!(unpushed.status, ShipReadinessStatus::Blocked);
+        assert!(unpushed.blockers.iter().any(|b| b.contains("unpushed")));
+    }
+
+    #[test]
+    fn ship_pr_readiness_warns_without_tests() {
+        let snapshot = sample_snapshot(Vec::new(), None);
+        let readiness = evaluate_ship_pr_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::NeedsReview);
+        assert!(readiness
+            .warnings
+            .iter()
+            .any(|w| w.contains("tests were not run")));
     }
 
     #[test]
@@ -2256,6 +2806,125 @@ mod tests {
         assert!(body.contains("abc1234"));
         assert!(body.contains("pushed"));
         assert!(body.contains("Set upstream"));
+    }
+
+    #[test]
+    fn parses_github_remote_urls() {
+        assert_eq!(
+            parse_github_repo("https://github.com/GetSmallAI/SmallHarness.git").as_deref(),
+            Some("GetSmallAI/SmallHarness")
+        );
+        assert_eq!(
+            parse_github_repo("git@github.com:GetSmallAI/SmallHarness.git").as_deref(),
+            Some("GetSmallAI/SmallHarness")
+        );
+        assert_eq!(
+            parse_github_repo("ssh://git@github.com/GetSmallAI/SmallHarness.git").as_deref(),
+            Some("GetSmallAI/SmallHarness")
+        );
+        assert!(parse_github_repo("https://example.com/x/y.git").is_none());
+    }
+
+    #[test]
+    fn resolves_pr_target_from_github_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:GetSmallAI/SmallHarness.git",
+            ],
+        );
+        let mut snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        snapshot.branch.head = Some("feature".into());
+        snapshot.branch.upstream = Some("origin/feature".into());
+
+        let target =
+            resolve_ship_pr_target(dir.path().to_str().unwrap(), &snapshot, Some("main")).unwrap();
+
+        assert_eq!(target.repo, "GetSmallAI/SmallHarness");
+        assert_eq!(target.head_branch, "feature");
+        assert_eq!(target.base_branch, "main");
+    }
+
+    #[test]
+    fn build_gh_pr_command_adds_draft_by_default() {
+        let target = ShipPrTarget {
+            remote: "origin".into(),
+            repo: "GetSmallAI/SmallHarness".into(),
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+        };
+        let command = build_gh_pr_command(&target, "Title", "Body text", true);
+
+        assert_eq!(command[0], "gh");
+        assert!(command.contains(&"--draft".to_string()));
+        assert!(shell_command_display(&command).contains("'Body text'"));
+
+        let ready = build_gh_pr_command(&target, "Title", "Body text", false);
+        assert!(!ready.contains(&"--draft".to_string()));
+    }
+
+    #[test]
+    fn render_ship_pr_body_includes_branch_commit_and_tests() {
+        let snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        let target = ShipPrTarget {
+            remote: "origin".into(),
+            repo: "GetSmallAI/SmallHarness".into(),
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+        };
+        let body = render_ship_pr_body(&snapshot, &target, "abc123", "abc123 subject");
+
+        assert!(body.contains("abc123"));
+        assert!(body.contains("feature"));
+        assert!(body.contains("main"));
+        assert!(body.contains("Passed"));
+    }
+
+    #[test]
+    fn write_ship_pr_record_creates_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        let target = ShipPrTarget {
+            remote: "origin".into(),
+            repo: "GetSmallAI/SmallHarness".into(),
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+        };
+        let command = build_gh_pr_command(&target, "Title", "Body", true);
+
+        let path = write_ship_pr_record(
+            dir.path().join(".sessions").to_str().unwrap(),
+            &ShipPrRecord {
+                snapshot: &snapshot,
+                target: &target,
+                title: "Title",
+                body: "Body",
+                command: &command,
+                url: Some("https://github.com/GetSmallAI/SmallHarness/pull/1"),
+                status: "created",
+            },
+        )
+        .unwrap();
+        let body = fs::read_to_string(path).unwrap();
+
+        assert!(body.contains("# Small Harness Ship PR"));
+        assert!(body.contains("GetSmallAI/SmallHarness"));
+        assert!(body.contains("https://github.com/GetSmallAI/SmallHarness/pull/1"));
+        assert!(body.contains("gh pr create"));
+    }
+
+    #[test]
+    fn extract_url_finds_pr_url() {
+        assert_eq!(
+            extract_url("Created pull request https://github.com/a/b/pull/1").as_deref(),
+            Some("https://github.com/a/b/pull/1")
+        );
     }
 
     #[tokio::test]

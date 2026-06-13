@@ -8,16 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **`/ship` preflight, local commit, and push flow.** A final ship command that
-  reuses the existing git/test readiness collectors, prints a ready / needs
-  review / blocked verdict with concrete blockers, and drafts a commit message
-  from the handoff context. `/ship commit --all` stages the working tree after
-  confirmation; `/ship commit --staged-only` commits only already-staged files.
-  `/ship push` pushes the current branch, using the configured upstream or
-  setting `origin/<branch>` as upstream when needed. Successful commits and
-  pushes save records under `.sessions/ship/`. Use `/ship --tests` to include
-  the project test suite; cloud backends keep diff-context drafting local unless
-  `--cloud` is passed.
+- **`/ship` preflight, local commit, push, and PR flow.** A final ship command
+  that reuses the existing git/test readiness collectors, prints a ready /
+  needs review / blocked verdict with concrete blockers, and drafts a commit
+  message from the handoff context. `/ship commit --all` stages the working tree
+  after confirmation; `/ship commit --staged-only` commits only already-staged
+  files. `/ship push` pushes the current branch, using the configured upstream
+  or setting `origin/<branch>` as upstream when needed. `/ship pr` creates a
+  draft GitHub pull request through `gh pr create` and prints the exact fallback
+  command when GitHub CLI is unavailable or unauthenticated. Successful commits,
+  pushes, and PR attempts save records under `.sessions/ship/`. Use
+  `/ship --tests` to include the project test suite; cloud backends keep
+  diff-context drafting local unless `--cloud` is passed.
 
 ## [0.7.0] - 2026-06-09
 
