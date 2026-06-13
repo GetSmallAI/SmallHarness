@@ -125,6 +125,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Summarize git and project-memory readiness for release",
     ),
     (
+        "/ship",
+        "Preview final ship readiness and draft a commit message",
+    ),
+    (
         "/handoff",
         "Draft commit, changelog, testing, and X-ready release copy",
     ),
@@ -241,6 +245,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/config" => config_cmds::cmd_config(state),
         "/mode" => config_cmds::cmd_mode(&args, state),
         "/shipcheck" => cmd_shipcheck(&args, state)?,
+        "/ship" => cmd_ship(&args, state).await?,
         "/handoff" => cmd_handoff(&args, state).await?,
         "/plan" => cmd_plan(&args, state).await?,
         "/session" => session::cmd_session(&args, state)?,
@@ -411,6 +416,343 @@ fn cmd_shipcheck(args: &str, state: &AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipAction {
+    Preview,
+    Commit,
+    Push,
+    Pr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipArgs {
+    action: ShipAction,
+    run_tests: bool,
+    allow_behind: bool,
+    allow_cloud: bool,
+}
+
+fn parse_ship_args(args: &str) -> Option<ShipArgs> {
+    let mut parsed = ShipArgs {
+        action: ShipAction::Preview,
+        run_tests: false,
+        allow_behind: false,
+        allow_cloud: false,
+    };
+    let mut action_seen = false;
+
+    for part in args.split_whitespace() {
+        match part {
+            "" | "preview" | "--dry-run" => {}
+            "commit" => {
+                if action_seen {
+                    return None;
+                }
+                parsed.action = ShipAction::Commit;
+                action_seen = true;
+            }
+            "push" => {
+                if action_seen {
+                    return None;
+                }
+                parsed.action = ShipAction::Push;
+                action_seen = true;
+            }
+            "pr" => {
+                if action_seen {
+                    return None;
+                }
+                parsed.action = ShipAction::Pr;
+                action_seen = true;
+            }
+            "--tests" => parsed.run_tests = true,
+            "--no-tests" => parsed.run_tests = false,
+            "--allow-behind" => parsed.allow_behind = true,
+            "--cloud" => parsed.allow_cloud = true,
+            _ => return None,
+        }
+    }
+
+    Some(parsed)
+}
+
+async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
+    let Some(args) = parse_ship_args(args) else {
+        println!(
+            "  {DIM}Usage: /ship [preview|--dry-run] [--tests|--no-tests] [--allow-behind] [--cloud]{RESET}"
+        );
+        return Ok(());
+    };
+
+    if args.action != ShipAction::Preview {
+        println!(
+            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview only.{RESET}",
+            match args.action {
+                ShipAction::Preview => "preview",
+                ShipAction::Commit => "commit",
+                ShipAction::Push => "push",
+                ShipAction::Pr => "pr",
+            }
+        );
+        return Ok(());
+    }
+
+    let snapshot = if args.run_tests {
+        collect_shipcheck_with_tests(&state.config.workspace_root, true)?
+    } else {
+        collect_shipcheck(&state.config.workspace_root)?
+    };
+    let freshness = if state.config.project_memory.enabled {
+        Some(project_index_freshness(&state.config)?)
+    } else {
+        None
+    };
+    let readiness = evaluate_ship_readiness(&snapshot, args.allow_behind);
+
+    println!("  {DIM}ship{RESET}            preview");
+    print_shipcheck(&snapshot, freshness.as_ref());
+    print_ship_readiness(&readiness);
+
+    match collect_handoff_context(&snapshot)? {
+        Some(context) => {
+            let draft = draft_ship_commit_message(
+                &snapshot,
+                &context,
+                freshness.as_ref(),
+                state,
+                args.allow_cloud,
+            )
+            .await;
+            print_ship_commit_draft(&draft);
+        }
+        None => println!("  {DIM}commitDraft{RESET}     none (no changes or ahead commits)"),
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipCommitDraft {
+    message: String,
+    note: Option<String>,
+}
+
+async fn draft_ship_commit_message(
+    snapshot: &ShipcheckSnapshot,
+    context: &crate::handoff::HandoffContext,
+    freshness: Option<&crate::project_memory::ProjectIndexFreshness>,
+    state: &AppState,
+    allow_cloud: bool,
+) -> ShipCommitDraft {
+    if should_refuse_cloud_handoff(state.backend.name, allow_cloud) {
+        let fallback = render_fallback_markdown(context, snapshot, freshness, None);
+        return ShipCommitDraft {
+            message: extract_markdown_section(&fallback, "Commit Message")
+                .unwrap_or_else(|| fallback_commit_message(context)),
+            note: Some(
+                "cloud backend skipped for diff privacy; pass --cloud to draft with it".into(),
+            ),
+        };
+    }
+
+    let messages = vec![
+        ChatMessage::System {
+            content: handoff_system_prompt(),
+        },
+        ChatMessage::User {
+            content: render_handoff_prompt(context, freshness).into(),
+        },
+    ];
+    let req = ChatRequest {
+        model: &state.model,
+        messages: &messages,
+        tools: None,
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: false,
+        }),
+        max_tokens: Some(500),
+    };
+    let mut draft = String::new();
+    let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(content) = &choice.delta.content {
+                draft.push_str(content);
+            }
+        }
+    })
+    .await;
+
+    let (body, note) = match result {
+        Ok(_) if !draft.trim().is_empty() => (ensure_required_sections(&draft), None),
+        Ok(_) => (
+            render_fallback_markdown(context, snapshot, freshness, Some("empty model response")),
+            Some("model draft was empty; using deterministic fallback".into()),
+        ),
+        Err(e) => (
+            render_fallback_markdown(context, snapshot, freshness, Some(&e.to_string())),
+            Some(format!(
+                "model draft failed; using deterministic fallback: {e}"
+            )),
+        ),
+    };
+
+    ShipCommitDraft {
+        message: extract_markdown_section(&body, "Commit Message")
+            .unwrap_or_else(|| fallback_commit_message(context)),
+        note,
+    }
+}
+
+fn fallback_commit_message(context: &crate::handoff::HandoffContext) -> String {
+    match context.basis {
+        crate::handoff::HandoffBasis::DirtyTree => {
+            "feat: prepare local working tree handoff".into()
+        }
+        crate::handoff::HandoffBasis::AheadOfUpstream => "feat: summarize branch handoff".into(),
+    }
+}
+
+fn extract_markdown_section(markdown: &str, section: &str) -> Option<String> {
+    let mut in_section = false;
+    let mut out = String::new();
+
+    for line in markdown.lines() {
+        if markdown_heading_text(line).is_some_and(|heading| heading.eq_ignore_ascii_case(section))
+        {
+            in_section = true;
+            continue;
+        }
+        if in_section && markdown_heading_text(line).is_some() {
+            break;
+        }
+        if in_section {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn markdown_heading_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let text = trimmed.trim_start_matches('#').trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipReadinessStatus {
+    Ready,
+    NeedsReview,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipReadiness {
+    status: ShipReadinessStatus,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn evaluate_ship_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> ShipReadiness {
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    if snapshot.conflict_count() > 0 {
+        blockers.push(format!(
+            "{} conflicted file(s) must be resolved",
+            snapshot.conflict_count()
+        ));
+    }
+    if snapshot.branch.behind > 0 && !allow_behind {
+        blockers.push(format!(
+            "branch is behind upstream by {} commit(s); pull/rebase or pass --allow-behind",
+            snapshot.branch.behind
+        ));
+    }
+    if snapshot.is_clean() && snapshot.branch.ahead == 0 {
+        blockers.push("nothing to ship: no working-tree changes and no ahead commits".into());
+    }
+    if let Some(tests) = &snapshot.test_status {
+        if tests.failed > 0 || tests.exit_code != 0 {
+            blockers.push(format!(
+                "tests failed: {} failed, exit code {}",
+                tests.failed, tests.exit_code
+            ));
+        }
+        if let Some(error) = &tests.error {
+            blockers.push(format!("test execution error: {error}"));
+        }
+    } else {
+        warnings.push("tests were not run; use /ship --tests before committing".into());
+    }
+    if snapshot.branch.upstream.is_none() {
+        warnings.push("no upstream configured; push/PR phases will need a remote target".into());
+    }
+    if snapshot.untracked_count() > 0 {
+        warnings.push(format!(
+            "{} untracked file(s) need an explicit staging decision",
+            snapshot.untracked_count()
+        ));
+    }
+
+    let status = if !blockers.is_empty() {
+        ShipReadinessStatus::Blocked
+    } else if !warnings.is_empty() {
+        ShipReadinessStatus::NeedsReview
+    } else {
+        ShipReadinessStatus::Ready
+    };
+
+    ShipReadiness {
+        status,
+        blockers,
+        warnings,
+    }
+}
+
+fn print_ship_readiness(readiness: &ShipReadiness) {
+    let (label, color) = match readiness.status {
+        ShipReadinessStatus::Ready => ("ready", GREEN),
+        ShipReadinessStatus::NeedsReview => ("needs review", YELLOW),
+        ShipReadinessStatus::Blocked => ("blocked", RED),
+    };
+    println!("  {DIM}verdict{RESET}         {color}{label}{RESET}");
+    for blocker in &readiness.blockers {
+        println!("  {RED}✗{RESET} {DIM}{blocker}{RESET}");
+    }
+    for warning in &readiness.warnings {
+        println!("  {YELLOW}!{RESET} {DIM}{warning}{RESET}");
+    }
+}
+
+fn print_ship_commit_draft(draft: &ShipCommitDraft) {
+    println!("  {DIM}commitDraft{RESET}");
+    for line in draft.message.lines() {
+        if line.trim().is_empty() {
+            println!();
+        } else {
+            println!("    {line}");
+        }
+    }
+    if let Some(note) = &draft.note {
+        println!("  {DIM}{note}{RESET}");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -873,6 +1215,7 @@ mod tests {
     use super::*;
     use crate::backends::BackendDescriptor;
     use crate::config::AgentConfig;
+    use crate::shipcheck::{GitBranchState, GitFileKind, GitFileState, TestStatus};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -947,6 +1290,47 @@ mod tests {
         git(dir, &["commit", "-m", "initial"]);
     }
 
+    fn sample_snapshot(
+        files: Vec<GitFileState>,
+        test_status: Option<TestStatus>,
+    ) -> ShipcheckSnapshot {
+        ShipcheckSnapshot {
+            workspace_root: "/tmp/workspace".into(),
+            git_root: "/tmp/workspace".into(),
+            branch: GitBranchState {
+                head: Some("feature".into()),
+                upstream: Some("origin/feature".into()),
+                ..Default::default()
+            },
+            files,
+            staged_diff_stat: String::new(),
+            unstaged_diff_stat: String::new(),
+            test_status,
+        }
+    }
+
+    fn tracked_change(path: &str) -> GitFileState {
+        GitFileState {
+            path: path.into(),
+            original_path: None,
+            staged: Some('.'),
+            unstaged: Some('M'),
+            kind: GitFileKind::Tracked,
+        }
+    }
+
+    fn passing_tests() -> TestStatus {
+        TestStatus {
+            framework: "cargo".into(),
+            total: 3,
+            passed: 3,
+            failed: 0,
+            skipped: 0,
+            exit_code: 0,
+            error: None,
+        }
+    }
+
     #[test]
     fn parses_handoff_export_and_cloud_args() {
         let args = parse_handoff_args("export .sessions/handoff/manual.md --cloud").unwrap();
@@ -957,6 +1341,81 @@ mod tests {
             Some(Path::new(".sessions/handoff/manual.md"))
         );
         assert!(parse_handoff_args("unexpected").is_none());
+    }
+
+    #[test]
+    fn parses_ship_preview_args() {
+        let args = parse_ship_args("--tests --allow-behind --cloud").unwrap();
+        assert_eq!(args.action, ShipAction::Preview);
+        assert!(args.run_tests);
+        assert!(args.allow_behind);
+        assert!(args.allow_cloud);
+
+        let args = parse_ship_args("preview --dry-run --no-tests").unwrap();
+        assert_eq!(args.action, ShipAction::Preview);
+        assert!(!args.run_tests);
+
+        assert_eq!(
+            parse_ship_args("commit").unwrap().action,
+            ShipAction::Commit
+        );
+        assert!(parse_ship_args("commit push").is_none());
+        assert!(parse_ship_args("--unknown").is_none());
+    }
+
+    #[test]
+    fn extracts_commit_message_section() {
+        let markdown =
+            "## Commit Message\n\nfeat: ship preview\n\nBody line\n\n## Testing\n\ncargo test";
+        assert_eq!(
+            extract_markdown_section(markdown, "commit message").as_deref(),
+            Some("feat: ship preview\n\nBody line")
+        );
+        assert!(extract_markdown_section(markdown, "missing").is_none());
+    }
+
+    #[test]
+    fn ship_readiness_blocks_clean_tree_without_ahead_commits() {
+        let snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        let readiness = evaluate_ship_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::Blocked);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|b| b.contains("nothing to ship")));
+    }
+
+    #[test]
+    fn ship_readiness_ready_with_changes_and_passing_tests() {
+        let snapshot = sample_snapshot(vec![tracked_change("src/main.rs")], Some(passing_tests()));
+        let readiness = evaluate_ship_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::Ready);
+        assert!(readiness.blockers.is_empty());
+        assert!(readiness.warnings.is_empty());
+    }
+
+    #[test]
+    fn ship_readiness_warns_when_tests_are_not_run() {
+        let snapshot = sample_snapshot(vec![tracked_change("src/main.rs")], None);
+        let readiness = evaluate_ship_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::NeedsReview);
+        assert!(readiness
+            .warnings
+            .iter()
+            .any(|w| w.contains("tests were not run")));
+    }
+
+    #[test]
+    fn ship_readiness_blocks_behind_branch_unless_allowed() {
+        let mut snapshot =
+            sample_snapshot(vec![tracked_change("src/main.rs")], Some(passing_tests()));
+        snapshot.branch.behind = 2;
+
+        let blocked = evaluate_ship_readiness(&snapshot, false);
+        assert_eq!(blocked.status, ShipReadinessStatus::Blocked);
+
+        let allowed = evaluate_ship_readiness(&snapshot, true);
+        assert_eq!(allowed.status, ShipReadinessStatus::Ready);
     }
 
     #[tokio::test]
