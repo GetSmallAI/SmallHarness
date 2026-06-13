@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`/ship` preview preflight.** A non-mutating final ship command that reuses
+  the existing git/test readiness collectors, prints a ready / needs review /
+  blocked verdict with concrete blockers, and drafts a commit message from the
+  handoff context. Use `/ship --tests` to include the project test suite; cloud
+  backends keep diff-context drafting local unless `--cloud` is passed.
+
 ## [0.7.0] - 2026-06-09
 
 ### Added
