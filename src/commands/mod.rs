@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::to_openai_tools;
@@ -35,7 +36,8 @@ use crate::fix_loop::{parse_fix_args, run_fix_loop};
 use crate::handoff::{
     collect_handoff_context, default_export_path as default_handoff_export_path,
     ensure_required_sections, handoff_system_prompt, render_fallback_markdown,
-    render_handoff_prompt, should_refuse_cloud_handoff,
+    render_handoff_prompt, should_refuse_cloud_handoff, HandoffBasis, HandoffContext,
+    HANDOFF_CONTEXT_LIMIT_BYTES,
 };
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
@@ -426,24 +428,46 @@ enum ShipAction {
     Pr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipStaging {
+    All,
+    StagedOnly,
+}
+
+impl ShipStaging {
+    fn label(self) -> &'static str {
+        match self {
+            ShipStaging::All => "all changes",
+            ShipStaging::StagedOnly => "staged changes only",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShipArgs {
     action: ShipAction,
-    run_tests: bool,
+    run_tests: Option<bool>,
     allow_behind: bool,
     allow_cloud: bool,
+    staging: Option<ShipStaging>,
+    yes: bool,
+    message: Option<String>,
 }
 
 fn parse_ship_args(args: &str) -> Option<ShipArgs> {
     let mut parsed = ShipArgs {
         action: ShipAction::Preview,
-        run_tests: false,
+        run_tests: None,
         allow_behind: false,
         allow_cloud: false,
+        staging: None,
+        yes: false,
+        message: None,
     };
     let mut action_seen = false;
+    let mut parts = args.split_whitespace().peekable();
 
-    for part in args.split_whitespace() {
+    while let Some(part) = parts.next() {
         match part {
             "" | "preview" | "--dry-run" => {}
             "commit" => {
@@ -467,10 +491,29 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
                 parsed.action = ShipAction::Pr;
                 action_seen = true;
             }
-            "--tests" => parsed.run_tests = true,
-            "--no-tests" => parsed.run_tests = false,
+            "--tests" => parsed.run_tests = Some(true),
+            "--no-tests" => parsed.run_tests = Some(false),
             "--allow-behind" => parsed.allow_behind = true,
             "--cloud" => parsed.allow_cloud = true,
+            "--all" => {
+                if parsed.staging.replace(ShipStaging::All).is_some() {
+                    return None;
+                }
+            }
+            "--staged-only" => {
+                if parsed.staging.replace(ShipStaging::StagedOnly).is_some() {
+                    return None;
+                }
+            }
+            "--yes" | "-y" => parsed.yes = true,
+            "--message" | "-m" => {
+                let rest = parts.collect::<Vec<_>>().join(" ");
+                if rest.trim().is_empty() {
+                    return None;
+                }
+                parsed.message = Some(rest);
+                break;
+            }
             _ => return None,
         }
     }
@@ -481,14 +524,14 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
 async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     let Some(args) = parse_ship_args(args) else {
         println!(
-            "  {DIM}Usage: /ship [preview|--dry-run] [--tests|--no-tests] [--allow-behind] [--cloud]{RESET}"
+            "  {DIM}Usage: /ship [preview|commit] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>]{RESET}"
         );
         return Ok(());
     };
 
-    if args.action != ShipAction::Preview {
+    if matches!(args.action, ShipAction::Push | ShipAction::Pr) {
         println!(
-            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview only.{RESET}",
+            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview and commit.{RESET}",
             match args.action {
                 ShipAction::Preview => "preview",
                 ShipAction::Commit => "commit",
@@ -499,7 +542,17 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    let snapshot = if args.run_tests {
+    if args.action == ShipAction::Commit && args.staging.is_none() {
+        println!(
+            "  {DIM}Usage: /ship commit --all | /ship commit --staged-only [--tests|--no-tests] [--yes] [-m <message>]{RESET}"
+        );
+        return Ok(());
+    }
+
+    let run_tests = args
+        .run_tests
+        .unwrap_or(matches!(args.action, ShipAction::Commit));
+    let snapshot = if run_tests {
         collect_shipcheck_with_tests(&state.config.workspace_root, true)?
     } else {
         collect_shipcheck(&state.config.workspace_root)?
@@ -511,26 +564,134 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     };
     let readiness = evaluate_ship_readiness(&snapshot, args.allow_behind);
 
-    println!("  {DIM}ship{RESET}            preview");
+    println!(
+        "  {DIM}ship{RESET}            {}",
+        match args.action {
+            ShipAction::Preview => "preview",
+            ShipAction::Commit => "commit",
+            ShipAction::Push => "push",
+            ShipAction::Pr => "pr",
+        }
+    );
     print_shipcheck(&snapshot, freshness.as_ref());
     print_ship_readiness(&readiness);
 
-    match collect_handoff_context(&snapshot)? {
-        Some(context) => {
-            let draft = draft_ship_commit_message(
-                &snapshot,
-                &context,
-                freshness.as_ref(),
-                state,
-                args.allow_cloud,
-            )
-            .await;
-            print_ship_commit_draft(&draft);
+    if args.action == ShipAction::Preview {
+        match collect_handoff_context(&snapshot)? {
+            Some(context) => {
+                let draft = draft_ship_commit_message(
+                    &snapshot,
+                    &context,
+                    freshness.as_ref(),
+                    state,
+                    args.allow_cloud,
+                    args.message.as_deref(),
+                )
+                .await;
+                print_ship_commit_draft(&draft);
+            }
+            None => println!("  {DIM}commitDraft{RESET}     none (no changes or ahead commits)"),
         }
-        None => println!("  {DIM}commitDraft{RESET}     none (no changes or ahead commits)"),
+        return Ok(());
     }
 
+    run_ship_commit(args, snapshot, freshness.as_ref(), readiness, state).await
+}
+
+async fn run_ship_commit(
+    args: ShipArgs,
+    snapshot: ShipcheckSnapshot,
+    freshness: Option<&crate::project_memory::ProjectIndexFreshness>,
+    readiness: ShipReadiness,
+    state: &AppState,
+) -> Result<()> {
+    let staging = args.staging.expect("commit action requires staging mode");
+    let commit_blockers = commit_specific_blockers(&snapshot, staging);
+    for blocker in &commit_blockers {
+        println!("  {RED}✗{RESET} {DIM}{blocker}{RESET}");
+    }
+    if readiness.status == ShipReadinessStatus::Blocked || !commit_blockers.is_empty() {
+        println!("  {RED}✗{RESET} {DIM}commit not created{RESET}");
+        return Ok(());
+    }
+
+    if staging == ShipStaging::All {
+        let prompt = format!(
+            "  {YELLOW}?{RESET} {DIM}Stage all working-tree changes with git add -A? [y/N]{RESET}"
+        );
+        if !args.yes && !confirm_ship_action(prompt).await? {
+            println!("  {RED}✗{RESET} {DIM}ship commit cancelled before staging{RESET}");
+            return Ok(());
+        }
+        run_git_capture(&state.config.workspace_root, &["add", "-A"])?;
+    }
+
+    let staged_snapshot = collect_shipcheck(&state.config.workspace_root)?;
+    if staged_snapshot.staged_count() == 0 {
+        println!("  {RED}✗{RESET} {DIM}commit not created: no staged changes{RESET}");
+        return Ok(());
+    }
+    println!(
+        "  {DIM}staging{RESET}         {} · {} staged file(s)",
+        staging.label(),
+        staged_snapshot.staged_count()
+    );
+    print_diff_stat("finalStagedDiff", &staged_snapshot.staged_diff_stat);
+
+    let Some(context) = build_staged_ship_context(&staged_snapshot)? else {
+        println!("  {RED}✗{RESET} {DIM}commit not created: staged diff is empty{RESET}");
+        return Ok(());
+    };
+    let draft = draft_ship_commit_message(
+        &staged_snapshot,
+        &context,
+        freshness,
+        state,
+        args.allow_cloud,
+        args.message.as_deref(),
+    )
+    .await;
+    print_ship_commit_draft(&draft);
+
+    let prompt =
+        format!("  {YELLOW}?{RESET} {DIM}Create git commit with this message? [y/N]{RESET}");
+    if !args.yes && !confirm_ship_action(prompt).await? {
+        println!("  {RED}✗{RESET} {DIM}ship commit cancelled before commit{RESET}");
+        return Ok(());
+    }
+
+    let commit_hash = create_git_commit(&state.config.workspace_root, &draft.message)?;
+    let record_path = write_ship_commit_record(
+        &state.session_dir,
+        &staged_snapshot,
+        snapshot.test_status.as_ref(),
+        staging,
+        &draft.message,
+        &commit_hash,
+    )?;
+    println!("  {GREEN}✓{RESET} {DIM}commit created:{RESET} {CYAN}{commit_hash}{RESET}");
+    println!(
+        "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
+        record_path.display()
+    );
     Ok(())
+}
+
+fn commit_specific_blockers(snapshot: &ShipcheckSnapshot, staging: ShipStaging) -> Vec<String> {
+    match staging {
+        ShipStaging::All if snapshot.files.is_empty() => {
+            vec!["no working-tree changes to stage for commit".into()]
+        }
+        ShipStaging::StagedOnly if snapshot.staged_count() == 0 => {
+            vec!["no staged changes to commit; stage files first or use --all".into()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+async fn confirm_ship_action(prompt: String) -> Result<bool> {
+    let answer = plain_read_line(format!("{prompt}\n  {YELLOW}? {RESET}")).await?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -545,7 +706,15 @@ async fn draft_ship_commit_message(
     freshness: Option<&crate::project_memory::ProjectIndexFreshness>,
     state: &AppState,
     allow_cloud: bool,
+    explicit_message: Option<&str>,
 ) -> ShipCommitDraft {
+    if let Some(message) = explicit_message.and_then(normalize_commit_message) {
+        return ShipCommitDraft {
+            message,
+            note: Some("using explicit commit message".into()),
+        };
+    }
+
     if should_refuse_cloud_handoff(state.backend.name, allow_cloud) {
         let fallback = render_fallback_markdown(context, snapshot, freshness, None);
         return ShipCommitDraft {
@@ -613,6 +782,160 @@ fn fallback_commit_message(context: &crate::handoff::HandoffContext) -> String {
         }
         crate::handoff::HandoffBasis::AheadOfUpstream => "feat: summarize branch handoff".into(),
     }
+}
+
+fn normalize_commit_message(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_staged_ship_context(snapshot: &ShipcheckSnapshot) -> Result<Option<HandoffContext>> {
+    if snapshot.staged_count() == 0 {
+        return Ok(None);
+    }
+    let diff = run_git_capture(&snapshot.workspace_root, &["diff", "--cached", "--"])?;
+    if diff.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut content = format!(
+        "# Handoff Source Context\n\n## Basis\n\nStaged changes for commit\n\n## Shipcheck\n\n- Workspace: `{}`\n- Git root: `{}`\n- Branch: `{}`\n- Staged files: {}\n- Unstaged files: {}\n- Untracked files: {}\n- Conflicts: {}\n\n## Staged Diff\n\n```diff\n",
+        snapshot.workspace_root,
+        snapshot.git_root,
+        snapshot.branch_label(),
+        snapshot.staged_count(),
+        snapshot.unstaged_count(),
+        snapshot.untracked_count(),
+        snapshot.conflict_count()
+    );
+    content.push_str(&truncate_for_ship_context(diff.trim()));
+    content.push_str("\n```\n");
+
+    Ok(Some(HandoffContext {
+        basis: HandoffBasis::DirtyTree,
+        content,
+        truncated: diff.len() > HANDOFF_CONTEXT_LIMIT_BYTES,
+    }))
+}
+
+fn truncate_for_ship_context(text: &str) -> String {
+    if text.len() <= HANDOFF_CONTEXT_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let marker = "\n\n[... staged commit context truncated ...]";
+    let max_prefix = HANDOFF_CONTEXT_LIMIT_BYTES.saturating_sub(marker.len());
+    let mut end = max_prefix.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], marker)
+}
+
+fn create_git_commit(workspace_root: &str, message: &str) -> Result<String> {
+    let message = normalize_commit_message(message)
+        .ok_or_else(|| anyhow!("commit message cannot be empty"))?;
+    run_git_capture(workspace_root, &["commit", "-m", &message])?;
+    Ok(
+        run_git_capture(workspace_root, &["rev-parse", "--short", "HEAD"])?
+            .trim()
+            .to_string(),
+    )
+}
+
+fn run_git_capture(workspace_root: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        return Err(anyhow!(
+            "git {} failed{}",
+            args.join(" "),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn default_ship_record_path(session_dir: &str) -> PathBuf {
+    Path::new(session_dir).join("ship").join(format!(
+        "{}.md",
+        Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ")
+    ))
+}
+
+fn write_ship_commit_record(
+    session_dir: &str,
+    staged_snapshot: &ShipcheckSnapshot,
+    test_status: Option<&crate::shipcheck::TestStatus>,
+    staging: ShipStaging,
+    message: &str,
+    commit_hash: &str,
+) -> Result<PathBuf> {
+    let path = default_ship_record_path(session_dir);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# Small Harness Ship Commit\n\n");
+    out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
+    out.push_str("## Git\n\n");
+    out.push_str(&format!("- Branch: `{}`\n", staged_snapshot.branch_label()));
+    out.push_str(&format!("- Commit: `{commit_hash}`\n"));
+    out.push_str(&format!("- Staging: `{}`\n", staging.label()));
+    out.push_str(&format!(
+        "- Staged files: {}\n- Unstaged files left: {}\n- Untracked files left: {}\n\n",
+        staged_snapshot.staged_count(),
+        staged_snapshot.unstaged_count(),
+        staged_snapshot.untracked_count()
+    ));
+    out.push_str("## Commit Message\n\n```text\n");
+    out.push_str(message.trim());
+    out.push_str("\n```\n\n");
+    out.push_str("## Tests\n\n");
+    match test_status {
+        Some(status) => {
+            out.push_str(&format!(
+                "- Framework: `{}`\n- Total: {}\n- Passed: {}\n- Failed: {}\n- Skipped: {}\n- Exit code: {}\n",
+                status.framework,
+                status.total,
+                status.passed,
+                status.failed,
+                status.skipped,
+                status.exit_code
+            ));
+            if let Some(error) = &status.error {
+                out.push_str(&format!("- Error: `{error}`\n"));
+            }
+        }
+        None => out.push_str("- Tests not run for this ship command.\n"),
+    }
+    out.push_str("\n## Final Staged Diff Stat\n\n");
+    if staged_snapshot.staged_diff_stat.trim().is_empty() {
+        out.push_str("No staged diff stat captured.\n");
+    } else {
+        out.push_str("```text\n");
+        out.push_str(staged_snapshot.staged_diff_stat.trim());
+        out.push_str("\n```\n");
+    }
+
+    fs::write(&path, out)?;
+    Ok(path)
 }
 
 fn extract_markdown_section(markdown: &str, section: &str) -> Option<String> {
@@ -1347,13 +1670,13 @@ mod tests {
     fn parses_ship_preview_args() {
         let args = parse_ship_args("--tests --allow-behind --cloud").unwrap();
         assert_eq!(args.action, ShipAction::Preview);
-        assert!(args.run_tests);
+        assert_eq!(args.run_tests, Some(true));
         assert!(args.allow_behind);
         assert!(args.allow_cloud);
 
         let args = parse_ship_args("preview --dry-run --no-tests").unwrap();
         assert_eq!(args.action, ShipAction::Preview);
-        assert!(!args.run_tests);
+        assert_eq!(args.run_tests, Some(false));
 
         assert_eq!(
             parse_ship_args("commit").unwrap().action,
@@ -1361,6 +1684,22 @@ mod tests {
         );
         assert!(parse_ship_args("commit push").is_none());
         assert!(parse_ship_args("--unknown").is_none());
+    }
+
+    #[test]
+    fn parses_ship_commit_staging_and_message_args() {
+        let args = parse_ship_args("commit --all --yes -m feat: add ship commit").unwrap();
+        assert_eq!(args.action, ShipAction::Commit);
+        assert_eq!(args.staging, Some(ShipStaging::All));
+        assert!(args.yes);
+        assert_eq!(args.message.as_deref(), Some("feat: add ship commit"));
+
+        let args = parse_ship_args("commit --staged-only --no-tests").unwrap();
+        assert_eq!(args.staging, Some(ShipStaging::StagedOnly));
+        assert_eq!(args.run_tests, Some(false));
+
+        assert!(parse_ship_args("commit --all --staged-only").is_none());
+        assert!(parse_ship_args("commit --message").is_none());
     }
 
     #[test]
@@ -1416,6 +1755,88 @@ mod tests {
 
         let allowed = evaluate_ship_readiness(&snapshot, true);
         assert_eq!(allowed.status, ShipReadinessStatus::Ready);
+    }
+
+    #[test]
+    fn commit_specific_blockers_match_staging_mode() {
+        let clean = sample_snapshot(Vec::new(), Some(passing_tests()));
+        assert!(commit_specific_blockers(&clean, ShipStaging::All)[0]
+            .contains("no working-tree changes"));
+
+        let unstaged = sample_snapshot(vec![tracked_change("src/main.rs")], Some(passing_tests()));
+        assert!(
+            commit_specific_blockers(&unstaged, ShipStaging::StagedOnly)[0]
+                .contains("no staged changes")
+        );
+
+        let staged = sample_snapshot(
+            vec![GitFileState {
+                path: "src/main.rs".into(),
+                original_path: None,
+                staged: Some('M'),
+                unstaged: Some('.'),
+                kind: GitFileKind::Tracked,
+            }],
+            Some(passing_tests()),
+        );
+        assert!(commit_specific_blockers(&staged, ShipStaging::StagedOnly).is_empty());
+    }
+
+    #[test]
+    fn staged_ship_context_uses_only_cached_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("README.md"), "staged\n").unwrap();
+        git(dir.path(), &["add", "README.md"]);
+        fs::write(dir.path().join("later.txt"), "unstaged\n").unwrap();
+
+        let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        let context = build_staged_ship_context(&snapshot).unwrap().unwrap();
+
+        assert!(context.content.contains("Staged Diff"));
+        assert!(context.content.contains("staged"));
+        assert!(!context.content.contains("unstaged"));
+    }
+
+    #[test]
+    fn write_ship_commit_record_creates_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        git(dir.path(), &["add", "README.md"]);
+        let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+
+        let path = write_ship_commit_record(
+            dir.path().join(".sessions").to_str().unwrap(),
+            &snapshot,
+            Some(&passing_tests()),
+            ShipStaging::StagedOnly,
+            "feat: test ship record",
+            "abc1234",
+        )
+        .unwrap();
+        let body = fs::read_to_string(path).unwrap();
+
+        assert!(body.contains("# Small Harness Ship Commit"));
+        assert!(body.contains("feat: test ship record"));
+        assert!(body.contains("abc1234"));
+        assert!(body.contains("Final Staged Diff Stat"));
+    }
+
+    #[test]
+    fn create_git_commit_commits_staged_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        fs::write(dir.path().join("README.md"), "changed\n").unwrap();
+        git(dir.path(), &["add", "README.md"]);
+
+        let hash =
+            create_git_commit(dir.path().to_str().unwrap(), "feat: commit from ship").unwrap();
+        let subject =
+            run_git_capture(dir.path().to_str().unwrap(), &["log", "-1", "--pretty=%s"]).unwrap();
+
+        assert!(!hash.is_empty());
+        assert_eq!(subject.trim(), "feat: commit from ship");
     }
 
     #[tokio::test]

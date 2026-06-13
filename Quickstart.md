@@ -138,6 +138,7 @@ Useful commands:
 /mode ship    enable edit + workflow tools; auto-verify tests after edits
 /shipcheck    show branch drift, dirty files, diff stats, and memory freshness
 /ship         preview final readiness, blockers, and a commit-message draft
+/ship commit --all
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
@@ -300,13 +301,15 @@ You can still run the operator commands manually:
 /shipcheck
 /shipcheck export
 /ship --tests
+/ship commit --all
 /handoff
 /handoff export
 /test smart
 ```
 
-`/ship` is non-mutating in this release: it gives you the verdict and draft
-commit message, but it does not stage, commit, push, or open a PR yet.
+`/ship commit` is local-only in this release: it can stage and commit after an
+explicit confirmation, then saves a ship record under `.sessions/ship/`. It does
+not push or open a PR yet.
 
 Compare local models on agent-loop coding tasks:
 
