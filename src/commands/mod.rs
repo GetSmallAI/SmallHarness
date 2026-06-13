@@ -524,14 +524,14 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
 async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     let Some(args) = parse_ship_args(args) else {
         println!(
-            "  {DIM}Usage: /ship [preview|commit] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>]{RESET}"
+            "  {DIM}Usage: /ship [preview|commit|push] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>]{RESET}"
         );
         return Ok(());
     };
 
-    if matches!(args.action, ShipAction::Push | ShipAction::Pr) {
+    if args.action == ShipAction::Pr {
         println!(
-            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview and commit.{RESET}",
+            "  {YELLOW}!{RESET} {DIM}/ship {} is planned for the next phase. This build supports preview, commit, and push.{RESET}",
             match args.action {
                 ShipAction::Preview => "preview",
                 ShipAction::Commit => "commit",
@@ -542,6 +542,16 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         return Ok(());
     }
 
+    if args.action != ShipAction::Commit && args.staging.is_some() {
+        println!("  {DIM}Usage: staging flags only apply to /ship commit.{RESET}");
+        return Ok(());
+    }
+    if args.action == ShipAction::Push && args.message.is_some() {
+        println!(
+            "  {DIM}Usage: commit messages only apply to /ship preview or /ship commit.{RESET}"
+        );
+        return Ok(());
+    }
     if args.action == ShipAction::Commit && args.staging.is_none() {
         println!(
             "  {DIM}Usage: /ship commit --all | /ship commit --staged-only [--tests|--no-tests] [--yes] [-m <message>]{RESET}"
@@ -562,7 +572,11 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     } else {
         None
     };
-    let readiness = evaluate_ship_readiness(&snapshot, args.allow_behind);
+    let readiness = if args.action == ShipAction::Push {
+        evaluate_ship_push_readiness(&snapshot, args.allow_behind)
+    } else {
+        evaluate_ship_readiness(&snapshot, args.allow_behind)
+    };
 
     println!(
         "  {DIM}ship{RESET}            {}",
@@ -595,7 +609,13 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    run_ship_commit(args, snapshot, freshness.as_ref(), readiness, state).await
+    match args.action {
+        ShipAction::Commit => {
+            run_ship_commit(args, snapshot, freshness.as_ref(), readiness, state).await
+        }
+        ShipAction::Push => run_ship_push(args, snapshot, readiness, state).await,
+        ShipAction::Preview | ShipAction::Pr => Ok(()),
+    }
 }
 
 async fn run_ship_commit(
@@ -675,6 +695,128 @@ async fn run_ship_commit(
         record_path.display()
     );
     Ok(())
+}
+
+async fn run_ship_push(
+    args: ShipArgs,
+    snapshot: ShipcheckSnapshot,
+    readiness: ShipReadiness,
+    state: &AppState,
+) -> Result<()> {
+    if readiness.status == ShipReadinessStatus::Blocked {
+        println!("  {RED}✗{RESET} {DIM}push not run{RESET}");
+        return Ok(());
+    }
+
+    let target = match resolve_ship_push_target(&state.config.workspace_root, &snapshot) {
+        Ok(target) => target,
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}push not run: {e}{RESET}");
+            return Ok(());
+        }
+    };
+    println!("  {DIM}pushTarget{RESET}      {}", target.description());
+
+    let prompt = format!(
+        "  {YELLOW}?{RESET} {DIM}Push {}? [y/N]{RESET}",
+        target.description()
+    );
+    if !args.yes && !confirm_ship_action(prompt).await? {
+        println!("  {RED}✗{RESET} {DIM}ship push cancelled{RESET}");
+        return Ok(());
+    }
+
+    let output = execute_ship_push(&state.config.workspace_root, &target)?;
+    let pushed_snapshot = collect_shipcheck(&state.config.workspace_root)?;
+    let commit_hash = run_git_capture(
+        &state.config.workspace_root,
+        &["rev-parse", "--short", "HEAD"],
+    )?
+    .trim()
+    .to_string();
+    let record_path = write_ship_push_record(
+        &state.session_dir,
+        &pushed_snapshot,
+        &target,
+        &commit_hash,
+        &output,
+    )?;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}pushed:{RESET} {CYAN}{}{RESET}",
+        target.description()
+    );
+    println!(
+        "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
+        record_path.display()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipPushTarget {
+    remote: String,
+    local_branch: String,
+    remote_branch: String,
+    set_upstream: bool,
+}
+
+impl ShipPushTarget {
+    fn description(&self) -> String {
+        if self.set_upstream {
+            format!(
+                "{} -> {}/{} and set upstream",
+                self.local_branch, self.remote, self.remote_branch
+            )
+        } else {
+            format!(
+                "{} -> {}/{}",
+                self.local_branch, self.remote, self.remote_branch
+            )
+        }
+    }
+}
+
+fn resolve_ship_push_target(
+    workspace_root: &str,
+    snapshot: &ShipcheckSnapshot,
+) -> Result<ShipPushTarget> {
+    let branch = snapshot
+        .branch
+        .head
+        .as_deref()
+        .filter(|head| !head.is_empty() && *head != "(detached)")
+        .ok_or_else(|| anyhow!("current HEAD is detached or unknown"))?;
+
+    if let Some(upstream) = snapshot.branch.upstream.as_deref() {
+        let (remote, branch_name) = upstream
+            .split_once('/')
+            .ok_or_else(|| anyhow!("upstream `{upstream}` does not include a remote"))?;
+        return Ok(ShipPushTarget {
+            remote: remote.to_string(),
+            local_branch: branch.to_string(),
+            remote_branch: branch_name.to_string(),
+            set_upstream: false,
+        });
+    }
+
+    run_git_capture(workspace_root, &["remote", "get-url", "origin"])?;
+    Ok(ShipPushTarget {
+        remote: "origin".into(),
+        local_branch: branch.to_string(),
+        remote_branch: branch.to_string(),
+        set_upstream: true,
+    })
+}
+
+fn execute_ship_push(workspace_root: &str, target: &ShipPushTarget) -> Result<String> {
+    if target.set_upstream {
+        run_git_capture_combined(
+            workspace_root,
+            &["push", "-u", &target.remote, &target.local_branch],
+        )
+    } else {
+        run_git_capture_combined(workspace_root, &["push"])
+    }
 }
 
 fn commit_specific_blockers(snapshot: &ShipcheckSnapshot, staging: ShipStaging) -> Vec<String> {
@@ -869,6 +1011,38 @@ fn run_git_capture(workspace_root: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn run_git_capture_combined(workspace_root: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .map_err(|e| anyhow!("failed to run git: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let detail = stderr.trim();
+        return Err(anyhow!(
+            "git {} failed{}",
+            args.join(" "),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    let mut combined = String::new();
+    combined.push_str(&stdout);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    Ok(combined)
+}
+
 fn default_ship_record_path(session_dir: &str) -> PathBuf {
     Path::new(session_dir).join("ship").join(format!(
         "{}.md",
@@ -931,6 +1105,48 @@ fn write_ship_commit_record(
     } else {
         out.push_str("```text\n");
         out.push_str(staged_snapshot.staged_diff_stat.trim());
+        out.push_str("\n```\n");
+    }
+
+    fs::write(&path, out)?;
+    Ok(path)
+}
+
+fn write_ship_push_record(
+    session_dir: &str,
+    snapshot: &ShipcheckSnapshot,
+    target: &ShipPushTarget,
+    commit_hash: &str,
+    push_output: &str,
+) -> Result<PathBuf> {
+    let path = default_ship_record_path(session_dir);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# Small Harness Ship Push\n\n");
+    out.push_str(&format!("Generated: {}\n\n", Utc::now().to_rfc3339()));
+    out.push_str("## Git\n\n");
+    out.push_str(&format!("- Branch: `{}`\n", snapshot.branch_label()));
+    out.push_str(&format!("- Commit: `{commit_hash}`\n"));
+    out.push_str(&format!("- Remote: `{}`\n", target.remote));
+    out.push_str(&format!("- Local branch: `{}`\n", target.local_branch));
+    out.push_str(&format!("- Remote branch: `{}`\n", target.remote_branch));
+    out.push_str(&format!("- Set upstream: `{}`\n", target.set_upstream));
+    out.push_str(&format!(
+        "- Uncommitted files left: {}\n- Untracked files left: {}\n\n",
+        snapshot.staged_count() + snapshot.unstaged_count(),
+        snapshot.untracked_count()
+    ));
+    out.push_str("## Push Output\n\n");
+    if push_output.trim().is_empty() {
+        out.push_str("No output captured.\n");
+    } else {
+        out.push_str("```text\n");
+        out.push_str(push_output.trim());
         out.push_str("\n```\n");
     }
 
@@ -1032,6 +1248,67 @@ fn evaluate_ship_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> 
             "{} untracked file(s) need an explicit staging decision",
             snapshot.untracked_count()
         ));
+    }
+
+    let status = if !blockers.is_empty() {
+        ShipReadinessStatus::Blocked
+    } else if !warnings.is_empty() {
+        ShipReadinessStatus::NeedsReview
+    } else {
+        ShipReadinessStatus::Ready
+    };
+
+    ShipReadiness {
+        status,
+        blockers,
+        warnings,
+    }
+}
+
+fn evaluate_ship_push_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> ShipReadiness {
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    if snapshot.branch.head.as_deref() == Some("(detached)") || snapshot.branch.head.is_none() {
+        blockers.push("cannot push from a detached or unknown HEAD".into());
+    }
+    if snapshot.conflict_count() > 0 {
+        blockers.push(format!(
+            "{} conflicted file(s) must be resolved before push",
+            snapshot.conflict_count()
+        ));
+    }
+    if snapshot.branch.behind > 0 && !allow_behind {
+        blockers.push(format!(
+            "branch is behind upstream by {} commit(s); pull/rebase or pass --allow-behind",
+            snapshot.branch.behind
+        ));
+    }
+    if snapshot.branch.upstream.is_some() && snapshot.branch.ahead == 0 {
+        blockers.push("nothing to push: branch is not ahead of upstream".into());
+    }
+    if snapshot.branch.upstream.is_none() {
+        warnings.push("no upstream configured; /ship push will use origin and set upstream".into());
+    }
+    if snapshot.staged_count() + snapshot.unstaged_count() > 0 || snapshot.untracked_count() > 0 {
+        warnings.push(format!(
+            "{} uncommitted file(s) are not part of this push",
+            snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
+        ));
+    }
+    if snapshot.test_status.is_none() {
+        warnings.push("tests were not run for this push; use /ship push --tests if desired".into());
+    }
+    if let Some(tests) = &snapshot.test_status {
+        if tests.failed > 0 || tests.exit_code != 0 {
+            blockers.push(format!(
+                "tests failed: {} failed, exit code {}",
+                tests.failed, tests.exit_code
+            ));
+        }
+        if let Some(error) = &tests.error {
+            blockers.push(format!("test execution error: {error}"));
+        }
     }
 
     let status = if !blockers.is_empty() {
@@ -1703,6 +1980,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_ship_push_args() {
+        let args = parse_ship_args("push --yes --allow-behind --tests").unwrap();
+        assert_eq!(args.action, ShipAction::Push);
+        assert!(args.yes);
+        assert!(args.allow_behind);
+        assert_eq!(args.run_tests, Some(true));
+
+        assert!(parse_ship_args("push --all").is_some());
+    }
+
+    #[test]
     fn extracts_commit_message_section() {
         let markdown =
             "## Commit Message\n\nfeat: ship preview\n\nBody line\n\n## Testing\n\ncargo test";
@@ -1754,6 +2042,42 @@ mod tests {
         assert_eq!(blocked.status, ShipReadinessStatus::Blocked);
 
         let allowed = evaluate_ship_readiness(&snapshot, true);
+        assert_eq!(allowed.status, ShipReadinessStatus::Ready);
+    }
+
+    #[test]
+    fn ship_push_readiness_blocks_when_not_ahead_of_upstream() {
+        let snapshot = sample_snapshot(Vec::new(), None);
+        let readiness = evaluate_ship_push_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::Blocked);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|b| b.contains("nothing to push")));
+    }
+
+    #[test]
+    fn ship_push_readiness_allows_new_upstream_with_warning() {
+        let mut snapshot = sample_snapshot(Vec::new(), None);
+        snapshot.branch.upstream = None;
+        let readiness = evaluate_ship_push_readiness(&snapshot, false);
+        assert_eq!(readiness.status, ShipReadinessStatus::NeedsReview);
+        assert!(readiness
+            .warnings
+            .iter()
+            .any(|w| w.contains("set upstream")));
+    }
+
+    #[test]
+    fn ship_push_readiness_blocks_behind_branch_unless_allowed() {
+        let mut snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        snapshot.branch.ahead = 1;
+        snapshot.branch.behind = 1;
+
+        let blocked = evaluate_ship_push_readiness(&snapshot, false);
+        assert_eq!(blocked.status, ShipReadinessStatus::Blocked);
+
+        let allowed = evaluate_ship_push_readiness(&snapshot, true);
         assert_eq!(allowed.status, ShipReadinessStatus::Ready);
     }
 
@@ -1837,6 +2161,101 @@ mod tests {
 
         assert!(!hash.is_empty());
         assert_eq!(subject.trim(), "feat: commit from ship");
+    }
+
+    #[test]
+    fn resolves_push_target_from_existing_upstream() {
+        let mut snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        snapshot.branch.ahead = 1;
+        snapshot.branch.upstream = Some("origin/release/ship".into());
+        let target = resolve_ship_push_target("/tmp", &snapshot).unwrap();
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.local_branch, "feature");
+        assert_eq!(target.remote_branch, "release/ship");
+        assert!(!target.set_upstream);
+    }
+
+    #[test]
+    fn resolves_push_target_without_upstream_to_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let bare = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(bare.path())
+            .output()
+            .unwrap();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        let mut snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        snapshot.branch.upstream = None;
+
+        let target = resolve_ship_push_target(dir.path().to_str().unwrap(), &snapshot).unwrap();
+
+        assert_eq!(target.remote, "origin");
+        assert_eq!(target.local_branch, snapshot.branch.head.unwrap());
+        assert!(target.set_upstream);
+    }
+
+    #[test]
+    fn execute_ship_push_sets_upstream_on_bare_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let bare = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(bare.path())
+            .output()
+            .unwrap();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        let target = resolve_ship_push_target(dir.path().to_str().unwrap(), &snapshot).unwrap();
+
+        let output = execute_ship_push(dir.path().to_str().unwrap(), &target).unwrap();
+        let upstream = run_git_capture(
+            dir.path().to_str().unwrap(),
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .unwrap();
+
+        assert!(output.contains("branch"));
+        assert!(upstream.trim().starts_with("origin/"));
+    }
+
+    #[test]
+    fn write_ship_push_record_creates_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        let snapshot = collect_shipcheck(dir.path().to_str().unwrap()).unwrap();
+        let target = ShipPushTarget {
+            remote: "origin".into(),
+            local_branch: "feature".into(),
+            remote_branch: "feature".into(),
+            set_upstream: true,
+        };
+
+        let path = write_ship_push_record(
+            dir.path().join(".sessions").to_str().unwrap(),
+            &snapshot,
+            &target,
+            "abc1234",
+            "pushed",
+        )
+        .unwrap();
+        let body = fs::read_to_string(path).unwrap();
+
+        assert!(body.contains("# Small Harness Ship Push"));
+        assert!(body.contains("abc1234"));
+        assert!(body.contains("pushed"));
+        assert!(body.contains("Set upstream"));
     }
 
     #[tokio::test]

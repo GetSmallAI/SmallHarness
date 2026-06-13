@@ -200,8 +200,9 @@ A handful of moves worth knowing right away:
   `/path diff`, and `/path pick` compare and merge paths.
 - `/shipcheck` summarizes git state; `/handoff` drafts a commit message,
   changelog bullets, and a release post from local context.
-- `/ship` turns that into a final preflight and local commit path: readiness
-  verdict, blockers, commit-message draft, and guarded `git commit`.
+- `/ship` turns that into a final preflight, local commit, and push path:
+  readiness verdict, blockers, commit-message draft, guarded `git commit`, and
+  guarded `git push`.
 - `/plan <intent>` drafts a spec; `/iterate <goal>` runs a generate→evaluate
   loop where a separate critic grades each pass against a rubric.
 - `/play fix-failing-test` runs a bundled demo in an isolated sandbox so you
@@ -312,6 +313,7 @@ this exact call`. The session cache resets on `/new`.
 /shipcheck                       summarize git + test readiness
 /ship [--tests]                  preview final ship readiness and commit message
 /ship commit --all|--staged-only guarded local git commit with ship record
+/ship push                       guarded git push, setting upstream when needed
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop

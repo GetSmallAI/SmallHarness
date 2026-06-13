@@ -139,6 +139,7 @@ Useful commands:
 /shipcheck    show branch drift, dirty files, diff stats, and memory freshness
 /ship         preview final readiness, blockers, and a commit-message draft
 /ship commit --all
+/ship push
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
@@ -302,6 +303,7 @@ You can still run the operator commands manually:
 /shipcheck export
 /ship --tests
 /ship commit --all
+/ship push
 /handoff
 /handoff export
 /test smart
@@ -309,7 +311,8 @@ You can still run the operator commands manually:
 
 `/ship commit` is local-only in this release: it can stage and commit after an
 explicit confirmation, then saves a ship record under `.sessions/ship/`. It does
-not push or open a PR yet.
+not open a PR yet. `/ship push` pushes the current branch after confirmation and
+sets `origin/<branch>` as upstream when the branch does not have one.
 
 Compare local models on agent-loop coding tasks:
 
