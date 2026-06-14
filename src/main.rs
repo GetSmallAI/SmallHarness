@@ -27,6 +27,7 @@ mod input;
 mod iterate_loop;
 mod loader;
 mod mcp;
+mod model_system;
 mod openai;
 mod planner;
 mod playground;

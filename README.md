@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.9.0-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -44,6 +44,9 @@ few that aren't usual:
   `openrouter/fusion` alias for deliberative work; `/fusion tool` attaches
   Fusion to a chosen OpenRouter coding model for hard reviews, architecture
   tradeoffs, and high-stakes debugging.
+- **Multi-model routing.** `/route select <task>` asks a configured selector
+  model to pick low/medium/high orchestrator and coder tiers, plus play vs
+  production review and security review, then switches the active coding model.
 - **Real undo.** `/undo` reverts the last agent turn's file mutations,
   including files the agent created or files that weren't tracked when the
   turn started.
@@ -344,6 +347,7 @@ this exact call`. The session cache resets on `/new`.
 /trace on|off          show nested subagent/critic tool calls (indented)
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 /fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
+/route select|apply    select or apply a configured multi-model stack route
 ```
 
 **Memory, capabilities, context**
@@ -586,6 +590,31 @@ OpenRouter's Fusion plugin so the model can invoke multi-model deliberation
 when the turn warrants it. The same Small Harness tools, approvals, session log,
 token counts, and reported OpenRouter costs stay visible.
 
+### Route tasks across a model system
+
+`/route` lets you describe a model stack that blends local and frontier models:
+separate orchestrators for low/medium/high planning, coders for
+low/medium/high implementation, play and production review models, a security
+review model, and one selector model that chooses the route for a task.
+
+```text
+/route template
+/route status
+/route select add OAuth login with token refresh and tests
+/route select --dry-run redesign the settings page
+/route apply coder high
+/route apply review production
+/route apply security
+```
+
+`/route select` sends the task plus the configured stack to
+`modelSystem.selector`, expects a JSON decision, prints the selected
+orchestrator/coder/reviewer/security path, and switches the live session to the
+chosen coding model unless `--dry-run` is passed. Effort and thinking-depth
+labels are stored and shown as route metadata so the stack can express which
+model should think hardest; provider-specific request-body controls can be
+added per backend without changing the config shape.
+
 ---
 
 ## Configuration
@@ -668,6 +697,30 @@ root. Common shape:
       "judgeModel": null,
       "maxToolCalls": null
     }
+  },
+  "modelSystem": {
+    "enabled": true,
+    "selector": {
+      "backend": "openrouter",
+      "model": "openrouter/fusion",
+      "effort": "high",
+      "thinkingDepth": "deep"
+    },
+    "orchestrators": {
+      "low": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+      "medium": { "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" },
+      "high": { "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+    },
+    "coders": {
+      "low": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+      "medium": { "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" },
+      "high": { "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+    },
+    "reviewers": {
+      "play": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+      "production": { "backend": "openrouter", "model": "openrouter/fusion" }
+    },
+    "securityReviewer": { "backend": "openrouter", "model": "openrouter/fusion" }
   },
   "mcpServers": {
     "fs": { "command": "/usr/local/bin/some-mcp-server", "args": [] }

@@ -145,6 +145,7 @@ Useful commands:
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions
 /fusion tool  attach Fusion deliberation to an OpenRouter coding model
+/route select choose low/medium/high models for a task from your model stack
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
 /sessions search dispatch
@@ -315,6 +316,9 @@ You can still run the operator commands manually:
 /fusion on
 /fusion tool anthropic/claude-sonnet-4.5
 /fusion off
+/route template
+/route select --dry-run add OAuth login and tests
+/route apply coder high
 /test smart
 ```
 

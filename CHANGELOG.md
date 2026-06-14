@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-14
+
+### Added
+
+- **Multi-model routing with `/route`.** `modelSystem` in `agent.config.json`
+  can define selector, orchestrator, coder, review, and security-review models
+  across local and frontier backends. `/route select <task>` asks the selector
+  to classify the task and applies the chosen coding model; `/route status`,
+  `/route template`, and `/route apply ...` support inspection and manual
+  switching.
+
 ## [0.9.0] - 2026-06-14
 
 ### Added

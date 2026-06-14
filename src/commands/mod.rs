@@ -84,6 +84,7 @@ mod config_cmds;
 mod context_cmds;
 mod doctor;
 mod memory;
+mod route;
 mod session;
 mod ship;
 mod workflow;
@@ -188,6 +189,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Use OpenRouter Fusion alias or attach Fusion deliberation to an OpenRouter model",
     ),
     (
+        "/route",
+        "Select or apply a multi-model stack route for the task",
+    ),
+    (
         "/context",
         "Show or update context limits and auto-guard status",
     ),
@@ -270,6 +275,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/tools" => config_cmds::cmd_tools(&args, state),
         "/compare" => config_cmds::cmd_compare(&args, state).await?,
         "/fusion" => config_cmds::cmd_fusion(&args, state)?,
+        "/route" => route::cmd_route(&args, state).await?,
         "/context" => context_cmds::cmd_context(&args, state),
         "/compact" => context_cmds::cmd_compact(&args, state).await?,
         "/reset" => context_cmds::cmd_reset(&args, state).await?,

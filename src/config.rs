@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::backends::{BackendDescriptor, BackendName, OpenRouterConfig};
+use crate::model_system::ModelSystemConfig;
 
 pub const ALL_TOOL_NAMES: &[&str] = &[
     "apply_patch",
@@ -557,6 +558,7 @@ pub struct AgentConfig {
     pub auto: AutoConfig,
     pub paths: PathsConfig,
     pub openrouter: OpenRouterConfig,
+    pub model_system: ModelSystemConfig,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
 
@@ -635,6 +637,7 @@ impl Default for AgentConfig {
             auto: AutoConfig::default(),
             paths: PathsConfig::default(),
             openrouter: OpenRouterConfig::default(),
+            model_system: ModelSystemConfig::default(),
             mcp_servers: BTreeMap::new(),
         }
     }
@@ -675,6 +678,8 @@ struct FileConfig {
     auto: Option<AutoConfig>,
     paths: Option<PathsConfig>,
     openrouter: Option<OpenRouterConfig>,
+    #[serde(rename = "modelSystem")]
+    model_system: Option<ModelSystemConfig>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
 }
@@ -787,7 +792,11 @@ impl AgentConfig {
     }
 
     pub fn backend_descriptor(&self) -> BackendDescriptor {
-        let mut backend = crate::backends::backend(self.backend);
+        self.backend_descriptor_for(self.backend)
+    }
+
+    pub fn backend_descriptor_for(&self, name: BackendName) -> BackendDescriptor {
+        let mut backend = crate::backends::backend(name);
         backend.openrouter = self.openrouter.clone();
         backend
     }
@@ -924,6 +933,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(o) = file.openrouter {
                     config.openrouter = o;
+                }
+                if let Some(m) = file.model_system {
+                    config.model_system = m;
                 }
                 if let Some(s) = file.mcp_servers {
                     config.mcp_servers = s;
@@ -1079,5 +1091,55 @@ mod tests {
             Some("~anthropic/claude-opus-latest")
         );
         assert_eq!(fusion.max_tool_calls, Some(4));
+    }
+
+    #[test]
+    fn parses_model_system_config() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+              "modelSystem": {
+                "enabled": true,
+                "selector": {
+                  "backend": "openrouter",
+                  "model": "openrouter/fusion",
+                  "effort": "high",
+                  "thinkingDepth": "deep"
+                },
+                "orchestrators": {
+                  "low": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+                  "medium": { "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" },
+                  "high": { "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+                },
+                "coders": {
+                  "low": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+                  "medium": { "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" },
+                  "high": { "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+                },
+                "reviewers": {
+                  "play": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
+                  "production": { "backend": "openrouter", "model": "openrouter/fusion" }
+                },
+                "securityReviewer": {
+                  "backend": "openrouter",
+                  "model": "openrouter/fusion"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let stack = file.model_system.unwrap();
+        assert!(stack.enabled);
+        assert_eq!(
+            stack
+                .coders
+                .high
+                .as_ref()
+                .map(|m| (m.backend, m.model.as_str())),
+            Some((BackendName::Openrouter, "anthropic/claude-sonnet-4.5"))
+        );
+        assert_eq!(
+            stack.security_reviewer.as_ref().map(|m| m.model.as_str()),
+            Some("openrouter/fusion")
+        );
     }
 }
