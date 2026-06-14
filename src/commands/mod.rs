@@ -85,11 +85,13 @@ mod context_cmds;
 mod doctor;
 mod memory;
 mod session;
+mod ship;
 mod workflow;
 
 pub(crate) use context_cmds::perform_reset;
 
 use doctor::*;
+use ship::*;
 use workflow::*;
 
 const RESET: &str = "\x1b[0m";
@@ -123,6 +125,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/shipcheck",
         "Summarize git and project-memory readiness for release",
+    ),
+    (
+        "/ship",
+        "Preview final ship readiness and draft a commit message",
     ),
     (
         "/handoff",
@@ -241,6 +247,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/config" => config_cmds::cmd_config(state),
         "/mode" => config_cmds::cmd_mode(&args, state),
         "/shipcheck" => cmd_shipcheck(&args, state)?,
+        "/ship" => cmd_ship(&args, state).await?,
         "/handoff" => cmd_handoff(&args, state).await?,
         "/plan" => cmd_plan(&args, state).await?,
         "/session" => session::cmd_session(&args, state)?,
