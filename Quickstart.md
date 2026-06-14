@@ -137,7 +137,7 @@ Useful commands:
 /mode edit    use edit-focused defaults
 /mode ship    enable edit + workflow tools; auto-verify tests after edits
 /shipcheck    show branch drift, dirty files, diff stats, and memory freshness
-/ship         preview final readiness, blockers, and a commit-message draft
+/ship         preview last-mile readiness, blockers, and a commit-message draft
 /ship commit --all
 /ship push
 /ship pr
