@@ -311,6 +311,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".into(),
             api_key: "test".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         }
     }
 

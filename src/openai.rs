@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::backends::{BackendDescriptor, BackendName};
 use crate::cancel::CancellationToken;
@@ -187,6 +188,8 @@ pub struct Usage {
     pub prompt_tokens: u32,
     #[serde(default)]
     pub completion_tokens: u32,
+    #[serde(default)]
+    pub cost: Option<f64>,
 }
 
 pub fn build_http_client() -> reqwest::Client {
@@ -236,10 +239,11 @@ pub async fn chat_oneshot(
         "{}/chat/completions",
         backend.base_url.trim_end_matches('/')
     );
+    let body = serde_json::to_value(req)?;
     let resp = client
         .post(url)
         .bearer_auth(&backend.api_key)
-        .json(req)
+        .json(&body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -335,10 +339,11 @@ where
         "{}/chat/completions",
         backend.base_url.trim_end_matches('/')
     );
+    let body = request_body(backend, req)?;
     let resp = client
         .post(url)
         .bearer_auth(&backend.api_key)
-        .json(req)
+        .json(&body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -376,10 +381,64 @@ where
     Ok(())
 }
 
+fn request_body(backend: &BackendDescriptor, req: &ChatRequest<'_>) -> Result<Value> {
+    let mut body = serde_json::to_value(req)?;
+    if matches!(backend.name, BackendName::Openrouter) && backend.openrouter.fusion.enabled {
+        let plugin = fusion_plugin_value(&backend.openrouter.fusion)?;
+        body.as_object_mut()
+            .ok_or_else(|| anyhow!("chat request did not serialize to an object"))?
+            .insert("plugins".into(), Value::Array(vec![plugin]));
+    }
+    Ok(body)
+}
+
+fn fusion_plugin_value(config: &crate::backends::OpenRouterFusionConfig) -> Result<Value> {
+    if config.analysis_models.len() > 8 {
+        return Err(anyhow!(
+            "openrouter.fusion.analysisModels supports at most 8 models"
+        ));
+    }
+    if let Some(max_tool_calls) = config.max_tool_calls {
+        if !(1..=16).contains(&max_tool_calls) {
+            return Err(anyhow!(
+                "openrouter.fusion.maxToolCalls must be between 1 and 16"
+            ));
+        }
+    }
+
+    let mut plugin = Map::new();
+    plugin.insert("id".into(), Value::String("fusion".into()));
+    if !config.analysis_models.is_empty() {
+        plugin.insert(
+            "analysis_models".into(),
+            Value::Array(
+                config
+                    .analysis_models
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(model) = &config.judge_model {
+        plugin.insert("model".into(), Value::String(model.clone()));
+    }
+    if let Some(max_tool_calls) = config.max_tool_calls {
+        plugin.insert(
+            "max_tool_calls".into(),
+            Value::Number(serde_json::Number::from(max_tool_calls)),
+        );
+    }
+    Ok(Value::Object(plugin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::{BackendDescriptor, BackendName};
+    use crate::backends::{
+        BackendDescriptor, BackendName, OpenRouterConfig, OpenRouterFusionConfig,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -581,6 +640,116 @@ mod tests {
         }
     }
 
+    #[test]
+    fn usage_chunk_carries_openrouter_cost() {
+        let mut p = SseParser::new();
+        let bytes = b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7,\"cost\":0.0015}}\n\n";
+        let events = p.feed(bytes).unwrap();
+        match &events[0] {
+            SseEvent::Chunk(c) => {
+                let u = c.usage.as_ref().unwrap();
+                assert_eq!(u.cost, Some(0.0015));
+            }
+            _ => panic!("expected chunk"),
+        }
+    }
+
+    #[test]
+    fn openrouter_fusion_plugin_is_injected_when_enabled() {
+        let backend = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig {
+                fusion: OpenRouterFusionConfig {
+                    enabled: true,
+                    analysis_models: vec![
+                        "~google/gemini-flash-latest".into(),
+                        "deepseek/deepseek-v3.2".into(),
+                    ],
+                    judge_model: Some("~anthropic/claude-opus-latest".into()),
+                    max_tool_calls: Some(4),
+                },
+            },
+        };
+        let messages = vec![ChatMessage::User {
+            content: "compare approaches".into(),
+        }];
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4.5",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+        };
+
+        let body = request_body(&backend, &req).unwrap();
+        let plugin = &body["plugins"][0];
+        assert_eq!(plugin["id"], "fusion");
+        assert_eq!(plugin["analysis_models"][0], "~google/gemini-flash-latest");
+        assert_eq!(plugin["model"], "~anthropic/claude-opus-latest");
+        assert_eq!(plugin["max_tool_calls"], 4);
+    }
+
+    #[test]
+    fn fusion_plugin_is_not_injected_for_other_backends() {
+        let backend = BackendDescriptor {
+            name: BackendName::OpenAi,
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig {
+                fusion: OpenRouterFusionConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+        };
+        let messages = vec![ChatMessage::User {
+            content: "hello".into(),
+        }];
+        let req = ChatRequest {
+            model: "gpt-4o-mini",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+        };
+
+        let body = request_body(&backend, &req).unwrap();
+        assert!(body.get("plugins").is_none());
+    }
+
+    #[test]
+    fn fusion_plugin_rejects_invalid_limits() {
+        let too_many_models = OpenRouterFusionConfig {
+            enabled: true,
+            analysis_models: vec![
+                "m1".into(),
+                "m2".into(),
+                "m3".into(),
+                "m4".into(),
+                "m5".into(),
+                "m6".into(),
+                "m7".into(),
+                "m8".into(),
+                "m9".into(),
+            ],
+            ..Default::default()
+        };
+        assert!(fusion_plugin_value(&too_many_models).is_err());
+
+        let bad_max_tools = OpenRouterFusionConfig {
+            enabled: true,
+            max_tool_calls: Some(17),
+            ..Default::default()
+        };
+        assert!(fusion_plugin_value(&bad_max_tools).is_err());
+    }
+
     #[tokio::test]
     async fn stream_chat_reads_mock_sse_tool_call() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -606,6 +775,7 @@ mod tests {
             base_url: format!("http://{addr}/v1"),
             api_key: "test".into(),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         };
         let messages = vec![ChatMessage::User {
             content: "read main".into(),

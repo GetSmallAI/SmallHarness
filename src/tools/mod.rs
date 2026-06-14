@@ -257,7 +257,7 @@ pub fn build_tools_for_names(
                 // The subagent resolves its own backend/model from config so it
                 // can run an independent loop. Its toolset is curated read-only
                 // (see SubagentTool), so this never recurses into another `task`.
-                let backend = crate::backends::backend(config.backend);
+                let backend = config.backend_descriptor();
                 let model =
                     crate::backends::default_model(&backend, config.model_override.as_deref());
                 Some(Arc::new(SubagentTool {
@@ -275,7 +275,7 @@ pub fn build_tools_for_names(
                 // A separate critic agent, resolved like `task`. Its toolset is
                 // curated read-only (see EvaluatorTool), so it never mutates and
                 // never recurses into `task`/`critique`.
-                let backend = crate::backends::backend(config.backend);
+                let backend = config.backend_descriptor();
                 let model =
                     crate::backends::default_model(&backend, config.model_override.as_deref());
                 Some(Arc::new(EvaluatorTool {

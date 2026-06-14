@@ -422,6 +422,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".into(),
             api_key: "ollama".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         };
         let mut record = CapabilityRecord::minimal(&backend, model);
         record.models = CapabilityStatus::ok("1 model");

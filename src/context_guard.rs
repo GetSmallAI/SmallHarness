@@ -957,6 +957,7 @@ mod tests {
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "test".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         };
         let http = Client::new();
         let result = compact_messages_core(CompactRequest {

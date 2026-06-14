@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::backends::BackendName;
+use crate::backends::{BackendDescriptor, BackendName, OpenRouterConfig};
 
 pub const ALL_TOOL_NAMES: &[&str] = &[
     "apply_patch",
@@ -556,6 +556,7 @@ pub struct AgentConfig {
     pub iterate: IterateConfig,
     pub auto: AutoConfig,
     pub paths: PathsConfig,
+    pub openrouter: OpenRouterConfig,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
 }
 
@@ -633,6 +634,7 @@ impl Default for AgentConfig {
             iterate: IterateConfig::default(),
             auto: AutoConfig::default(),
             paths: PathsConfig::default(),
+            openrouter: OpenRouterConfig::default(),
             mcp_servers: BTreeMap::new(),
         }
     }
@@ -672,6 +674,7 @@ struct FileConfig {
     iterate: Option<IterateConfig>,
     auto: Option<AutoConfig>,
     paths: Option<PathsConfig>,
+    openrouter: Option<OpenRouterConfig>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
 }
@@ -781,6 +784,12 @@ impl AgentConfig {
                 .display()
                 .to_string()
         })
+    }
+
+    pub fn backend_descriptor(&self) -> BackendDescriptor {
+        let mut backend = crate::backends::backend(self.backend);
+        backend.openrouter = self.openrouter.clone();
+        backend
     }
 }
 
@@ -913,6 +922,9 @@ pub fn load_config() -> AgentConfig {
                 if let Some(p) = file.paths {
                     config.paths = p;
                 }
+                if let Some(o) = file.openrouter {
+                    config.openrouter = o;
+                }
                 if let Some(s) = file.mcp_servers {
                     config.mcp_servers = s;
                 }
@@ -1039,5 +1051,33 @@ mod tests {
             Some("process")
         );
         std::env::remove_var("SMALL_HARNESS_TEST_LAYER");
+    }
+
+    #[test]
+    fn parses_openrouter_fusion_config() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+              "openrouter": {
+                "fusion": {
+                  "enabled": true,
+                  "analysisModels": ["~openai/gpt-latest", "deepseek/deepseek-v3.2"],
+                  "judgeModel": "~anthropic/claude-opus-latest",
+                  "maxToolCalls": 4
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let fusion = file.openrouter.unwrap().fusion;
+        assert!(fusion.enabled);
+        assert_eq!(
+            fusion.analysis_models,
+            vec!["~openai/gpt-latest", "deepseek/deepseek-v3.2"]
+        );
+        assert_eq!(
+            fusion.judge_model.as_deref(),
+            Some("~anthropic/claude-opus-latest")
+        );
+        assert_eq!(fusion.max_tool_calls, Some(4));
     }
 }

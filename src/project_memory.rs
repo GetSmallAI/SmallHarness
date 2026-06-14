@@ -1242,6 +1242,7 @@ mod tests {
             base_url: String::new(),
             api_key: String::new(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         }
     }
 
@@ -1251,6 +1252,7 @@ mod tests {
             base_url: String::new(),
             api_key: String::new(),
             is_local: false,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         }
     }
 

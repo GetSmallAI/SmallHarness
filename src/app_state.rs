@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::agent_eval::AgentEvalCheckResult;
 use crate::approval::ApprovalCache;
-use crate::backends::{backend, default_model, validate, BackendDescriptor};
+use crate::backends::{default_model, validate, BackendDescriptor};
 use crate::config::AgentConfig;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
@@ -99,7 +99,7 @@ impl AppState {
         crate::session::save_session_metadata(&self.session_path, &metadata)
     }
     pub fn rebuild_client(&mut self) -> Result<()> {
-        let new_backend = backend(self.config.backend);
+        let new_backend = self.config.backend_descriptor();
         validate(&new_backend)?;
         self.backend = new_backend;
         Ok(())

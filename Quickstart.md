@@ -143,6 +143,8 @@ Useful commands:
 /ship pr
 /ship status
 /handoff      draft commit, changelog, testing, and X-ready release copy
+/fusion on    switch to OpenRouter Fusion for deliberative coding questions
+/fusion tool  attach Fusion deliberation to an OpenRouter coding model
 /session      show current model, approval policy, session file, and tokens
 /session title Refactor dispatch command
 /sessions search dispatch
@@ -310,6 +312,9 @@ You can still run the operator commands manually:
 /ship status
 /handoff
 /handoff export
+/fusion on
+/fusion tool anthropic/claude-sonnet-4.5
+/fusion off
 /test smart
 ```
 

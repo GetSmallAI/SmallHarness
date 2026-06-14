@@ -219,6 +219,7 @@ fn usage_chunk(input: u32, output: u32) -> StreamChunk {
         usage: Some(Usage {
             prompt_tokens: input,
             completion_tokens: output,
+            cost: None,
         }),
     }
 }

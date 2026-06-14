@@ -63,6 +63,7 @@ pub struct RunResult {
     pub messages: Vec<ChatMessage>,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub reported_cost_usd: Option<f64>,
     pub transcript_rewritten: bool,
     pub conversation_summary: Option<String>,
     /// True when the loop stopped because it hit `max_steps` while the model
@@ -212,6 +213,7 @@ where
 
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
+    let mut reported_cost_usd: Option<f64> = None;
     let mut transcript_rewritten = false;
     let mut natural_stop = false;
     let mut conversation_summary = guard
@@ -257,6 +259,7 @@ where
         let mut buffering_inline = false;
         let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
         let mut saw_first_token = false;
+        let mut step_reported_cost_usd: Option<f64> = None;
 
         stream_chat(http, backend, &req, cancel.clone(), |chunk| {
             if let Some(choice) = chunk.choices.first() {
@@ -316,9 +319,15 @@ where
             if let Some(usage) = &chunk.usage {
                 total_in += usage.prompt_tokens;
                 total_out += usage.completion_tokens;
+                if let Some(cost) = usage.cost {
+                    step_reported_cost_usd = Some(cost);
+                }
             }
         })
         .await?;
+        if let Some(cost) = step_reported_cost_usd {
+            reported_cost_usd = Some(reported_cost_usd.unwrap_or(0.0) + cost);
+        }
         metrics.model_ms += step_start.elapsed().as_millis();
 
         let mut final_calls: Vec<ToolCall> = tool_calls
@@ -590,6 +599,7 @@ where
         messages,
         input_tokens: total_in,
         output_tokens: total_out,
+        reported_cost_usd,
         transcript_rewritten,
         conversation_summary,
         hit_step_limit,

@@ -184,6 +184,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Run the last user prompt against the OpenRouter cloud (requires OPENROUTER_API_KEY)",
     ),
     (
+        "/fusion",
+        "Use OpenRouter Fusion alias or attach Fusion deliberation to an OpenRouter model",
+    ),
+    (
         "/context",
         "Show or update context limits and auto-guard status",
     ),
@@ -265,6 +269,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/model" => config_cmds::cmd_model(&args, state).await?,
         "/tools" => config_cmds::cmd_tools(&args, state),
         "/compare" => config_cmds::cmd_compare(&args, state).await?,
+        "/fusion" => config_cmds::cmd_fusion(&args, state)?,
         "/context" => context_cmds::cmd_context(&args, state),
         "/compact" => context_cmds::cmd_compact(&args, state).await?,
         "/reset" => context_cmds::cmd_reset(&args, state).await?,
@@ -335,7 +340,7 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
     let Some(config) = crate::setup::run_setup_wizard(&state.config).await? else {
         return Ok(());
     };
-    let backend_desc = backend(config.backend);
+    let backend_desc = config.backend_descriptor();
     if let Err(e) = validate(&backend_desc) {
         println!(
             "  {YELLOW}!{RESET} {DIM}Config saved, but active session stayed on the previous backend: {e}{RESET}"
@@ -989,6 +994,7 @@ mod tests {
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         };
 
         cmd_handoff(&format!("export {}", out_path.display()), &state)
@@ -1074,6 +1080,7 @@ mod tests {
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         };
 
         cmd_plan("add a CSV export command", &state).await.unwrap();
@@ -1102,6 +1109,7 @@ mod tests {
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test".into(),
             is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
         };
         let out_path = dir.path().join("nested/custom-spec.md");
 

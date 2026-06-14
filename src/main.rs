@@ -52,7 +52,7 @@ use std::io::{IsTerminal, Read, Write};
 
 use crate::app_state::AppState;
 use crate::approval::ApprovalCache;
-use crate::backends::{backend, default_model, validate, BackendName};
+use crate::backends::{default_model, validate, BackendName};
 use crate::banner::{print_banner, BannerInfo};
 use crate::commands::dispatch;
 use crate::config::load_config;
@@ -286,7 +286,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
     }
     let config = load_config();
     let http = crate::openai::build_http_client();
-    let backend_desc = backend(config.backend);
+    let backend_desc = config.backend_descriptor();
     validate(&backend_desc)?;
     let model = default_model(&backend_desc, config.model_override.as_deref());
     init_session_dir(&config.session_dir)?;
@@ -446,7 +446,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
     let http = crate::openai::build_http_client();
-    let backend_desc = backend(config.backend);
+    let backend_desc = config.backend_descriptor();
     let missing_codex_login = matches!(config.backend, BackendName::OpenAiCodex)
         && crate::auth::AuthStore::load()
             .get_oauth("openai-codex")

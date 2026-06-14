@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **OpenRouter Fusion support.** `/fusion on` switches the active session to
+  the `openrouter/fusion` alias for deliberative coding questions, while
+  `/fusion tool [model]` keeps a chosen OpenRouter coding model as the outer
+  agent and attaches OpenRouter's Fusion plugin for high-stakes reviews,
+  architecture tradeoffs, and debugging. Fusion tool mode can be configured
+  with `panel=...`, `judge=...`, and `max-tools=...`, or persisted under
+  `openrouter.fusion` in `agent.config.json`.
+- **OpenRouter-reported cost in the turn footer.** Streaming usage chunks now
+  read `usage.cost` when OpenRouter returns it, so dynamic routers such as
+  Fusion can show real per-turn and session cost instead of always falling back
+  to `$?`.
+
 ## [0.8.0] - 2026-06-14
 
 ### Added

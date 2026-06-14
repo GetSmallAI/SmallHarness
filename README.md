@@ -38,8 +38,12 @@ few that aren't usual:
 - **Local or cloud, one TUI.** Switch providers mid-session with
   `/backend <name>` — the tools, commands, and session log don't change.
 - **Per-turn cost on the status line.** `$0.003 this turn · $0.41 session`
-  when you're on a cloud backend with a cataloged model. Local turns just
-  show tokens.
+  when pricing is known or reported by the provider. Local turns just show
+  tokens.
+- **OpenRouter Fusion, one command away.** `/fusion on` switches to the
+  `openrouter/fusion` alias for deliberative work; `/fusion tool` attaches
+  Fusion to a chosen OpenRouter coding model for hard reviews, architecture
+  tradeoffs, and high-stakes debugging.
 - **Real undo.** `/undo` reverts the last agent turn's file mutations,
   including files the agent created or files that weren't tracked when the
   turn started.
@@ -221,7 +225,7 @@ A handful of moves worth knowing right away:
 | `lm-studio` | `http://localhost:1234/v1` | GUI model browser; explicit load / unload |
 | `mlx` | `http://localhost:8080/v1` | Fastest inference on Apple Silicon (via `mlx_lm.server`) |
 | `llamacpp` | `http://localhost:8080/v1` | Direct GGUF serving (via `llama-server`) |
-| `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models |
+| `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models and Fusion |
 | `openai` | `https://api.openai.com/v1` | Direct provider access with your own key |
 | `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
 
@@ -339,6 +343,7 @@ this exact call`. The session cache resets on `/new`.
 /verbose on|off        show every tool call with its full args + result
 /trace on|off          show nested subagent/critic tool calls (indented)
 /compare [model]       re-send the last prompt against OpenRouter for A/B
+/fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
 ```
 
 **Memory, capabilities, context**
@@ -387,18 +392,19 @@ Responses backend.
 
 ### Per-turn and session cost
 
-When you're on a cloud backend with a model in the catalog (currently OpenAI's
-GPT-4o family, o-series, GPT-4, GPT-3.5), every turn prints its own cost
-plus the running session total:
+When you're on a cloud backend with known pricing or provider-reported usage
+cost, every turn prints its own cost plus the running session total:
 
 ```text
   2.1k in · 845 out · $0.013 this turn · $0.094 session
 ```
 
 Switch to Ollama mid-session and the line shows `$0.00 this turn` but keeps
-the running total honest. OpenRouter and not-yet-cataloged OpenAI models
-show `$?` for the turn and prefix the session total with `≥` to signal it's
-a lower bound, not a fiction.
+the running total honest. OpenRouter returns `usage.cost` for many requests,
+including dynamic routers like Fusion; Small Harness uses that reported value
+when present. If a cloud model does not expose cost, the turn shows `$?` and
+prefixes the session total with `≥` to signal it is a lower bound, not a
+fiction.
 
 The `/model` picker shows the same data while you choose:
 
@@ -556,6 +562,30 @@ saves a durable project note.
 A/B a local response against a frontier one without leaving the session.
 Requires `OPENROUTER_API_KEY`.
 
+### Use OpenRouter Fusion
+
+Fusion is useful when a normal coding model is not enough: design reviews,
+multi-file architecture tradeoffs, incident debugging, dependency choices, or
+questions where a bad answer is more expensive than a few extra completions.
+
+```text
+/fusion on
+```
+
+Switches the active backend to OpenRouter and the model to `openrouter/fusion`.
+Use it for deliberative turns, then run `/fusion off` to return to the normal
+OpenRouter default model.
+
+```text
+/fusion tool anthropic/claude-sonnet-4.5
+/fusion tool anthropic/claude-sonnet-4.5 panel=~openai/gpt-latest,deepseek/deepseek-v3.2 judge=~anthropic/claude-opus-latest max-tools=4
+```
+
+Tool mode keeps a chosen OpenRouter coding model as the outer agent and adds
+OpenRouter's Fusion plugin so the model can invoke multi-model deliberation
+when the turn warrants it. The same Small Harness tools, approvals, session log,
+token counts, and reported OpenRouter costs stay visible.
+
 ---
 
 ## Configuration
@@ -630,6 +660,14 @@ root. Common shape:
     "maxPaths": 5,
     "maxSnapshotBytes": 52428800,
     "maxFileBytes": 1048576
+  },
+  "openrouter": {
+    "fusion": {
+      "enabled": false,
+      "analysisModels": [],
+      "judgeModel": null,
+      "maxToolCalls": null
+    }
   },
   "mcpServers": {
     "fs": { "command": "/usr/local/bin/some-mcp-server", "args": [] }

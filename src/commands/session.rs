@@ -304,7 +304,7 @@ pub(super) fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
             ""
         };
         println!(
-            "  {DIM}cost{RESET}      {prefix}{} (sum of catalog-priced turns)",
+            "  {DIM}cost{RESET}      {prefix}{} (sum of known-price turns)",
             catalog::format_usd(state.session_usd)
         );
     }

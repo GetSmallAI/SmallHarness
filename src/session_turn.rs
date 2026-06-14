@@ -492,12 +492,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.total_in += res.input_tokens;
     state.total_out += res.output_tokens;
-    let turn_cost = turn_cost_usd(
-        state.config.backend,
-        &state.model,
-        res.input_tokens,
-        res.output_tokens,
-    );
+    let turn_cost = res.reported_cost_usd.or_else(|| {
+        turn_cost_usd(
+            state.config.backend,
+            &state.model,
+            res.input_tokens,
+            res.output_tokens,
+        )
+    });
     match turn_cost {
         Some(c) => state.session_usd += c,
         None => {
@@ -605,6 +607,13 @@ mod cost_tests {
         assert!(s.contains("$0.0003 this turn"));
         assert!(s.contains("$0.0003 session"));
         assert!(!s.contains("≥"));
+    }
+
+    #[test]
+    fn provider_reported_cost_can_render_dynamic_router_costs() {
+        let s = format_cost_suffix(Some(0.0123), false, 0.0123, false);
+        assert!(s.contains("$0.01 this turn"));
+        assert!(s.contains("$0.01 session"));
     }
 
     #[test]

@@ -67,6 +67,27 @@ pub struct BackendDescriptor {
     pub api_key: String,
     #[allow(dead_code)]
     pub is_local: bool,
+    pub openrouter: OpenRouterConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRouterConfig {
+    #[serde(default)]
+    pub fusion: OpenRouterFusionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRouterFusionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub analysis_models: Vec<String>,
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    #[serde(default)]
+    pub max_tool_calls: Option<u8>,
 }
 
 pub fn backend(name: BackendName) -> BackendDescriptor {
@@ -77,6 +98,7 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
                 .unwrap_or_else(|_| "http://localhost:11434/v1".into()),
             api_key: "ollama".into(),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::LmStudio => BackendDescriptor {
             name,
@@ -84,6 +106,7 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
                 .unwrap_or_else(|_| "http://localhost:1234/v1".into()),
             api_key: "lm-studio".into(),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::Mlx => BackendDescriptor {
             name,
@@ -91,6 +114,7 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
                 .unwrap_or_else(|_| "http://localhost:8080/v1".into()),
             api_key: "mlx".into(),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::LlamaCpp => BackendDescriptor {
             name,
@@ -99,12 +123,14 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             api_key: std::env::var("LLAMACPP_API_KEY")
                 .unwrap_or_else(|_| "sk-no-key-required".into()),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::Openrouter => BackendDescriptor {
             name,
             base_url: "https://openrouter.ai/api/v1".into(),
             api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
             is_local: false,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::OpenAi => BackendDescriptor {
             name,
@@ -112,6 +138,7 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
                 .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             is_local: false,
+            openrouter: OpenRouterConfig::default(),
         },
         BackendName::OpenAiCodex => BackendDescriptor {
             name,
@@ -122,6 +149,7 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             // accidentally treat ChatGPT subscription auth as an API key.
             api_key: String::new(),
             is_local: false,
+            openrouter: OpenRouterConfig::default(),
         },
     }
 }
@@ -182,6 +210,7 @@ mod tests {
             base_url: String::new(),
             api_key: String::new(),
             is_local: true,
+            openrouter: OpenRouterConfig::default(),
         }
     }
 

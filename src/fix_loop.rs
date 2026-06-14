@@ -179,7 +179,6 @@ pub fn parse_fix_args(args: &str, default_attempts: usize) -> Result<FixOptions>
 mod tests {
     use super::*;
     use crate::approval::ApprovalCache;
-    use crate::backends::backend;
     use crate::config::AgentConfig;
     use crate::renderer::TuiRenderer;
     use crate::session_paths::PathStore;
@@ -195,7 +194,7 @@ mod tests {
         let session_path = root.join(".sessions/test.jsonl");
         AppState {
             http: reqwest::Client::new(),
-            backend: backend(config.backend),
+            backend: config.backend_descriptor(),
             model: "test-model".into(),
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),

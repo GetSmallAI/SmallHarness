@@ -18,6 +18,7 @@ fn mock_backend(listener: &TcpListener) -> BackendDescriptor {
         base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
         api_key: "test".into(),
         is_local: true,
+        openrouter: crate::backends::OpenRouterConfig::default(),
     }
 }
 

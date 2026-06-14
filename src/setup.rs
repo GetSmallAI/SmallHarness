@@ -349,7 +349,7 @@ async fn prompt_tool_selection(default: ToolSelection) -> Result<Option<ToolSele
 
 async fn probe_setup_backend(config: &AgentConfig) {
     let http = build_http_client();
-    let backend_desc = backend(config.backend);
+    let backend_desc = config.backend_descriptor();
     let model = default_model(&backend_desc, config.model_override.as_deref());
     println!(
         "  {DIM}Probing {} at {} with {CYAN}{}{RESET}{DIM}…{RESET}",

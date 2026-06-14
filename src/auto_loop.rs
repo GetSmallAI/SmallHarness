@@ -899,7 +899,7 @@ mod tests {
         let session_path = root.join(".sessions/test.jsonl");
         AppState {
             http: reqwest::Client::new(),
-            backend: backend(config.backend),
+            backend: config.backend_descriptor(),
             model: "test-model".into(),
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),

@@ -472,7 +472,7 @@ pub async fn run_eval_cli(
 ) -> anyhow::Result<i32> {
     let fixture = fixture_by_id(fixture_id)
         .ok_or_else(|| anyhow!("unknown agent eval fixture: {fixture_id}"))?;
-    let backend_desc = crate::backends::backend(config.backend);
+    let backend_desc = config.backend_descriptor();
     crate::backends::validate(&backend_desc)?;
     let model = model_override.map(str::to_string).unwrap_or_else(|| {
         crate::backends::default_model(&backend_desc, config.model_override.as_deref())
@@ -542,6 +542,7 @@ mod tests {
                 messages: vec![],
                 input_tokens: 0,
                 output_tokens: 0,
+                reported_cost_usd: None,
                 transcript_rewritten: false,
                 conversation_summary: None,
                 hit_step_limit: false,

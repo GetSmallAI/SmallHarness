@@ -756,6 +756,236 @@ pub(super) async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
     Ok(())
 }
 
+const FUSION_MODEL: &str = "openrouter/fusion";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FusionToolArgs {
+    model: Option<String>,
+    analysis_models: Option<Vec<String>>,
+    judge_model: Option<String>,
+    max_tool_calls: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FusionInvocation {
+    Status,
+    Alias,
+    Tool(FusionToolArgs),
+    Off,
+}
+
+fn parse_fusion_args(args: &str) -> Option<FusionInvocation> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "status" {
+        return Some(FusionInvocation::Status);
+    }
+    if matches!(trimmed, "on" | "alias") {
+        return Some(FusionInvocation::Alias);
+    }
+    if trimmed == "off" {
+        return Some(FusionInvocation::Off);
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    if parts.next()? != "tool" {
+        return None;
+    }
+    let mut parsed = FusionToolArgs {
+        model: None,
+        analysis_models: None,
+        judge_model: None,
+        max_tool_calls: None,
+    };
+    for part in parts {
+        if let Some(value) = part
+            .strip_prefix("panel=")
+            .or_else(|| part.strip_prefix("--panel="))
+        {
+            let models = parse_csv(value);
+            if models.is_empty() || models.len() > 8 {
+                return None;
+            }
+            parsed.analysis_models = Some(models);
+        } else if let Some(value) = part
+            .strip_prefix("judge=")
+            .or_else(|| part.strip_prefix("--judge="))
+        {
+            if value.trim().is_empty() {
+                return None;
+            }
+            parsed.judge_model = Some(value.trim().to_string());
+        } else if let Some(value) = part
+            .strip_prefix("max-tools=")
+            .or_else(|| part.strip_prefix("--max-tools="))
+            .or_else(|| part.strip_prefix("maxToolCalls="))
+        {
+            let n = value.parse::<u8>().ok()?;
+            if !(1..=16).contains(&n) {
+                return None;
+            }
+            parsed.max_tool_calls = Some(n);
+        } else if parsed.model.is_none() {
+            parsed.model = Some(part.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(FusionInvocation::Tool(parsed))
+}
+
+fn parse_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn fusion_usage() {
+    println!(
+        "  {DIM}Usage: /fusion status · /fusion on · /fusion tool [model] [panel=a,b,c] [judge=model] [max-tools=1..16] · /fusion off{RESET}"
+    );
+}
+
+fn print_fusion_status(state: &AppState) {
+    let fusion = &state.config.openrouter.fusion;
+    let alias_active = matches!(state.config.backend, BackendName::Openrouter)
+        && state.model == FUSION_MODEL
+        && !fusion.enabled;
+    let mode = if alias_active {
+        "alias"
+    } else if matches!(state.config.backend, BackendName::Openrouter) && fusion.enabled {
+        "tool"
+    } else {
+        "off"
+    };
+    println!("  {DIM}fusion{RESET}           {CYAN}{mode}{RESET}");
+    println!(
+        "  {DIM}backend/model{RESET}    {} · {}",
+        state.config.backend.as_str(),
+        state.model
+    );
+    if fusion.enabled {
+        let panel = if fusion.analysis_models.is_empty() {
+            "Quality preset".into()
+        } else {
+            fusion.analysis_models.join(", ")
+        };
+        let judge = fusion
+            .judge_model
+            .as_deref()
+            .unwrap_or("OpenRouter default / outer model");
+        let max_tools = fusion
+            .max_tool_calls
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "default".into());
+        println!("  {DIM}panel{RESET}            {panel}");
+        println!("  {DIM}judge{RESET}            {judge}");
+        println!("  {DIM}maxToolCalls{RESET}     {max_tools}");
+    }
+    println!(
+        "  {DIM}cost{RESET}             OpenRouter usage.cost is used when returned; otherwise cost is marked unknown"
+    );
+    fusion_usage();
+}
+
+fn ensure_openrouter_key() -> bool {
+    if backend(BackendName::Openrouter).api_key.is_empty() {
+        println!("  {RED}✗{RESET} {DIM}OPENROUTER_API_KEY not set. Run /auth set openrouter first.{RESET}");
+        false
+    } else {
+        true
+    }
+}
+
+pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
+    let Some(invocation) = parse_fusion_args(args) else {
+        fusion_usage();
+        return Ok(());
+    };
+
+    match invocation {
+        FusionInvocation::Status => {
+            print_fusion_status(state);
+        }
+        FusionInvocation::Alias => {
+            if !ensure_openrouter_key() {
+                return Ok(());
+            }
+            state.config.backend = BackendName::Openrouter;
+            state.config.model_override = Some(FUSION_MODEL.into());
+            state.config.openrouter.fusion.enabled = false;
+            state.rebuild_client()?;
+            state.resolve_model();
+            state.warmed_fingerprint = None;
+            println!(
+                "  {GREEN}✓{RESET} {DIM}Fusion alias enabled →{RESET} {CYAN}{}{RESET}",
+                state.model
+            );
+            println!(
+                "  {DIM}Use this for research, architecture tradeoffs, reviews, and high-stakes debugging; use /fusion off for normal coding turns.{RESET}"
+            );
+        }
+        FusionInvocation::Tool(args) => {
+            if !ensure_openrouter_key() {
+                return Ok(());
+            }
+            let was_openrouter = matches!(state.config.backend, BackendName::Openrouter);
+            let fallback_model = default_model(&backend(BackendName::Openrouter), None);
+            let model = args.model.unwrap_or_else(|| {
+                if was_openrouter && state.model != FUSION_MODEL {
+                    state.model.clone()
+                } else {
+                    fallback_model
+                }
+            });
+
+            state.config.backend = BackendName::Openrouter;
+            state.config.model_override = Some(model);
+            {
+                let fusion = &mut state.config.openrouter.fusion;
+                fusion.enabled = true;
+                if let Some(models) = args.analysis_models {
+                    fusion.analysis_models = models;
+                }
+                if let Some(judge) = args.judge_model {
+                    fusion.judge_model = Some(judge);
+                }
+                if let Some(max_tool_calls) = args.max_tool_calls {
+                    fusion.max_tool_calls = Some(max_tool_calls);
+                }
+            }
+            state.rebuild_client()?;
+            state.resolve_model();
+            state.warmed_fingerprint = None;
+            println!(
+                "  {GREEN}✓{RESET} {DIM}Fusion tool enabled on{RESET} {CYAN}{}{RESET}",
+                state.model
+            );
+            println!(
+                "  {DIM}The model can invoke OpenRouter Fusion when a turn benefits from multi-model deliberation.{RESET}"
+            );
+        }
+        FusionInvocation::Off => {
+            state.config.openrouter.fusion.enabled = false;
+            if matches!(state.config.backend, BackendName::Openrouter)
+                && state.config.model_override.as_deref() == Some(FUSION_MODEL)
+            {
+                state.config.model_override = None;
+            }
+            state.backend.openrouter = state.config.openrouter.clone();
+            state.resolve_model();
+            state.warmed_fingerprint = None;
+            println!(
+                "  {GREEN}✓{RESET} {DIM}Fusion off · model →{RESET} {CYAN}{}{RESET}",
+                state.model
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,5 +1053,48 @@ mod tests {
         assert_eq!(state.config.mode, OperatorMode::Ship);
         assert!(state.config.checkpoints.enabled);
         assert!(state.checkpoints_enabled);
+    }
+
+    #[test]
+    fn parses_fusion_alias_and_off() {
+        assert_eq!(parse_fusion_args(""), Some(FusionInvocation::Status));
+        assert_eq!(parse_fusion_args("status"), Some(FusionInvocation::Status));
+        assert_eq!(parse_fusion_args("on"), Some(FusionInvocation::Alias));
+        assert_eq!(parse_fusion_args("alias"), Some(FusionInvocation::Alias));
+        assert_eq!(parse_fusion_args("off"), Some(FusionInvocation::Off));
+        assert!(parse_fusion_args("unknown").is_none());
+    }
+
+    #[test]
+    fn parses_fusion_tool_options() {
+        let parsed = parse_fusion_args(
+            "tool anthropic/claude-sonnet-4.5 panel=~openai/gpt-latest,deepseek/deepseek-v3.2 judge=~anthropic/claude-opus-latest max-tools=4",
+        );
+        let Some(FusionInvocation::Tool(args)) = parsed else {
+            panic!("expected tool invocation");
+        };
+        assert_eq!(args.model.as_deref(), Some("anthropic/claude-sonnet-4.5"));
+        assert_eq!(
+            args.analysis_models,
+            Some(vec![
+                "~openai/gpt-latest".into(),
+                "deepseek/deepseek-v3.2".into()
+            ])
+        );
+        assert_eq!(
+            args.judge_model.as_deref(),
+            Some("~anthropic/claude-opus-latest")
+        );
+        assert_eq!(args.max_tool_calls, Some(4));
+    }
+
+    #[test]
+    fn rejects_invalid_fusion_tool_options() {
+        assert!(parse_fusion_args("tool model-a model-b").is_none());
+        assert!(parse_fusion_args("tool panel=").is_none());
+        assert!(parse_fusion_args("tool panel=m1,m2,m3,m4,m5,m6,m7,m8,m9").is_none());
+        assert!(parse_fusion_args("tool max-tools=0").is_none());
+        assert!(parse_fusion_args("tool max-tools=17").is_none());
+        assert!(parse_fusion_args("tool judge=").is_none());
     }
 }
