@@ -203,7 +203,7 @@ A handful of moves worth knowing right away:
 - `/ship` turns that into a final preflight, local commit, and push path:
   readiness verdict, blockers, commit-message draft, guarded `git commit`, and
   guarded `git push`; `/ship pr` opens a draft pull request through GitHub CLI
-  when available.
+  when available, and `/ship status` summarizes open PR checks/review state.
 - `/plan <intent>` drafts a spec; `/iterate <goal>` runs a generate→evaluate
   loop where a separate critic grades each pass against a rubric.
 - `/play fix-failing-test` runs a bundled demo in an isolated sandbox so you
@@ -316,6 +316,7 @@ this exact call`. The session cache resets on `/new`.
 /ship commit --all|--staged-only guarded local git commit with ship record
 /ship push                       guarded git push, setting upstream when needed
 /ship pr [--base main]           create a draft GitHub PR via gh, or print the command
+/ship status                     summarize open PR checks and review state
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop

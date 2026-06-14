@@ -426,6 +426,7 @@ enum ShipAction {
     Commit,
     Push,
     Pr,
+    Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +496,13 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
                     return None;
                 }
                 parsed.action = ShipAction::Pr;
+                action_seen = true;
+            }
+            "status" | "checks" => {
+                if action_seen {
+                    return None;
+                }
+                parsed.action = ShipAction::Status;
                 action_seen = true;
             }
             "--tests" => parsed.run_tests = Some(true),
@@ -567,7 +575,7 @@ fn parse_ship_args(args: &str) -> Option<ShipArgs> {
 async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     let Some(args) = parse_ship_args(args) else {
         println!(
-            "  {DIM}Usage: /ship [preview|commit|push|pr] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>] [--base <branch>] [--ready] [--title <title>]{RESET}"
+            "  {DIM}Usage: /ship [preview|commit|push|pr|status] [--tests|--no-tests] [--all|--staged-only] [--allow-behind] [--cloud] [--yes] [-m <message>] [--base <branch>] [--ready] [--title <title>]{RESET}"
         );
         return Ok(());
     };
@@ -576,7 +584,11 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         println!("  {DIM}Usage: staging flags only apply to /ship commit.{RESET}");
         return Ok(());
     }
-    if matches!(args.action, ShipAction::Push | ShipAction::Pr) && args.message.is_some() {
+    if matches!(
+        args.action,
+        ShipAction::Push | ShipAction::Pr | ShipAction::Status
+    ) && args.message.is_some()
+    {
         println!(
             "  {DIM}Usage: commit messages only apply to /ship preview or /ship commit.{RESET}"
         );
@@ -612,6 +624,8 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         evaluate_ship_push_readiness(&snapshot, args.allow_behind)
     } else if args.action == ShipAction::Pr {
         evaluate_ship_pr_readiness(&snapshot, args.allow_behind)
+    } else if args.action == ShipAction::Status {
+        evaluate_ship_status_readiness(&snapshot, args.allow_behind)
     } else {
         evaluate_ship_readiness(&snapshot, args.allow_behind)
     };
@@ -623,6 +637,7 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
             ShipAction::Commit => "commit",
             ShipAction::Push => "push",
             ShipAction::Pr => "pr",
+            ShipAction::Status => "status",
         }
     );
     print_shipcheck(&snapshot, freshness.as_ref());
@@ -653,6 +668,7 @@ async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
         }
         ShipAction::Push => run_ship_push(args, snapshot, readiness, state).await,
         ShipAction::Pr => run_ship_pr(args, snapshot, readiness, state).await,
+        ShipAction::Status => run_ship_status(snapshot, readiness, state).await,
         ShipAction::Preview => Ok(()),
     }
 }
@@ -892,6 +908,46 @@ async fn run_ship_pr(
     Ok(())
 }
 
+async fn run_ship_status(
+    snapshot: ShipcheckSnapshot,
+    readiness: ShipReadiness,
+    state: &AppState,
+) -> Result<()> {
+    if readiness.status == ShipReadinessStatus::Blocked {
+        println!("  {RED}✗{RESET} {DIM}PR status not checked{RESET}");
+        return Ok(());
+    }
+
+    let target = match resolve_ship_pr_target(&state.config.workspace_root, &snapshot, None) {
+        Ok(target) => target,
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}PR status unavailable: {e}{RESET}");
+            return Ok(());
+        }
+    };
+    let command = build_gh_pr_status_command(&target);
+    println!("  {DIM}prTarget{RESET}        {}", target.description());
+
+    if !gh_cli_ready(&state.config.workspace_root) {
+        println!("  {YELLOW}!{RESET} {DIM}GitHub CLI is unavailable or unauthenticated; run this manually:{RESET}");
+        println!("    {}", shell_command_display(&command));
+        return Ok(());
+    }
+
+    let output = run_command_capture_combined(&state.config.workspace_root, &command)?;
+    match parse_ship_pr_status_json(&output)? {
+        Some(status) => print_ship_pr_status(&status),
+        None => {
+            println!(
+                "  {YELLOW}!{RESET} {DIM}No open PR found for `{}`.{RESET}",
+                target.head_branch
+            );
+            println!("  {DIM}nextAction{RESET}      run /ship pr");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShipPrTarget {
     remote: String,
@@ -1067,6 +1123,25 @@ fn build_gh_pr_command(target: &ShipPrTarget, title: &str, body: &str, draft: bo
     args
 }
 
+fn build_gh_pr_status_command(target: &ShipPrTarget) -> Vec<String> {
+    vec![
+        "gh".to_string(),
+        "pr".to_string(),
+        "list".to_string(),
+        "--repo".to_string(),
+        target.repo.clone(),
+        "--head".to_string(),
+        target.head_branch.clone(),
+        "--state".to_string(),
+        "open".to_string(),
+        "--json".to_string(),
+        "number,url,title,state,headRefName,baseRefName,reviewDecision,mergeable,statusCheckRollup"
+            .to_string(),
+        "--limit".to_string(),
+        "1".to_string(),
+    ]
+}
+
 fn gh_cli_ready(workspace_root: &str) -> bool {
     command_success(workspace_root, &["gh", "--version"])
         && command_success(workspace_root, &["gh", "auth", "status"])
@@ -1143,6 +1218,227 @@ fn extract_url(output: &str) -> Option<String> {
             part.trim_matches(|c: char| c == ')' || c == '(')
                 .to_string()
         })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipPrStatus {
+    number: u64,
+    url: String,
+    title: String,
+    state: String,
+    head_branch: String,
+    base_branch: String,
+    review_decision: Option<String>,
+    mergeable: Option<String>,
+    checks: Vec<ShipPrCheckStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShipPrCheckStatus {
+    name: String,
+    workflow: Option<String>,
+    status: String,
+    conclusion: Option<String>,
+    details_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ShipPrCheckCounts {
+    success: usize,
+    failing: usize,
+    pending: usize,
+    skipped: usize,
+}
+
+impl ShipPrCheckCounts {
+    fn total(self) -> usize {
+        self.success + self.failing + self.pending + self.skipped
+    }
+}
+
+fn parse_ship_pr_status_json(output: &str) -> Result<Option<ShipPrStatus>> {
+    let value: serde_json::Value = serde_json::from_str(output.trim())
+        .map_err(|e| anyhow!("failed to parse gh PR status JSON: {e}"))?;
+    let Some(pr) = value.as_array().and_then(|items| items.first()) else {
+        return Ok(None);
+    };
+
+    let checks = pr
+        .get("statusCheckRollup")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| ShipPrCheckStatus {
+                    name: json_string(item, "name")
+                        .or_else(|| json_string(item, "context"))
+                        .unwrap_or_else(|| "unnamed check".into()),
+                    workflow: json_string(item, "workflowName"),
+                    status: json_string(item, "status")
+                        .or_else(|| json_string(item, "state"))
+                        .unwrap_or_else(|| "UNKNOWN".into()),
+                    conclusion: json_string(item, "conclusion"),
+                    details_url: json_string(item, "detailsUrl")
+                        .or_else(|| json_string(item, "targetUrl")),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Some(ShipPrStatus {
+        number: pr
+            .get("number")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        url: json_string(pr, "url").unwrap_or_default(),
+        title: json_string(pr, "title").unwrap_or_else(|| "Untitled PR".into()),
+        state: json_string(pr, "state").unwrap_or_else(|| "UNKNOWN".into()),
+        head_branch: json_string(pr, "headRefName").unwrap_or_default(),
+        base_branch: json_string(pr, "baseRefName").unwrap_or_default(),
+        review_decision: json_string(pr, "reviewDecision"),
+        mergeable: json_string(pr, "mergeable"),
+        checks,
+    }))
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn ship_pr_check_counts(checks: &[ShipPrCheckStatus]) -> ShipPrCheckCounts {
+    let mut counts = ShipPrCheckCounts::default();
+    for check in checks {
+        match ship_pr_check_bucket(check) {
+            ShipPrCheckBucket::Success => counts.success += 1,
+            ShipPrCheckBucket::Failing => counts.failing += 1,
+            ShipPrCheckBucket::Pending => counts.pending += 1,
+            ShipPrCheckBucket::Skipped => counts.skipped += 1,
+        }
+    }
+    counts
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipPrCheckBucket {
+    Success,
+    Failing,
+    Pending,
+    Skipped,
+}
+
+fn ship_pr_check_bucket(check: &ShipPrCheckStatus) -> ShipPrCheckBucket {
+    let conclusion = check.conclusion.as_deref().map(str::to_ascii_uppercase);
+    let status = check.status.to_ascii_uppercase();
+
+    if matches!(conclusion.as_deref(), Some("SUCCESS")) || status == "SUCCESS" {
+        ShipPrCheckBucket::Success
+    } else if matches!(
+        conclusion.as_deref(),
+        Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "ERROR")
+    ) || matches!(status.as_str(), "FAILURE" | "ERROR")
+    {
+        ShipPrCheckBucket::Failing
+    } else if matches!(conclusion.as_deref(), Some("SKIPPED" | "NEUTRAL")) {
+        ShipPrCheckBucket::Skipped
+    } else {
+        ShipPrCheckBucket::Pending
+    }
+}
+
+fn print_ship_pr_status(status: &ShipPrStatus) {
+    let counts = ship_pr_check_counts(&status.checks);
+    println!(
+        "  {DIM}pr{RESET}              #{} {}",
+        status.number, status.title
+    );
+    if !status.url.is_empty() {
+        println!("  {DIM}url{RESET}             {CYAN}{}{RESET}", status.url);
+    }
+    println!(
+        "  {DIM}branches{RESET}        {} -> {}",
+        status.head_branch, status.base_branch
+    );
+    println!("  {DIM}state{RESET}           {}", status.state);
+    println!(
+        "  {DIM}review{RESET}          {}",
+        status.review_decision.as_deref().unwrap_or("none")
+    );
+    println!(
+        "  {DIM}mergeable{RESET}       {}",
+        status.mergeable.as_deref().unwrap_or("unknown")
+    );
+
+    if counts.total() == 0 {
+        println!("  {DIM}checks{RESET}          none reported");
+        println!("  {DIM}nextAction{RESET}      wait for GitHub to report checks");
+        return;
+    }
+
+    println!(
+        "  {DIM}checks{RESET}          {} success · {} failing · {} pending · {} skipped",
+        counts.success, counts.failing, counts.pending, counts.skipped
+    );
+    for check in status.checks.iter().take(8) {
+        println!(
+            "    {} {}",
+            ship_pr_check_marker(ship_pr_check_bucket(check)),
+            ship_pr_check_line(check)
+        );
+    }
+    if status.checks.len() > 8 {
+        println!("    ... {} more check(s)", status.checks.len() - 8);
+    }
+    println!(
+        "  {DIM}nextAction{RESET}      {}",
+        ship_pr_status_next_action(status, counts)
+    );
+}
+
+fn ship_pr_check_marker(bucket: ShipPrCheckBucket) -> &'static str {
+    match bucket {
+        ShipPrCheckBucket::Success => "✓",
+        ShipPrCheckBucket::Failing => "✗",
+        ShipPrCheckBucket::Pending => "...",
+        ShipPrCheckBucket::Skipped => "-",
+    }
+}
+
+fn ship_pr_check_line(check: &ShipPrCheckStatus) -> String {
+    let mut label = String::new();
+    if let Some(workflow) = &check.workflow {
+        label.push_str(workflow);
+        label.push_str(" / ");
+    }
+    label.push_str(&check.name);
+    let state = check
+        .conclusion
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&check.status);
+    label.push_str(&format!(" ({state})"));
+    if let Some(url) = &check.details_url {
+        label.push_str(&format!(" {url}"));
+    }
+    label
+}
+
+fn ship_pr_status_next_action(status: &ShipPrStatus, counts: ShipPrCheckCounts) -> &'static str {
+    if counts.failing > 0 {
+        "inspect failing checks, fix locally, then /ship commit and /ship push"
+    } else if counts.pending > 0 {
+        "wait for pending checks, then rerun /ship status"
+    } else if status.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
+        "address requested changes, then /ship commit and /ship push"
+    } else if status.review_decision.as_deref() == Some("REVIEW_REQUIRED") {
+        "request review or mark ready when the draft is complete"
+    } else {
+        "merge when ready"
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1813,6 +2109,70 @@ fn evaluate_ship_pr_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) 
         }
         if let Some(error) = &tests.error {
             blockers.push(format!("test execution error: {error}"));
+        }
+    }
+
+    let status = if !blockers.is_empty() {
+        ShipReadinessStatus::Blocked
+    } else if !warnings.is_empty() {
+        ShipReadinessStatus::NeedsReview
+    } else {
+        ShipReadinessStatus::Ready
+    };
+
+    ShipReadiness {
+        status,
+        blockers,
+        warnings,
+    }
+}
+
+fn evaluate_ship_status_readiness(
+    snapshot: &ShipcheckSnapshot,
+    allow_behind: bool,
+) -> ShipReadiness {
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    if snapshot.branch.head.as_deref() == Some("(detached)") || snapshot.branch.head.is_none() {
+        blockers.push("cannot resolve PR status from a detached or unknown HEAD".into());
+    }
+    if snapshot.branch.upstream.is_none() {
+        blockers.push("branch has no upstream; run /ship push first".into());
+    }
+    if snapshot.branch.ahead > 0 {
+        warnings.push(format!(
+            "local branch has {} unpushed commit(s); PR checks may be stale",
+            snapshot.branch.ahead
+        ));
+    }
+    if snapshot.branch.behind > 0 && !allow_behind {
+        warnings.push(format!(
+            "branch is behind upstream by {} commit(s); status may not reflect local checkout",
+            snapshot.branch.behind
+        ));
+    }
+    if snapshot.conflict_count() > 0 {
+        warnings.push(format!(
+            "{} conflicted file(s) are present locally",
+            snapshot.conflict_count()
+        ));
+    }
+    if snapshot.staged_count() + snapshot.unstaged_count() > 0 || snapshot.untracked_count() > 0 {
+        warnings.push(format!(
+            "{} uncommitted file(s) are not reflected in PR checks",
+            snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
+        ));
+    }
+    if let Some(tests) = &snapshot.test_status {
+        if tests.failed > 0 || tests.exit_code != 0 {
+            warnings.push(format!(
+                "local tests failed: {} failed, exit code {}",
+                tests.failed, tests.exit_code
+            ));
+        }
+        if let Some(error) = &tests.error {
+            warnings.push(format!("local test execution error: {error}"));
         }
     }
 
@@ -2512,6 +2872,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_ship_status_args() {
+        let args = parse_ship_args("status --tests --allow-behind").unwrap();
+        assert_eq!(args.action, ShipAction::Status);
+        assert_eq!(args.run_tests, Some(true));
+        assert!(args.allow_behind);
+
+        let alias = parse_ship_args("checks").unwrap();
+        assert_eq!(alias.action, ShipAction::Status);
+    }
+
+    #[test]
     fn extracts_commit_message_section() {
         let markdown =
             "## Commit Message\n\nfeat: ship preview\n\nBody line\n\n## Testing\n\ncargo test";
@@ -2629,6 +3000,30 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("tests were not run")));
+    }
+
+    #[test]
+    fn ship_status_readiness_warns_for_unpushed_commits_without_blocking() {
+        let mut snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        snapshot.branch.ahead = 2;
+        let readiness = evaluate_ship_status_readiness(&snapshot, false);
+
+        assert_eq!(readiness.status, ShipReadinessStatus::NeedsReview);
+        assert!(readiness.blockers.is_empty());
+        assert!(readiness
+            .warnings
+            .iter()
+            .any(|w| w.contains("PR checks may be stale")));
+    }
+
+    #[test]
+    fn ship_status_readiness_requires_upstream() {
+        let mut snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
+        snapshot.branch.upstream = None;
+        let readiness = evaluate_ship_status_readiness(&snapshot, false);
+
+        assert_eq!(readiness.status, ShipReadinessStatus::Blocked);
+        assert!(readiness.blockers.iter().any(|b| b.contains("no upstream")));
     }
 
     #[test]
@@ -2869,6 +3264,26 @@ mod tests {
     }
 
     #[test]
+    fn build_gh_pr_status_command_uses_open_head_filter() {
+        let target = ShipPrTarget {
+            remote: "origin".into(),
+            repo: "GetSmallAI/SmallHarness".into(),
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+        };
+        let command = build_gh_pr_status_command(&target);
+
+        assert_eq!(command[0], "gh");
+        assert!(command
+            .windows(2)
+            .any(|parts| parts[0] == "--state" && parts[1] == "open"));
+        assert!(command
+            .windows(2)
+            .any(|parts| parts[0] == "--head" && parts[1] == "feature"));
+        assert!(command.iter().any(|arg| arg.contains("statusCheckRollup")));
+    }
+
+    #[test]
     fn render_ship_pr_body_includes_branch_commit_and_tests() {
         let snapshot = sample_snapshot(Vec::new(), Some(passing_tests()));
         let target = ShipPrTarget {
@@ -2917,6 +3332,70 @@ mod tests {
         assert!(body.contains("GetSmallAI/SmallHarness"));
         assert!(body.contains("https://github.com/GetSmallAI/SmallHarness/pull/1"));
         assert!(body.contains("gh pr create"));
+    }
+
+    #[test]
+    fn parse_ship_pr_status_json_handles_open_pr_checks() {
+        let json = r#"[{
+            "number": 7,
+            "url": "https://github.com/GetSmallAI/SmallHarness/pull/7",
+            "title": "Ship status",
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": "main",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "clippy + fmt",
+                    "workflowName": "CI",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "detailsUrl": "https://example.com/success"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "build + test",
+                    "workflowName": "CI",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "detailsUrl": "https://example.com/failure"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "release",
+                    "workflowName": "Release",
+                    "status": "IN_PROGRESS",
+                    "conclusion": null,
+                    "detailsUrl": "https://example.com/pending"
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "optional",
+                    "state": "SUCCESS",
+                    "targetUrl": "https://example.com/status"
+                }
+            ]
+        }]"#;
+
+        let status = parse_ship_pr_status_json(json).unwrap().unwrap();
+        let counts = ship_pr_check_counts(&status.checks);
+
+        assert_eq!(status.number, 7);
+        assert_eq!(status.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
+        assert_eq!(counts.success, 2);
+        assert_eq!(counts.failing, 1);
+        assert_eq!(counts.pending, 1);
+        assert_eq!(
+            ship_pr_status_next_action(&status, counts),
+            "inspect failing checks, fix locally, then /ship commit and /ship push"
+        );
+    }
+
+    #[test]
+    fn parse_ship_pr_status_json_handles_empty_list() {
+        assert!(parse_ship_pr_status_json("[]").unwrap().is_none());
     }
 
     #[test]
