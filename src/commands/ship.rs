@@ -1,4 +1,4 @@
-//! Final-mile shipping command group.
+//! Last-mile shipping command group.
 
 use super::*;
 use crate::handoff::{

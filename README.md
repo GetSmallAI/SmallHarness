@@ -200,7 +200,7 @@ A handful of moves worth knowing right away:
   `/path diff`, and `/path pick` compare and merge paths.
 - `/shipcheck` summarizes git state; `/handoff` drafts a commit message,
   changelog bullets, and a release post from local context.
-- `/ship` turns that into a final preflight, local commit, and push path:
+- `/ship` turns that into a last-mile preflight, local commit, and push path:
   readiness verdict, blockers, commit-message draft, guarded `git commit`, and
   guarded `git push`; `/ship pr` opens a draft pull request through GitHub CLI
   when available, and `/ship status` summarizes open PR checks/review state.
@@ -312,7 +312,7 @@ this exact call`. The session cache resets on `/new`.
 /plan <intent>                   expand a short intent into a spec (.small-harness/spec.md)
 /plan validate                   check the spec's Done Criteria against the working diff
 /shipcheck                       summarize git + test readiness
-/ship [--tests]                  preview final ship readiness and commit message
+/ship [--tests]                  preview last-mile ship readiness and commit message
 /ship commit --all|--staged-only guarded local git commit with ship record
 /ship push                       guarded git push, setting upstream when needed
 /ship pr [--base main]           create a draft GitHub PR via gh, or print the command

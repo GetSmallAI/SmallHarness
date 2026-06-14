@@ -128,7 +128,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/ship",
-        "Preview final ship readiness and draft a commit message",
+        "Preview last-mile ship readiness and draft a commit message",
     ),
     (
         "/handoff",
