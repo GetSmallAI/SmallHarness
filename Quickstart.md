@@ -319,6 +319,7 @@ You can still run the operator commands manually:
 /route template
 /route select --dry-run add OAuth login and tests
 /route apply coder high
+/session
 /test smart
 ```
 

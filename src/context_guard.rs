@@ -487,6 +487,7 @@ pub async fn summarize_transcript(
             include_usage: false,
         }),
         max_tokens: None,
+        effort: None,
     };
     let mut out = String::new();
     stream_chat(http, backend, &req, None, |chunk| {

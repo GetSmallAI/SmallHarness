@@ -5,6 +5,7 @@ use crate::agent_eval::AgentEvalCheckResult;
 use crate::approval::ApprovalCache;
 use crate::backends::{default_model, validate, BackendDescriptor};
 use crate::config::AgentConfig;
+use crate::model_system::EffortLevel;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
 use crate::session_paths::PathStore;
@@ -48,6 +49,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub backend: BackendDescriptor,
     pub model: String,
+    pub active_effort: Option<EffortLevel>,
     pub messages: Vec<ChatMessage>,
     pub session_dir: String,
     pub session_path: PathBuf,

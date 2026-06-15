@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.1-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -610,10 +610,12 @@ review model, and one selector model that chooses the route for a task.
 `/route select` sends the task plus the configured stack to
 `modelSystem.selector`, expects a JSON decision, prints the selected
 orchestrator/coder/reviewer/security path, and switches the live session to the
-chosen coding model unless `--dry-run` is passed. Effort and thinking-depth
-labels are stored and shown as route metadata so the stack can express which
-model should think hardest; provider-specific request-body controls can be
-added per backend without changing the config shape.
+chosen coding model unless `--dry-run` is passed. The selector can also return
+`coderEffort`, `reviewEffort`, and `securityEffort` (`none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`). The chosen coder effort becomes the
+active session effort, appears in `/session` and the turn footer, and is sent to
+OpenRouter as `reasoning.effort`; local backends ignore unsupported request
+fields while still showing the selected effort.
 
 ---
 
@@ -713,8 +715,16 @@ root. Common shape:
     },
     "coders": {
       "low": { "backend": "ollama", "model": "qwen2.5-coder:7b" },
-      "medium": { "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" },
-      "high": { "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }
+      "medium": {
+        "backend": "openrouter",
+        "model": "qwen/qwen-2.5-coder-32b-instruct",
+        "effort": "medium"
+      },
+      "high": {
+        "backend": "openrouter",
+        "model": "anthropic/claude-sonnet-4.5",
+        "effort": "high"
+      }
     },
     "reviewers": {
       "play": { "backend": "ollama", "model": "qwen2.5-coder:7b" },

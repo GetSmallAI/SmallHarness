@@ -350,6 +350,7 @@ pub async fn run_agent_eval(
         &http,
         backend_desc,
         model,
+        None,
         messages,
         tools,
         eval_config.max_steps,

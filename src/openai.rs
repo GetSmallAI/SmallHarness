@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::backends::{BackendDescriptor, BackendName};
 use crate::cancel::CancellationToken;
+use crate::model_system::EffortLevel;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -133,6 +134,8 @@ pub struct ChatRequest<'a> {
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip)]
+    pub effort: Option<EffortLevel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -239,7 +242,7 @@ pub async fn chat_oneshot(
         "{}/chat/completions",
         backend.base_url.trim_end_matches('/')
     );
-    let body = serde_json::to_value(req)?;
+    let body = request_body(backend, req)?;
     let resp = client
         .post(url)
         .bearer_auth(&backend.api_key)
@@ -383,6 +386,9 @@ where
 
 fn request_body(backend: &BackendDescriptor, req: &ChatRequest<'_>) -> Result<Value> {
     let mut body = serde_json::to_value(req)?;
+    if let Some(effort) = req.effort {
+        apply_effort_to_request(backend, &mut body, effort)?;
+    }
     if matches!(backend.name, BackendName::Openrouter) && backend.openrouter.fusion.enabled {
         let plugin = fusion_plugin_value(&backend.openrouter.fusion)?;
         body.as_object_mut()
@@ -390,6 +396,31 @@ fn request_body(backend: &BackendDescriptor, req: &ChatRequest<'_>) -> Result<Va
             .insert("plugins".into(), Value::Array(vec![plugin]));
     }
     Ok(body)
+}
+
+fn apply_effort_to_request(
+    backend: &BackendDescriptor,
+    body: &mut Value,
+    effort: EffortLevel,
+) -> Result<()> {
+    let Some(obj) = body.as_object_mut() else {
+        return Err(anyhow!("chat request did not serialize to an object"));
+    };
+    match backend.name {
+        BackendName::Openrouter => {
+            obj.insert(
+                "reasoning".into(),
+                serde_json::json!({ "effort": effort.openrouter_reasoning_effort() }),
+            );
+        }
+        BackendName::OpenAi => {
+            if let Some(value) = effort.openai_reasoning_effort() {
+                obj.insert("reasoning_effort".into(), Value::String(value.into()));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn fusion_plugin_value(config: &crate::backends::OpenRouterFusionConfig) -> Result<Value> {
@@ -683,6 +714,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            effort: None,
         };
 
         let body = request_body(&backend, &req).unwrap();
@@ -691,6 +723,61 @@ mod tests {
         assert_eq!(plugin["analysis_models"][0], "~google/gemini-flash-latest");
         assert_eq!(plugin["model"], "~anthropic/claude-opus-latest");
         assert_eq!(plugin["max_tool_calls"], 4);
+    }
+
+    #[test]
+    fn openrouter_effort_is_injected_as_reasoning() {
+        let backend = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let messages = vec![ChatMessage::User {
+            content: "plan a refactor".into(),
+        }];
+        let req = ChatRequest {
+            model: "openrouter/fusion",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+            effort: Some(EffortLevel::Max),
+        };
+
+        let body = request_body(&backend, &req).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert!(body.get("effort").is_none());
+    }
+
+    #[test]
+    fn local_backends_ignore_effort_request_field() {
+        let backend = BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: "http://localhost:11434/v1".into(),
+            api_key: "test".into(),
+            is_local: true,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let messages = vec![ChatMessage::User {
+            content: "small edit".into(),
+        }];
+        let req = ChatRequest {
+            model: "qwen2.5-coder:7b",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+            effort: Some(EffortLevel::High),
+        };
+
+        let body = request_body(&backend, &req).unwrap();
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("effort").is_none());
     }
 
     #[test]
@@ -717,6 +804,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            effort: None,
         };
 
         let body = request_body(&backend, &req).unwrap();
@@ -787,6 +875,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            effort: None,
         };
         let mut name = String::new();
         let mut args = String::new();

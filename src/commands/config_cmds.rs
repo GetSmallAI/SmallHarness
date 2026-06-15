@@ -17,6 +17,12 @@ pub(super) fn cmd_config(state: &AppState) {
         "  {DIM}model{RESET}            {CYAN}{}{RESET}",
         state.model
     );
+    if let Some(effort) = state.active_effort {
+        println!(
+            "  {DIM}effort{RESET}           {CYAN}{}{RESET}",
+            effort.as_str()
+        );
+    }
     println!(
         "  {DIM}workspaceRoot{RESET}    {}",
         state.config.workspace_root
@@ -540,6 +546,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     }
     state.config.backend = chosen;
     state.config.model_override = None;
+    state.active_effort = None;
     state.rebuild_client()?;
     state.resolve_model();
     println!(
@@ -566,6 +573,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
             args.to_string()
         };
         state.config.model_override = Some(model_override);
+        state.active_effort = None;
         state.resolve_model();
         println!(
             "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
@@ -630,6 +638,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     if let Some(idx) = pick.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
         if let Some(m) = shown.get(idx) {
             state.config.model_override = Some(m.clone());
+            state.active_effort = None;
             state.resolve_model();
             println!(
                 "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
@@ -738,6 +747,7 @@ pub(super) async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: None,
+        effort: None,
     };
     let mut out = std::io::stdout();
     let result = stream_chat(&state.http, &cloud_backend, &req, None, |chunk| {
@@ -915,6 +925,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
             }
             state.config.backend = BackendName::Openrouter;
             state.config.model_override = Some(FUSION_MODEL.into());
+            state.active_effort = None;
             state.config.openrouter.fusion.enabled = false;
             state.rebuild_client()?;
             state.resolve_model();
@@ -943,6 +954,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
 
             state.config.backend = BackendName::Openrouter;
             state.config.model_override = Some(model);
+            state.active_effort = None;
             {
                 let fusion = &mut state.config.openrouter.fusion;
                 fusion.enabled = true;
@@ -974,6 +986,7 @@ pub(super) fn cmd_fusion(args: &str, state: &mut AppState) -> Result<()> {
             {
                 state.config.model_override = None;
             }
+            state.active_effort = None;
             state.backend.openrouter = state.config.openrouter.clone();
             state.resolve_model();
             state.warmed_fingerprint = None;
@@ -1008,6 +1021,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

@@ -531,6 +531,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            effort: None,
         };
         let body = build_request_body(&req);
         assert_eq!(body["instructions"], "sys");

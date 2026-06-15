@@ -16,6 +16,7 @@ use crate::context_guard::{
     CompactSessionContext,
 };
 use crate::loader::Loader;
+use crate::model_system::EffortLevel;
 use crate::openai::{ChatMessage, ImageUrl, UserContent, UserContentPart};
 use crate::project_memory::{refresh_project_memory_after_write, render_system_prompt_with_memory};
 use crate::session::save_message;
@@ -148,9 +149,16 @@ fn format_timing_suffix(metrics: &TurnMetrics) -> String {
     metrics.format_footer_suffix()
 }
 
+fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
+    effort
+        .map(|effort| format!(" · effort {}", effort.as_str()))
+        .unwrap_or_default()
+}
+
 fn prompt_fingerprint(
     backend: &BackendDescriptor,
     model: &str,
+    effort: Option<EffortLevel>,
     system_prompt: &str,
     tool_names: &[String],
 ) -> u64 {
@@ -158,6 +166,7 @@ fn prompt_fingerprint(
     backend.name.hash(&mut hasher);
     backend.base_url.hash(&mut hasher);
     model.hash(&mut hasher);
+    effort.hash(&mut hasher);
     system_prompt.hash(&mut hasher);
     tool_names.hash(&mut hasher);
     hasher.finish()
@@ -301,6 +310,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let fingerprint = prompt_fingerprint(
         &state.backend,
         &state.model,
+        state.active_effort,
         &system_prompt,
         &active_tool_names,
     );
@@ -315,6 +325,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &state.http,
             &state.backend,
             &state.model,
+            state.active_effort,
             &system_prompt,
             &tool_defs,
         )
@@ -338,6 +349,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let initial = state.messages.clone();
     let max_steps = state.config.max_steps;
     let model = state.model.clone();
+    let active_effort = state.active_effort;
     let backend_desc_clone = state.backend.clone();
     let http_clone = state.http.clone();
     let trace = state.trace.clone();
@@ -398,6 +410,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &http_clone,
             &backend_desc_clone,
             &model,
+            active_effort,
             initial,
             tools,
             max_steps,
@@ -569,7 +582,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
 
     println!(
-        "{GRAY}  {} in · {} out{}{}{}{RESET}",
+        "{GRAY}  {} in · {} out{}{}{}{}{RESET}",
         format_tokens(res.input_tokens),
         format_tokens(res.output_tokens),
         format_cost_suffix(
@@ -578,6 +591,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             state.session_usd,
             state.session_cost_has_unknown
         ),
+        format_effort_suffix(state.active_effort),
         format_timing_suffix(&metrics),
         format_path_suffix(state),
     );
@@ -629,6 +643,15 @@ mod cost_tests {
         assert!(s.contains("$0.00 this turn"));
         assert!(s.contains("$0.42 session"));
         assert!(!s.contains("≥"));
+    }
+
+    #[test]
+    fn effort_suffix_renders_when_set() {
+        assert_eq!(format_effort_suffix(None), "");
+        assert_eq!(
+            format_effort_suffix(Some(EffortLevel::High)),
+            " · effort high"
+        );
     }
 
     #[test]

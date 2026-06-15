@@ -106,6 +106,7 @@ impl SubagentTool {
             &self.http,
             &self.backend,
             &self.model,
+            None,
             initial,
             tools,
             SUBAGENT_MAX_STEPS,

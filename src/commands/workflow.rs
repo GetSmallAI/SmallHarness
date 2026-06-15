@@ -43,6 +43,7 @@ async fn eval_once(
             include_usage: false,
         }),
         max_tokens: None,
+        effort: None,
     };
     let mut out = String::new();
     stream_chat(&state.http, backend_desc, &req, None, |chunk| {
@@ -823,6 +824,7 @@ async fn run_prompt_content(content: &str, state: &mut AppState) -> Result<()> {
             include_usage: true,
         }),
         max_tokens: None,
+        effort: state.active_effort,
     };
 
     println!(

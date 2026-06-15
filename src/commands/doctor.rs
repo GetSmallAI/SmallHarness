@@ -169,6 +169,7 @@ async fn probe_streaming(
             include_usage: true,
         }),
         max_tokens: Some(8),
+        effort: None,
     };
     let mut chunks = 0usize;
     let mut content = String::new();
@@ -253,6 +254,7 @@ async fn probe_tool_calls(
             include_usage: false,
         }),
         max_tokens: Some(128),
+        effort: None,
     };
     let mut content = String::new();
     let mut tool_name = String::new();
@@ -554,9 +556,16 @@ async fn cmd_bench(args: &str, state: &AppState) -> Result<()> {
         content: "Reply with one short sentence for a latency benchmark.".into(),
     }];
     println!("  {DIM}warming {model}…{RESET}");
-    let warm_ms = warmup(&state.http, &state.backend, model, "benchmark", &[])
-        .await
-        .ok();
+    let warm_ms = warmup(
+        &state.http,
+        &state.backend,
+        model,
+        state.active_effort,
+        "benchmark",
+        &[],
+    )
+    .await
+    .ok();
     let req = ChatRequest {
         model,
         messages: &messages,
@@ -566,6 +575,7 @@ async fn cmd_bench(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: None,
+        effort: state.active_effort,
     };
     let start = Instant::now();
     let mut first = None;
@@ -796,6 +806,7 @@ async fn cmd_autotune(args: &str, state: &mut AppState) -> Result<()> {
     }
     state.config.backend = backend_name;
     state.config.model_override = Some(recommendation.model.clone());
+    state.active_effort = None;
     state.config.tool_selection = tool_selection;
     state.rebuild_client()?;
     state.resolve_model();
@@ -1052,6 +1063,7 @@ async fn cmd_recommend(args: &str, state: &mut AppState) -> Result<()> {
         );
     }
     apply_recommendation_to_config(&mut state.config, best);
+    state.active_effort = None;
     state.rebuild_client()?;
     state.resolve_model();
     println!(

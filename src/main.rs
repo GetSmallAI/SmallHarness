@@ -318,6 +318,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
         &http,
         &backend_desc,
         &model,
+        None,
         messages,
         tools,
         config.max_steps,
@@ -365,6 +366,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
 fn prompt_fingerprint(
     backend: &crate::backends::BackendDescriptor,
     model: &str,
+    effort: Option<crate::model_system::EffortLevel>,
     system_prompt: &str,
     tool_names: &[String],
 ) -> u64 {
@@ -373,6 +375,7 @@ fn prompt_fingerprint(
     backend.name.hash(&mut hasher);
     backend.base_url.hash(&mut hasher);
     model.hash(&mut hasher);
+    effort.hash(&mut hasher);
     system_prompt.hash(&mut hasher);
     tool_names.hash(&mut hasher);
     hasher.finish()
@@ -505,6 +508,7 @@ async fn main() -> anyhow::Result<()> {
             &http,
             &backend_desc,
             &model,
+            None,
             &warmup_prompt,
             &warmup_tool_defs,
         )
@@ -514,6 +518,7 @@ async fn main() -> anyhow::Result<()> {
                 warmed_fingerprint = Some(prompt_fingerprint(
                     &backend_desc,
                     &model,
+                    None,
                     &warmup_prompt,
                     &warmup_tool_names,
                 ));
@@ -556,6 +561,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         backend: backend_desc,
         model,
+        active_effort: None,
         messages: Vec::new(),
         session_dir: session_dir.clone(),
         session_path: session_path.clone(),

@@ -286,6 +286,9 @@ pub(super) fn cmd_session(args: &str, state: &mut AppState) -> Result<()> {
         state.config.backend.as_str()
     );
     println!("  {DIM}model{RESET}     {CYAN}{}{RESET}", state.model);
+    if let Some(effort) = state.active_effort {
+        println!("  {DIM}effort{RESET}    {CYAN}{}{RESET}", effort.as_str());
+    }
     println!(
         "  {DIM}approval{RESET}  {CYAN}{}{RESET}",
         state.config.approval_policy.as_str()
@@ -610,6 +613,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

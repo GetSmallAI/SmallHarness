@@ -492,6 +492,7 @@ pub(crate) async fn run_done_check(
             include_usage: false,
         }),
         max_tokens: Some(400),
+        effort: None,
     };
     let mut raw = String::new();
     let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
@@ -901,6 +902,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: config.backend_descriptor(),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path: session_path.clone(),

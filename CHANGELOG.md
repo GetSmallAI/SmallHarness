@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-15
+
+### Added
+
+- **Active effort routing.** `/route select` can now accept selector-chosen
+  `coderEffort`, `reviewEffort`, and `securityEffort` values. The selected
+  coder effort is applied to the live session, shown in `/session` and the turn
+  footer, and sent to OpenRouter as `reasoning.effort` for models that support
+  adjustable reasoning depth. Local backends keep the effort visible but ignore
+  unsupported request fields.
+
 ## [1.0.0] - 2026-06-14
 
 ### Added

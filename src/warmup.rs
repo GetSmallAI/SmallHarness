@@ -2,12 +2,14 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::backends::BackendDescriptor;
+use crate::model_system::EffortLevel;
 use crate::openai::{chat_oneshot, ChatMessage, ChatRequest, ToolDef};
 
 pub async fn warmup(
     http: &reqwest::Client,
     backend: &BackendDescriptor,
     model: &str,
+    effort: Option<EffortLevel>,
     system_prompt: &str,
     tools: &[ToolDef],
 ) -> Result<u128> {
@@ -27,6 +29,7 @@ pub async fn warmup(
         stream: false,
         stream_options: None,
         max_tokens: Some(1),
+        effort,
     };
     chat_oneshot(http, backend, &req).await?;
     Ok(start.elapsed().as_millis())

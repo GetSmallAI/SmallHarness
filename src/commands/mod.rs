@@ -358,6 +358,7 @@ async fn cmd_setup(state: &mut AppState) -> Result<()> {
     state.config = config;
     state.backend = backend_desc;
     state.model = model;
+    state.active_effort = None;
     state.session_dir = state.config.session_dir.clone();
     if state.session_dir != old_session_dir {
         fs::create_dir_all(&state.session_dir)?;
@@ -511,6 +512,7 @@ async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: Some(900),
+        effort: None,
     };
     let mut draft = String::new();
     let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
@@ -666,6 +668,7 @@ async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: Some(1500),
+        effort: state.active_effort,
     };
     let mut draft = String::new();
     let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
@@ -909,6 +912,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

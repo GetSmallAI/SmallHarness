@@ -89,6 +89,7 @@ pub(crate) async fn perform_reset(state: &mut AppState, dry_run: bool) -> Result
             include_usage: false,
         }),
         max_tokens: Some(1200),
+        effort: None,
     };
     let mut draft = String::new();
     let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {
@@ -369,6 +370,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir: config.session_dir.clone(),
             session_path,

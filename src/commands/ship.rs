@@ -1164,6 +1164,7 @@ async fn draft_ship_commit_message(
             include_usage: false,
         }),
         max_tokens: Some(500),
+        effort: None,
     };
     let mut draft = String::new();
     let result = stream_chat(&state.http, &state.backend, &req, None, |chunk| {

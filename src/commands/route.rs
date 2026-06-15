@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::model_system::{
-    ModelRef, ModelSystemConfig, ModelTierSet, ReviewModelSet, ReviewTier, RouteDecision,
-    TaskComplexity,
+    EffortLevel, ModelRef, ModelSystemConfig, ModelTierSet, ReviewModelSet, ReviewTier,
+    RouteDecision, TaskComplexity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,8 +32,9 @@ enum RouteInvocation {
 struct ResolvedRoute<'a> {
     orchestrator: Option<&'a ModelRef>,
     coder: &'a ModelRef,
-    reviewer: Option<(ReviewTier, &'a ModelRef)>,
-    security: Option<&'a ModelRef>,
+    coder_effort: Option<EffortLevel>,
+    reviewer: Option<(ReviewTier, &'a ModelRef, Option<EffortLevel>)>,
+    security: Option<(&'a ModelRef, Option<EffortLevel>)>,
 }
 
 pub(super) async fn cmd_route(args: &str, state: &mut AppState) -> Result<()> {
@@ -213,8 +214,8 @@ fn print_route_template() {
     }},
     "coders": {{
       "low": {{ "backend": "ollama", "model": "qwen2.5-coder:7b" }},
-      "medium": {{ "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct" }},
-      "high": {{ "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5" }}
+      "medium": {{ "backend": "openrouter", "model": "qwen/qwen-2.5-coder-32b-instruct", "effort": "medium" }},
+      "high": {{ "backend": "openrouter", "model": "anthropic/claude-sonnet-4.5", "effort": "high" }}
     }},
     "reviewers": {{
       "play": {{ "backend": "ollama", "model": "qwen2.5-coder:7b" }},
@@ -247,10 +248,10 @@ fn apply_route_target(state: &mut AppState, target: RouteApplyTarget) -> Result<
         println!("  {RED}✗{RESET} {DIM}{label} is not configured in modelSystem.{RESET}");
         return Ok(());
     };
-    match apply_model_ref(state, &model) {
+    match apply_model_ref(state, &model, None) {
         Ok(()) => println!(
             "  {GREEN}✓{RESET} {DIM}route applied:{RESET} {label} {DIM}→{RESET} {CYAN}{}{RESET}",
-            model.detail()
+            model.detail_with_effort(None)
         ),
         Err(e) => println!("  {RED}✗{RESET} {DIM}could not apply {label}: {e}{RESET}"),
     }
@@ -303,28 +304,35 @@ async fn select_route(state: &mut AppState, args: RouteSelectArgs) -> Result<()>
     if let Some(orchestrator) = route.orchestrator {
         println!("  {DIM}orchestrator{RESET}      {}", orchestrator.detail());
     }
-    println!("  {DIM}coder{RESET}             {}", route.coder.detail());
-    if let Some((tier, reviewer)) = route.reviewer {
+    println!(
+        "  {DIM}coder{RESET}             {}",
+        route.coder.detail_with_effort(route.coder_effort)
+    );
+    if let Some((tier, reviewer, effort)) = route.reviewer {
         println!(
             "  {DIM}review{RESET}            {} · {}",
             tier.as_str(),
-            reviewer.detail()
+            reviewer.detail_with_effort(effort)
         );
     } else {
         println!("  {DIM}review{RESET}            skipped");
     }
-    if let Some(security) = route.security {
-        println!("  {DIM}security{RESET}          {}", security.detail());
+    if let Some((security, effort)) = route.security {
+        println!(
+            "  {DIM}security{RESET}          {}",
+            security.detail_with_effort(effort)
+        );
     } else {
         println!("  {DIM}security{RESET}          skipped");
     }
 
     if args.apply {
         let coder = route.coder.clone();
-        match apply_model_ref(state, &coder) {
+        match apply_model_ref(state, &coder, route.coder_effort) {
             Ok(()) => println!(
-                "  {GREEN}✓{RESET} {DIM}active coding model →{RESET} {CYAN}{}{RESET}",
-                state.model
+                "  {GREEN}✓{RESET} {DIM}active coding model →{RESET} {CYAN}{}{RESET}{}",
+                state.model,
+                format_active_effort_suffix(state.active_effort)
             ),
             Err(e) => {
                 println!("  {RED}✗{RESET} {DIM}selected coder but could not apply it: {e}{RESET}")
@@ -350,17 +358,24 @@ fn resolve_route<'a>(
         )
     })?;
     let orchestrator = stack.orchestrator(decision.complexity);
-    let reviewer = decision
-        .review
-        .and_then(|tier| stack.reviewer(tier).map(|model| (tier, model)));
+    let coder_effort = decision.coder_effort.or(coder.effort);
+    let reviewer = decision.review.and_then(|tier| {
+        stack
+            .reviewer(tier)
+            .map(|model| (tier, model, decision.review_effort.or(model.effort)))
+    });
     let security = if decision.security_review {
-        stack.security_reviewer.as_ref()
+        stack
+            .security_reviewer
+            .as_ref()
+            .map(|model| (model, decision.security_effort.or(model.effort)))
     } else {
         None
     };
     Ok(ResolvedRoute {
         orchestrator,
         coder,
+        coder_effort,
         reviewer,
         security,
     })
@@ -388,6 +403,7 @@ async fn run_selector(state: &AppState, selector: &ModelRef, task: &str) -> Resu
             include_usage: true,
         }),
         max_tokens: Some(500),
+        effort: selector.effort,
     };
     let mut text = String::new();
     let mut reported_cost = None;
@@ -414,7 +430,7 @@ async fn run_selector(state: &AppState, selector: &ModelRef, task: &str) -> Resu
 }
 
 fn selector_system_prompt() -> String {
-    "You route coding tasks across a Small Harness model system. Return ONLY one JSON object with this exact shape: {\"complexity\":\"low|medium|high\",\"review\":\"play|production|null\",\"securityReview\":true|false,\"reason\":\"short reason\"}. Choose low for simple edits and small fixes, medium for multi-file feature work, high for ambiguous architecture, long-horizon, reliability-sensitive, or high-risk work. Choose production review for release-quality or production-grade code, play review for prototypes/MVPs/demos, and securityReview=true for auth, secrets, crypto, permissions, dependency, infra, data-safety, or supply-chain risk. Do not include markdown.".into()
+    "You route coding tasks across a Small Harness model system. Return ONLY one JSON object with this exact shape: {\"complexity\":\"low|medium|high\",\"coderEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"review\":\"play|production|null\",\"reviewEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"securityReview\":true|false,\"securityEffort\":\"none|minimal|low|medium|high|xhigh|max|null\",\"reason\":\"short reason\"}. Choose low complexity for simple edits and small fixes, medium for multi-file feature work, high for ambiguous architecture, long-horizon, reliability-sensitive, or high-risk work. Choose higher coder effort for uncertain implementation, broad refactors, concurrency, migrations, or failing tests. Choose production review for release-quality or production-grade code, play review for prototypes/MVPs/demos, and securityReview=true for auth, secrets, crypto, permissions, dependency, infra, data-safety, or supply-chain risk. Use max or xhigh effort only when deeper reasoning is worth extra latency/cost. Do not include markdown.".into()
 }
 
 fn render_selector_prompt(stack: &ModelSystemConfig, task: &str) -> String {
@@ -503,6 +519,8 @@ fn route_decision_from_value(value: &serde_json::Value) -> Result<RouteDecision>
                 }
             }
         };
+    let coder_effort = parse_effort_field(obj, &["coderEffort", "coder_effort"])?;
+    let review_effort = parse_effort_field(obj, &["reviewEffort", "review_effort"])?;
     let security_review = obj
         .get("securityReview")
         .or_else(|| obj.get("security_review"))
@@ -517,12 +535,43 @@ fn route_decision_from_value(value: &serde_json::Value) -> Result<RouteDecision>
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let security_effort = parse_effort_field(obj, &["securityEffort", "security_effort"])?;
     Ok(RouteDecision {
         complexity,
+        coder_effort,
         review,
+        review_effort,
         security_review,
+        security_effort,
         reason,
     })
+}
+
+fn parse_effort_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Result<Option<EffortLevel>> {
+    for key in keys {
+        let Some(value) = obj.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let Some(text) = value.as_str() else {
+            return Err(anyhow!("{key} must be an effort string or null"));
+        };
+        let normalized = text.trim().to_ascii_lowercase();
+        if normalized.is_empty()
+            || matches!(normalized.as_str(), "null" | "none" | "skip" | "skipped")
+        {
+            return Ok(None);
+        }
+        return EffortLevel::parse(&normalized)
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be none|minimal|low|medium|high|xhigh|max"));
+    }
+    Ok(None)
 }
 
 fn parse_boolish(text: &str) -> Option<bool> {
@@ -565,14 +614,26 @@ fn extract_first_json_object(text: &str) -> Option<&str> {
     None
 }
 
-fn apply_model_ref(state: &mut AppState, model: &ModelRef) -> Result<()> {
+fn format_active_effort_suffix(effort: Option<EffortLevel>) -> String {
+    effort
+        .map(|effort| format!(" {DIM}· effort →{RESET} {CYAN}{}{RESET}", effort.as_str()))
+        .unwrap_or_default()
+}
+
+fn apply_model_ref(
+    state: &mut AppState,
+    model: &ModelRef,
+    effort_override: Option<EffortLevel>,
+) -> Result<()> {
     let previous_backend = state.config.backend;
     let previous_override = state.config.model_override.clone();
     let previous_backend_desc = state.backend.clone();
     let previous_model = state.model.clone();
+    let previous_effort = state.active_effort;
 
     state.config.backend = model.backend;
     state.config.model_override = Some(model.model.clone());
+    state.active_effort = effort_override.or(model.effort);
     match state.rebuild_client() {
         Ok(()) => {
             state.resolve_model();
@@ -584,6 +645,7 @@ fn apply_model_ref(state: &mut AppState, model: &ModelRef) -> Result<()> {
             state.config.model_override = previous_override;
             state.backend = previous_backend_desc;
             state.model = previous_model;
+            state.active_effort = previous_effort;
             Err(e)
         }
     }
@@ -630,17 +692,20 @@ mod tests {
         assert_eq!(decision.complexity, TaskComplexity::High);
         assert_eq!(decision.review, Some(ReviewTier::Production));
         assert!(decision.security_review);
+        assert_eq!(decision.coder_effort, None);
     }
 
     #[test]
     fn parses_route_decision_tolerates_selector_variants() {
         let decision = parse_route_decision(
-            r#"{"complexity":"High","review":"none","securityReview":"yes","reason":"  risky  "}"#,
+            r#"{"complexity":"High","coderEffort":"MAX","review":"none","securityReview":"yes","securityEffort":"x-high","reason":"  risky  "}"#,
         )
         .unwrap();
         assert_eq!(decision.complexity, TaskComplexity::High);
+        assert_eq!(decision.coder_effort, Some(EffortLevel::Max));
         assert_eq!(decision.review, None);
         assert!(decision.security_review);
+        assert_eq!(decision.security_effort, Some(EffortLevel::XHigh));
         assert_eq!(decision.reason.as_deref(), Some("risky"));
     }
 
@@ -666,11 +731,15 @@ mod tests {
         let decision = RouteDecision {
             complexity: TaskComplexity::High,
             review: Some(ReviewTier::Production),
+            coder_effort: Some(EffortLevel::High),
+            review_effort: Some(EffortLevel::Max),
             security_review: true,
+            security_effort: Some(EffortLevel::Max),
             reason: None,
         };
         let route = resolve_route(&stack, &decision).unwrap();
         assert_eq!(route.coder.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(route.coder_effort, Some(EffortLevel::High));
         assert!(route.orchestrator.is_some());
         assert!(route.reviewer.is_some());
         assert!(route.security.is_some());

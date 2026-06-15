@@ -757,6 +757,7 @@ mod tests {
             http: reqwest::Client::new(),
             backend: backend(config.backend),
             model: "test-model".into(),
+            active_effort: None,
             messages: Vec::new(),
             session_dir,
             session_path,

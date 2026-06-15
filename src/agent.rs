@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crate::backends::BackendDescriptor;
 use crate::cancel::CancellationToken;
 use crate::context_guard::{maybe_compact_messages, ContextGuardParams};
+use crate::model_system::EffortLevel;
 use crate::openai::{
     stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolCall, ToolDef, ToolDefFunction,
     ToolFunction,
@@ -189,6 +190,7 @@ pub async fn run_agent<F>(
     http: &reqwest::Client,
     backend: &BackendDescriptor,
     model: &str,
+    effort: Option<EffortLevel>,
     initial_messages: Vec<ChatMessage>,
     tools: Vec<Arc<dyn Tool>>,
     max_steps: usize,
@@ -253,6 +255,7 @@ where
                 include_usage: true,
             }),
             max_tokens: None,
+            effort,
         };
 
         let mut assistant_text = String::new();

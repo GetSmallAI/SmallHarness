@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::backends::BackendName;
 
@@ -53,13 +53,89 @@ impl ReviewTier {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffortLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl EffortLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "disabled" => Some(Self::None),
+            "minimal" | "min" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "x-high" | "extra-high" | "extra_high" | "extra high" => Some(Self::XHigh),
+            "max" | "maximum" | "highest" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    pub fn openrouter_reasoning_effort(&self) -> &'static str {
+        match self {
+            Self::Max => "xhigh",
+            other => other.as_str(),
+        }
+    }
+
+    pub fn openai_reasoning_effort(&self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High | Self::XHigh | Self::Max => Some("high"),
+        }
+    }
+}
+
+impl Serialize for EffortLevel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EffortLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).ok_or_else(|| {
+            serde::de::Error::custom("expected effort level none|minimal|low|medium|high|xhigh|max")
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRef {
     pub backend: BackendName,
     pub model: String,
     #[serde(default)]
-    pub effort: Option<String>,
+    pub effort: Option<EffortLevel>,
     #[serde(rename = "thinkingDepth", default)]
     pub thinking_depth: Option<String>,
     #[serde(default)]
@@ -89,9 +165,13 @@ impl ModelRef {
     }
 
     pub fn detail(&self) -> String {
+        self.detail_with_effort(None)
+    }
+
+    pub fn detail_with_effort(&self, effort: Option<EffortLevel>) -> String {
         let mut bits = vec![self.label()];
-        if let Some(effort) = self.effort.as_deref().filter(|s| !s.is_empty()) {
-            bits.push(format!("effort={effort}"));
+        if let Some(effort) = effort.or(self.effort) {
+            bits.push(format!("effort={}", effort.as_str()));
         }
         if let Some(depth) = self.thinking_depth.as_deref().filter(|s| !s.is_empty()) {
             bits.push(format!("thinking={depth}"));
@@ -190,10 +270,16 @@ impl ModelSystemConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RouteDecision {
     pub complexity: TaskComplexity,
+    #[serde(rename = "coderEffort", default)]
+    pub coder_effort: Option<EffortLevel>,
     #[serde(default)]
     pub review: Option<ReviewTier>,
+    #[serde(rename = "reviewEffort", default)]
+    pub review_effort: Option<EffortLevel>,
     #[serde(default)]
     pub security_review: bool,
+    #[serde(rename = "securityEffort", default)]
+    pub security_effort: Option<EffortLevel>,
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -209,6 +295,15 @@ mod tests {
         assert_eq!(m.model, "qwen2.5-coder:7b");
         assert!(ModelRef::parse_spec("openrouter:anthropic/claude-sonnet-4.5").is_some());
         assert!(ModelRef::parse_spec("bad:model").is_none());
+    }
+
+    #[test]
+    fn effort_level_parses_common_aliases() {
+        assert_eq!(EffortLevel::parse("low"), Some(EffortLevel::Low));
+        assert_eq!(EffortLevel::parse("extra-high"), Some(EffortLevel::XHigh));
+        assert_eq!(EffortLevel::parse("maximum"), Some(EffortLevel::Max));
+        assert_eq!(EffortLevel::Max.openrouter_reasoning_effort(), "xhigh");
+        assert_eq!(EffortLevel::Max.openai_reasoning_effort(), Some("high"));
     }
 
     #[test]

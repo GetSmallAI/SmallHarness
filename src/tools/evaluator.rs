@@ -165,6 +165,7 @@ pub async fn run_evaluation(
         http,
         backend,
         model,
+        None,
         initial,
         tools,
         EVALUATOR_MAX_STEPS,
