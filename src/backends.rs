@@ -140,7 +140,12 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         return m.to_string();
     }
     match b.name {
-        BackendName::Ollama => "qwen2.5-coder:7b",
+        // qwen2.5:7b (base) is used rather than qwen2.5-coder:7b because the
+        // coder variant does not use Ollama's structured tool_calls API —
+        // it emits tool invocations as raw JSON text in the content field,
+        // which SmallHarness cannot execute. The base model uses the same
+        // <tool_call> template that Ollama translates to structured tool_calls.
+        BackendName::Ollama => "qwen2.5:7b",
         BackendName::LmStudio => "qwen2.5-coder-7b-instruct",
         BackendName::Mlx => "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
         BackendName::LlamaCpp => "gpt-3.5-turbo",
@@ -230,6 +235,20 @@ mod tests {
     fn defaults_openai_to_gpt_4o_mini() {
         let model = default_model(&descriptor(BackendName::OpenAi), None);
         assert_eq!(model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn defaults_ollama_to_base_qwen_not_coder_variant() {
+        // qwen2.5:7b (base) must be the default, not qwen2.5-coder:7b.
+        // The coder variant emits tool calls as raw JSON text rather than
+        // via Ollama's structured tool_calls API, so SmallHarness cannot
+        // execute them in interactive or one-shot mode.
+        let model = default_model(&descriptor(BackendName::Ollama), None);
+        assert_eq!(model, "qwen2.5:7b");
+        assert_ne!(
+            model, "qwen2.5-coder:7b",
+            "coder variant does not support structured tool_calls"
+        );
     }
 
     #[test]
