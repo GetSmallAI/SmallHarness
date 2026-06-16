@@ -212,6 +212,8 @@ async fn pre_tool_use_hook_block_returns_tool_error() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =
@@ -314,6 +316,8 @@ async fn pre_tool_use_hook_stop_ends_loop_without_tool_execution() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =
@@ -428,6 +432,8 @@ async fn pre_tool_use_hook_stop_suppresses_pending_tools_in_same_batch() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =
@@ -550,6 +556,8 @@ async fn pre_tool_use_hook_rewrite_updates_executed_and_stored_tool_input() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =
@@ -690,6 +698,8 @@ async fn task_uses_subagent_stop_without_generic_post_tool_use() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     hook_config
@@ -703,6 +713,8 @@ async fn task_uses_subagent_stop_without_generic_post_tool_use() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =
@@ -825,6 +837,8 @@ async fn plan_updated_hook_uses_raw_update_plan_output_before_compaction() {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
     let registry =

@@ -37,6 +37,7 @@ mod tests {
     use super::state::hook_state_file_path_from_env;
     use super::*;
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
 
     #[test]
     fn parses_hook_config_with_event_groups() {
@@ -80,6 +81,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
 
@@ -122,6 +125,41 @@ mod tests {
     }
 
     #[test]
+    fn discovery_treats_hook_env_changes_as_modified() {
+        let mut config = HookConfig::default();
+        config.pre_tool_use.push(HookGroupConfig {
+            matcher: Some("shell".into()),
+            hooks: vec![HookCommandConfig {
+                command: "echo pre".into(),
+                timeout_sec: default_hook_timeout_sec(),
+                command_windows: None,
+                status_message: None,
+                async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
+            }],
+        });
+        let source = HookSource::project("agent.config.json");
+        let first = discover_hooks(&config, source.clone(), &HookStateStore::default());
+        let mut states = HookStateStore::default();
+        states.user.insert(
+            first.entries[0].key.clone(),
+            HookState {
+                enabled: Some(true),
+                trusted_hash: Some(first.entries[0].current_hash.clone()),
+            },
+        );
+
+        config.pre_tool_use[0].hooks[0]
+            .env_vars
+            .push("FORWARDED".into());
+        let modified = discover_hooks(&config, source, &states);
+
+        assert_eq!(modified.entries[0].trust_status, HookTrustStatus::Modified);
+        assert!(modified.runnable.is_empty());
+    }
+
+    #[test]
     fn default_hook_timeout_matches_codex_default() {
         let config: HookConfig = serde_json::from_value(json!({
             "PreToolUse": [
@@ -138,6 +176,27 @@ mod tests {
             config.groups_for(HookEventName::PreToolUse)[0].hooks[0].timeout_sec,
             600
         );
+    }
+
+    #[test]
+    fn hook_config_rejects_invalid_env_var_names() {
+        let err = serde_json::from_value::<HookConfig>(json!({
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "echo pre",
+                            "envVars": ["BAD=NAME"]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("must not contain `=` or NUL"));
     }
 
     #[test]
@@ -178,6 +237,8 @@ mod tests {
                 command_windows: None,
                 status_message: Some("stopping".into()),
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
 
@@ -225,6 +286,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
 
@@ -435,6 +498,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -458,6 +523,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -465,6 +532,70 @@ mod tests {
 
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.effect.feedback.as_deref(), Some("missing"));
+    }
+
+    #[tokio::test]
+    async fn command_runner_forwards_requested_parent_env_vars_only() {
+        let _forwarded = EnvVarGuard::set("SMALL_HARNESS_TEST_FORWARD", "forwarded");
+        let _blocked = EnvVarGuard::set("SMALL_HARNESS_TEST_BLOCKED", "blocked");
+        let handler = HookCommandConfig {
+            command: r#"if [ "$SMALL_HARNESS_TEST_FORWARD" = "forwarded" ] && [ -z "$SMALL_HARNESS_TEST_BLOCKED" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            timeout_sec: default_hook_timeout_sec(),
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+            env: BTreeMap::new(),
+            env_vars: vec!["SMALL_HARNESS_TEST_FORWARD".into()],
+        };
+        let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
+
+        let result = run_command_hook(&handler, &payload).await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn command_runner_adds_literal_hook_env() {
+        let mut env = BTreeMap::new();
+        env.insert("SMALL_HARNESS_LITERAL".into(), "literal".into());
+        let handler = HookCommandConfig {
+            command: r#"if [ "$SMALL_HARNESS_LITERAL" = "literal" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            timeout_sec: default_hook_timeout_sec(),
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+            env,
+            env_vars: Vec::new(),
+        };
+        let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
+
+        let result = run_command_hook(&handler, &payload).await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn command_runner_reserved_hook_env_overrides_configured_env() {
+        let _parent = EnvVarGuard::set("SMALL_HARNESS_SESSION_ID", "parent");
+        let mut env = BTreeMap::new();
+        env.insert("SMALL_HARNESS_SESSION_ID".into(), "literal".into());
+        let handler = HookCommandConfig {
+            command: r#"if [ "$SMALL_HARNESS_SESSION_ID" = "s1" ]; then printf '%s' '{"feedback":"ok"}'; else printf '%s' '{"feedback":"bad"}'; fi"#.into(),
+            timeout_sec: default_hook_timeout_sec(),
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+            env,
+            env_vars: vec!["SMALL_HARNESS_SESSION_ID".into()],
+        };
+        let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
+
+        let result = run_command_hook(&handler, &payload).await;
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.effect.feedback.as_deref(), Some("ok"));
     }
 
     #[cfg(unix)]
@@ -476,6 +607,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::PostToolUse, "s1")
             .insert("tool_response", json!("x".repeat(200_000)))
@@ -502,6 +635,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -531,6 +666,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -560,6 +697,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::PreToolUse, "s1").into_value();
 
@@ -584,6 +723,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::PreToolUse, "s1").into_value();
 
@@ -623,6 +764,8 @@ mod tests {
             command_windows: None,
             status_message: None,
             async_handler: false,
+            env: Default::default(),
+            env_vars: Vec::new(),
         };
         let payload = HookPayload::new(HookEventName::SessionStart, "s1").into_value();
 
@@ -649,6 +792,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let discovery = discover_hooks(
@@ -687,6 +832,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         config.pre_compact.push(HookGroupConfig {
@@ -697,6 +844,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let registry = HookRegistry::from_discoveries(vec![discover_hooks(
@@ -776,6 +925,8 @@ mod tests {
                     command_windows: None,
                     status_message: None,
                     async_handler: false,
+                    env: Default::default(),
+                    env_vars: Vec::new(),
                 },
                 HookCommandConfig {
                     command: "echo block".into(),
@@ -783,6 +934,8 @@ mod tests {
                     command_windows: None,
                     status_message: None,
                     async_handler: false,
+                    env: Default::default(),
+                    env_vars: Vec::new(),
                 },
             ],
         });
@@ -954,6 +1107,8 @@ mod tests {
                     command_windows: None,
                     status_message: None,
                     async_handler: false,
+                    env: Default::default(),
+                    env_vars: Vec::new(),
                 }],
             },
         );
@@ -1001,6 +1156,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let registry = HookRegistry::from_discoveries(vec![discover_hooks(
@@ -1038,6 +1195,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         config.permission_request.push(HookGroupConfig {
@@ -1048,6 +1207,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let registry = HookRegistry::from_discoveries(vec![discover_hooks(
@@ -1127,6 +1288,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let registry = HookRegistry::from_discoveries(vec![discover_hooks(
@@ -1171,6 +1334,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let registry = HookRegistry::from_discoveries(vec![discover_hooks(
@@ -1200,6 +1365,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let first = discover_hooks(
@@ -1233,6 +1400,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
         let managed = ManagedHookConfig {
@@ -1254,6 +1423,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
 
@@ -1288,6 +1459,8 @@ mod tests {
                 command_windows: None,
                 status_message: None,
                 async_handler: false,
+                env: Default::default(),
+                env_vars: Vec::new(),
             }],
         });
 
@@ -1317,6 +1490,8 @@ mod tests {
                         command_windows: None,
                         status_message: None,
                         async_handler: false,
+                        env: Default::default(),
+                        env_vars: Vec::new(),
                     })
                     .collect(),
             },

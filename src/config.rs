@@ -1352,7 +1352,9 @@ mod tests {
                       {
                         "type": "command",
                         "command": "$HOME/bin/check",
-                        "timeoutSec": 5
+                        "timeoutSec": 5,
+                        "env": { "STATIC_FLAG": "1" },
+                        "envVars": ["ZENTTY_PANE_TOKEN"]
                       }
                     ]
                   }
@@ -1367,6 +1369,14 @@ mod tests {
         assert_eq!(groups[0].matcher.as_deref(), Some("shell"));
         assert_eq!(groups[0].hooks[0].command, "$HOME/bin/check");
         assert_eq!(groups[0].hooks[0].timeout_sec, 5);
+        assert_eq!(
+            groups[0].hooks[0]
+                .env
+                .get("STATIC_FLAG")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(groups[0].hooks[0].env_vars, vec!["ZENTTY_PANE_TOKEN"]);
     }
 
     #[test]

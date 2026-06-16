@@ -179,6 +179,8 @@ fn hook_hash(event: HookEventName, matcher: Option<&str>, handler: &HookCommandC
         "timeoutSec": handler.timeout_sec,
         "async": handler.async_handler,
         "statusMessage": handler.status_message,
+        "env": handler.env,
+        "envVars": handler.env_vars,
     });
     let bytes = serde_json::to_vec(&identity).expect("hook identity serializes");
     let digest = Sha256::digest(bytes);
@@ -200,6 +202,8 @@ fn normalize_handler(handler: &HookCommandConfig) -> HookCommandConfig {
         command_windows: None,
         status_message: handler.status_message.clone(),
         async_handler: false,
+        env: handler.env.clone(),
+        env_vars: handler.env_vars.clone(),
     }
 }
 

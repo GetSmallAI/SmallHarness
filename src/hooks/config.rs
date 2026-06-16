@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::HookEventName;
@@ -84,6 +85,8 @@ pub struct HookCommandConfig {
     pub command_windows: Option<String>,
     pub status_message: Option<String>,
     pub async_handler: bool,
+    pub env: BTreeMap<String, String>,
+    pub env_vars: Vec<String>,
 }
 
 pub fn default_hook_timeout_sec() -> u64 {
@@ -105,6 +108,10 @@ struct HookCommandConfigWire {
     status_message: Option<String>,
     #[serde(default, rename = "async")]
     async_handler: bool,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    env_vars: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for HookCommandConfig {
@@ -120,6 +127,8 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
                 command_windows: wire.command_windows,
                 status_message: wire.status_message,
                 async_handler: wire.async_handler,
+                env: BTreeMap::new(),
+                env_vars: Vec::new(),
             });
         }
         if wire.handler_type != "command" {
@@ -128,14 +137,42 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
                 wire.handler_type
             )));
         }
+        validate_hook_env(&wire.env, &wire.env_vars).map_err(serde::de::Error::custom)?;
         Ok(Self {
             command: wire.command,
             timeout_sec: wire.timeout_sec,
             command_windows: wire.command_windows,
             status_message: wire.status_message,
             async_handler: wire.async_handler,
+            env: wire.env,
+            env_vars: wire.env_vars,
         })
     }
+}
+
+fn validate_hook_env(env: &BTreeMap<String, String>, env_vars: &[String]) -> Result<(), String> {
+    for (name, value) in env {
+        validate_hook_env_name("env", name)?;
+        if value.contains('\0') {
+            return Err(format!("hook env `{name}` value must not contain NUL"));
+        }
+    }
+    for name in env_vars {
+        validate_hook_env_name("envVars", name)?;
+    }
+    Ok(())
+}
+
+fn validate_hook_env_name(field: &str, name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("hook {field} entries must not be empty"));
+    }
+    if name.contains('=') || name.contains('\0') {
+        return Err(format!(
+            "hook {field} entry `{name}` must not contain `=` or NUL"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

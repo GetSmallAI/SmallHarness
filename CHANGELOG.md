@@ -20,13 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SMALL_HARNESS_MANAGED_HOOKS_FILE`, enabling terminal/orchestrator
   status and progress integrations without mutating user config. These are
   process-local launcher-trusted hooks, not cryptographically signed hooks or
-  Codex enterprise-managed hooks.
+  Codex enterprise-managed hooks. Hook commands can now use `envVars` to
+  forward selected parent process variables and `env` for literal values,
+  while keeping parent credentials absent by default.
 - **Hook hardening.** Gating hook runner failures now fail closed, invalid
   matchers are visible but skipped, regex matchers use full-match semantics,
   `task` uses the dedicated subagent hook events without generic `PostToolUse`,
-  hook subprocesses run with a least-privilege environment and process-group
-  cleanup on timeout, and hook-provided model context is bounded and redacted
-  before injection.
+  hook subprocesses use process-group cleanup on timeout, and hook-provided
+  model context is bounded and redacted before injection.
 
 ## [1.0.4] - 2026-06-20
 

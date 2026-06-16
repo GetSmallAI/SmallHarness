@@ -656,12 +656,13 @@ what started the turn.
 
 Hook payload stdin is raw and unredacted so trusted hooks can make decisions on
 the actual prompt/tool data; do not log it unless your hook performs its own
-redaction. Hook child processes run with a cleared environment and receive only
-the minimal inherited shell environment (`PATH`, `HOME` or Windows home/system
-vars) plus `SMALL_HARNESS_HOOK_EVENT`, `SMALL_HARNESS_SESSION_ID`,
+redaction. Hook child processes start with a cleared environment and receive the
+minimal inherited shell environment (`PATH`, `HOME` or Windows home/system vars),
+explicit parent process variables listed in `envVars`, literal values from
+`env`, plus `SMALL_HARNESS_HOOK_EVENT`, `SMALL_HARNESS_SESSION_ID`,
 `SMALL_HARNESS_TURN_ID`, `SMALL_HARNESS_TRANSCRIPT_PATH`, and
-`SMALL_HARNESS_EVENTS_PATH`, so parent LLM provider credentials are not passed
-through by default.
+`SMALL_HARNESS_EVENTS_PATH`. Parent LLM provider credentials are not passed
+through unless a hook explicitly names them in `envVars`.
 
 Matchers are Codex-style: absent, empty, or `*` matches all; exact `|`
 alternation matches tool/event names; other matchers are treated as full-match
@@ -710,6 +711,32 @@ enterprise-managed hooks; they are process-local launcher-trusted commands for
 wrappers that own the process invocation. Small Harness intentionally reads
 these only from the real process environment, not repo `.env` files. This lets
 integrations observe status without mutating the user's config.
+
+Use `envVars` when a managed hook command needs launcher state:
+
+```json
+{
+  "source": "terminal-orchestrator",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "zentty ipc agent-event",
+            "envVars": [
+              "ZENTTY_INSTANCE_SOCKET",
+              "ZENTTY_WORKLANE_ID",
+              "ZENTTY_PANE_ID",
+              "ZENTTY_PANE_TOKEN"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ### Image input
 

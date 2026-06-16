@@ -83,7 +83,7 @@ pub async fn run_command_hook(handler: &HookCommandConfig, payload: &Value) -> H
         .stderr(Stdio::piped());
     command.kill_on_drop(true);
     configure_hook_process(&mut command);
-    apply_hook_env(&mut command, payload);
+    apply_hook_env(&mut command, handler, payload);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -218,12 +218,24 @@ pub(super) fn hook_shell_program_and_arg() -> (&'static str, &'static str) {
     }
 }
 
-fn apply_hook_env(command: &mut tokio::process::Command, payload: &Value) {
+fn apply_hook_env(
+    command: &mut tokio::process::Command,
+    handler: &HookCommandConfig,
+    payload: &Value,
+) {
     command.env_clear();
     for key in inherited_hook_env_allowlist() {
         if let Ok(value) = std::env::var(key) {
             command.env(key, value);
         }
+    }
+    for key in &handler.env_vars {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in &handler.env {
+        command.env(key, value);
     }
     if let Some(event) = payload.get("hook_event_name").and_then(Value::as_str) {
         command.env("SMALL_HARNESS_HOOK_EVENT", event);
