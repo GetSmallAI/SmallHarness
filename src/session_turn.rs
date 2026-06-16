@@ -425,6 +425,10 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     };
     let mut tools = build_tools_for_names(&state.config, &active_tool_names, Some(&tool_runtime));
     tools.extend(state.mcp_tools.iter().cloned());
+    // The runtime context owns an event-sender clone for nested tools. Keeping
+    // this outer clone alive across the drain join prevents the channel from
+    // closing after the agent future returns.
+    drop(tool_runtime);
     let tool_defs = crate::agent::to_openai_tools(&tools);
     maybe_print_context_pressure(state, &system_prompt, &tool_defs);
 
@@ -866,7 +870,162 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::approval::ApprovalCache;
+    use crate::backends::{BackendDescriptor, BackendName};
+    use crate::config::AgentConfig;
+    use crate::hooks::HookRegistry;
+    use crate::openai::{build_http_client, ChatMessage};
+    use crate::renderer::TuiRenderer;
+    use crate::session::load_messages;
+    use crate::session_paths::PathStore;
+    use crate::turn_checkpoint::CheckpointStack;
     use crate::turn_trace::TurnMetrics;
+    use std::ffi::OsString;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn mock_backend(listener: &TcpListener) -> BackendDescriptor {
+        BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            api_key: "test".into(),
+            is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
+        }
+    }
+
+    fn spawn_mock_server(listener: TcpListener, body: &'static str) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        })
+    }
+
+    fn test_state(config: AgentConfig, backend: BackendDescriptor) -> AppState {
+        let session_dir = config.session_dir.clone();
+        let session_path = crate::session::new_session_path(&session_dir);
+        let checkpoint_limits = config.checkpoints.limits();
+        let display = config.display.clone();
+        let paths_config = config.paths.clone();
+        let trace = crate::turn_trace::test_trace_for(&session_path);
+        AppState {
+            config,
+            http: build_http_client(),
+            backend,
+            model: "mock".into(),
+            active_effort: None,
+            messages: Vec::new(),
+            session_dir: session_dir.clone(),
+            session_path: session_path.clone(),
+            total_in: 0,
+            total_out: 0,
+            session_usd: 0.0,
+            session_cost_has_unknown: false,
+            context_guard_notice: None,
+            conversation_summary: None,
+            checkpoint_stack: CheckpointStack::new(checkpoint_limits),
+            checkpoints_enabled: false,
+            play_session: None,
+            last_play_scorecard: None,
+            approval_cache: ApprovalCache::new(),
+            renderer: TuiRenderer::new(display),
+            hooks: HookRegistry::default(),
+            session_hook_contexts: Vec::new(),
+            pending_hook_contexts: Vec::new(),
+            warmed_fingerprint: None,
+            tests_ran_this_session: false,
+            pending_image_attachments: Vec::new(),
+            mcp_tools: Vec::new(),
+            path_store: PathStore::new(&session_dir, &session_path, &paths_config),
+            trace,
+            trace_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn user_turn_finishes_after_plain_streaming_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend = mock_backend(&listener);
+        let server = spawn_mock_server(
+            listener,
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hello from mock.\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AgentConfig::default();
+        config.backend = BackendName::Ollama;
+        config.model_override = Some("mock".into());
+        config.workspace_root = dir.path().display().to_string();
+        config.session_dir = dir.path().join(".sessions").display().to_string();
+        config.tools.clear();
+        config.mcp_servers.clear();
+        config.display.event_log.enabled = false;
+        crate::session::init_session_dir(&config.session_dir).unwrap();
+        let mut state = test_state(config, backend);
+        let _warmup = EnvVarGuard::set("WARMUP", "false");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_user_turn(
+                &mut state,
+                TurnOptions {
+                    user_prompt: "hello".into(),
+                    auto_verify_tests: false,
+                    yolo_approve: false,
+                    source: "test",
+                },
+            ),
+        )
+        .await
+        .expect("turn should finish after the agent stream closes")
+        .unwrap();
+
+        server.join().unwrap();
+        assert!(result.run_result.messages.iter().any(|message| matches!(
+            message,
+            ChatMessage::Assistant { content: Some(content), .. } if content == "Hello from mock."
+        )));
+        let saved = load_messages(&state.session_path).unwrap();
+        assert!(saved.iter().any(|message| matches!(
+            message,
+            ChatMessage::Assistant { content: Some(content), .. } if content == "Hello from mock."
+        )));
+    }
 
     #[test]
     fn no_suffix_for_pure_local_session() {
