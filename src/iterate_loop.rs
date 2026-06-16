@@ -145,6 +145,7 @@ pub async fn run_iterate_loop(state: &mut AppState, opts: IterateOptions) -> Res
                 user_prompt: prompt,
                 auto_verify_tests: false,
                 yolo_approve: opts.yolo,
+                source: "iterate",
             },
         )
         .await
@@ -295,6 +296,9 @@ mod tests {
             last_play_scorecard: None,
             approval_cache: ApprovalCache::new(),
             renderer: TuiRenderer::new(config.display.clone()),
+            hooks: crate::hooks::HookRegistry::default(),
+            session_hook_contexts: Vec::new(),
+            pending_hook_contexts: Vec::new(),
             warmed_fingerprint: None,
             tests_ran_this_session: false,
             pending_image_attachments: Vec::new(),

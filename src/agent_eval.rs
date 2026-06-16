@@ -365,6 +365,7 @@ pub async fn run_agent_eval(
         None,
         None,
         0,
+        None,
     )
     .await;
     let elapsed_ms = start.elapsed().as_millis();

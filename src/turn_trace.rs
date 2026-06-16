@@ -9,11 +9,42 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-static API_KEY_RE: OnceLock<Regex> = OnceLock::new();
+static SECRET_PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
 
-fn api_key_pattern() -> &'static Regex {
-    API_KEY_RE.get_or_init(|| {
-        Regex::new(r"(?i)(sk-[a-z0-9_-]{8,}|sk-or-[a-z0-9_-]{8,})").expect("api key regex")
+fn secret_patterns() -> &'static [(Regex, &'static str)] {
+    SECRET_PATTERNS.get_or_init(|| {
+        vec![
+            (
+                Regex::new(
+                    r#"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|ACCESS[_-]?KEY)[A-Z0-9_]*=)[^\s'"]+"#,
+                )
+                .expect("env secret regex"),
+                "${1}(redacted)",
+            ),
+            (
+                Regex::new(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}")
+                    .expect("bearer token regex"),
+                "${1}(redacted)",
+            ),
+            (
+                Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b")
+                    .expect("jwt regex"),
+                "(redacted)",
+            ),
+            (
+                Regex::new(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b").expect("aws key regex"),
+                "(redacted)",
+            ),
+            (
+                Regex::new(r"(?i)\b(?:sk-[a-z0-9_-]{8,}|sk-or-[a-z0-9_-]{8,})")
+                    .expect("api key regex"),
+                "(redacted)",
+            ),
+            (
+                Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b").expect("github token regex"),
+                "(redacted)",
+            ),
+        ]
     })
 }
 
@@ -134,6 +165,45 @@ pub enum TracePayload {
         #[serde(flatten)]
         metrics: TurnMetrics,
     },
+    HookStart {
+        event: String,
+        key: String,
+        source: String,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        matcher: Option<String>,
+    },
+    HookEnd {
+        event: String,
+        key: String,
+        duration_ms: u128,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        timed_out: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stdout: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stderr: Option<String>,
+    },
+    HookDecision {
+        event: String,
+        key: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        decision: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+    HookInputRewrite {
+        tool: String,
+        call_id: String,
+        original_args: Value,
+        effective_args: Value,
+        depth: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +241,11 @@ pub fn redact_value(value: &Value) -> Value {
 }
 
 pub fn redact_string(s: &str) -> String {
-    api_key_pattern().replace_all(s, "(redacted)").into_owned()
+    let mut out = s.to_string();
+    for (pattern, replacement) in secret_patterns() {
+        out = pattern.replace_all(&out, *replacement).into_owned();
+    }
+    out
 }
 
 pub struct TurnTrace {
@@ -385,6 +459,19 @@ mod tests {
         let s = redact_string("use sk-1234567890abcdef for auth");
         assert!(!s.contains("sk-1234567890abcdef"));
         assert!(s.contains("(redacted)"));
+    }
+
+    #[test]
+    fn redacts_common_secret_shapes_in_strings() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart";
+        let s = redact_string(&format!(
+            "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE Authorization: Bearer {jwt} GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456"
+        ));
+
+        assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!s.contains(jwt));
+        assert!(!s.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"));
+        assert_eq!(s.matches("(redacted)").count(), 3);
     }
 
     #[test]

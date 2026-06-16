@@ -382,6 +382,10 @@ impl TuiRenderer {
                 self.end_answer();
                 println!("{notice}");
             }
+            AgentEvent::HookNotice(notice) => {
+                self.end_answer();
+                self.render_hook_notice(&notice);
+            }
             AgentEvent::StepLimitReached { max_steps } => {
                 self.end_answer();
                 self.end_streaming();
@@ -647,6 +651,23 @@ impl TuiRenderer {
             String::new()
         };
         println!("{PAD}{indent}{DIM}↳ {name} output compacted: {summary}{RESET}");
+    }
+
+    fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
+        use crate::hooks::HookNoticeLevel;
+
+        let (mark, label, color) = match notice.level {
+            HookNoticeLevel::Warning => ("!", "hook warning", YELLOW),
+            HookNoticeLevel::Blocked => ("✗", "hook blocked", RED),
+            HookNoticeLevel::Denied => ("✗", "hook denied", RED),
+            HookNoticeLevel::Stopped => ("■", "hook stopped", YELLOW),
+            HookNoticeLevel::Feedback => ("↳", "hook", DIM),
+        };
+        println!(
+            "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
+            notice.event.as_str(),
+            notice.message
+        );
     }
 
     fn flush_grouped(&mut self) {

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Hooks.** `agent.config.json` can define trusted command hooks for session,
+  prompt, tool, permission, plan, stop, and session-end events. Hooks receive
+  JSON on stdin, can block/allow/deny/stop, add context or feedback, and are
+  traced quietly unless they warn or affect execution. Project hooks run only
+  after their current hash is trusted in user-owned state; project-controlled
+  hook state is ignored for execution safety. `/hooks` lists and manages trust
+  state stored under `~/.config/small-harness/`.
+- **Managed launch hooks.** Launchers can inject ephemeral trusted hooks with
+  `SMALL_HARNESS_MANAGED_HOOKS_JSON` or
+  `SMALL_HARNESS_MANAGED_HOOKS_FILE`, enabling terminal/orchestrator
+  status and progress integrations without mutating user config. These are
+  process-local launcher-trusted hooks, not cryptographically signed hooks or
+  Codex enterprise-managed hooks.
+- **Hook hardening.** Gating hook runner failures now fail closed, invalid
+  matchers are visible but skipped, regex matchers use full-match semantics,
+  `task` uses the dedicated subagent hook events without generic `PostToolUse`,
+  hook subprocesses run with a least-privilege environment and process-group
+  cleanup on timeout, and hook-provided model context is bounded and redacted
+  before injection.
+
 ## [1.0.4] - 2026-06-20
 
 ### Added

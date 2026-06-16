@@ -7,8 +7,16 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::backends::BackendDescriptor;
+use crate::budget::measure_prompt_budget;
 use crate::cancel::CancellationToken;
-use crate::context_guard::{maybe_compact_messages, ContextGuardParams};
+use crate::context_guard::{
+    maybe_compact_messages, merge_system_prompt, should_compact, ContextGuardParams,
+};
+use crate::hooks::{
+    bounded_hook_context_text, dispatch_hook_payload, hook_context_messages,
+    plan_updated_payload_from_tool_result, render_hook_context_block, HookEventName,
+    HookInvocationContext, HookOutcome, HookRegistry,
+};
 use crate::model_system::EffortLevel;
 use crate::openai::{
     stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolCall, ToolDef, ToolDefFunction,
@@ -17,6 +25,13 @@ use crate::openai::{
 use crate::tools::{is_mutation_tool, is_read_only_tool, Tool, ToolPreview};
 use crate::turn_checkpoint::TurnCapturer;
 use crate::turn_trace::{SharedTurnTrace, TracePayload, TurnMetrics};
+
+#[derive(Clone)]
+pub struct AgentHooks {
+    pub registry: HookRegistry,
+    pub context: HookInvocationContext,
+    pub trace: SharedTurnTrace,
+}
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -48,6 +63,7 @@ pub enum AgentEvent {
         notice: String,
         conversation_summary: Option<String>,
     },
+    HookNotice(crate::hooks::HookNotice),
     /// The loop ran out its step budget while the model still wanted to call
     /// tools — the task is likely unfinished and can be resumed.
     StepLimitReached {
@@ -185,6 +201,85 @@ fn compact_tool_output(name: &str, output: &str) -> (String, Option<CompactInfo>
     )
 }
 
+fn updated_tool_input_from_hook(value: &Value) -> Option<Value> {
+    if let Some(tool_input) = value.get("tool_input") {
+        return tool_input.as_object().map(|_| tool_input.clone());
+    }
+    value.as_object().map(|_| value.clone())
+}
+
+fn append_hook_context_messages(messages: &mut Vec<ChatMessage>, contexts: Vec<String>) {
+    if let Some(content) = render_hook_context_block(contexts) {
+        messages.push(ChatMessage::User {
+            content: content.into(),
+        });
+    }
+}
+
+fn merge_hook_payload(mut payload: Value, fields: Value) -> Value {
+    let Some(obj) = payload.as_object_mut() else {
+        return payload;
+    };
+    if let Value::Object(fields) = fields {
+        for (key, value) in fields {
+            obj.insert(key, value);
+        }
+    }
+    payload
+}
+
+fn hook_block_output(reason: &str) -> String {
+    serde_json::to_string(&serde_json::json!({ "error": reason }))
+        .unwrap_or_else(|_| "{\"error\":\"hook blocked execution\"}".to_string())
+}
+
+fn auto_compact_due(
+    messages: &[ChatMessage],
+    system_prompt: &str,
+    tool_defs: &[ToolDef],
+    guard: &ContextGuardParams,
+) -> bool {
+    if !guard.auto_compact {
+        return false;
+    }
+    let active_system_prompt =
+        merge_system_prompt(system_prompt, guard.conversation_summary.as_deref());
+    let budget = measure_prompt_budget(&active_system_prompt, messages, tool_defs);
+    should_compact(
+        &budget,
+        guard.effective_limit_bytes,
+        guard.compact_threshold,
+    )
+}
+
+async fn dispatch_agent_hook<F>(
+    hooks: Option<&AgentHooks>,
+    event: HookEventName,
+    fields: Value,
+    matcher_value: Option<&str>,
+    on_event: &mut F,
+) -> HookOutcome
+where
+    F: FnMut(AgentEvent),
+{
+    let Some(hooks) = hooks else {
+        return HookOutcome::default();
+    };
+    let payload = merge_hook_payload(hooks.context.payload(event).into_value(), fields);
+    let outcome = dispatch_hook_payload(
+        &hooks.registry,
+        event,
+        &payload,
+        matcher_value,
+        Some(hooks.trace.clone()),
+    )
+    .await;
+    for notice in &outcome.notices {
+        on_event(AgentEvent::HookNotice(notice.clone()));
+    }
+    outcome
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent<F>(
     http: &reqwest::Client,
@@ -201,6 +296,7 @@ pub async fn run_agent<F>(
     mut capturer: Option<&mut TurnCapturer>,
     trace: Option<SharedTurnTrace>,
     depth: u32,
+    hooks: Option<AgentHooks>,
 ) -> Result<RunResult>
 where
     F: FnMut(AgentEvent),
@@ -368,16 +464,16 @@ where
             }
         }
 
-        messages.push(ChatMessage::Assistant {
-            content: if assistant_text.is_empty() {
-                None
-            } else {
-                Some(assistant_text.clone())
-            },
-            tool_calls: final_calls.clone(),
-        });
-
+        let assistant_content = if assistant_text.is_empty() {
+            None
+        } else {
+            Some(assistant_text.clone())
+        };
         if final_calls.is_empty() {
+            messages.push(ChatMessage::Assistant {
+                content: assistant_content,
+                tool_calls: final_calls,
+            });
             natural_stop = true;
             break;
         }
@@ -402,11 +498,86 @@ where
         }
 
         let mut tcs: Vec<ToolCall> = Vec::with_capacity(final_calls.len());
+        let mut tool_inputs: Vec<Value> = Vec::with_capacity(final_calls.len());
+        let mut original_tool_inputs: Vec<Option<Value>> = Vec::with_capacity(final_calls.len());
+        let mut run_post_hooks: Vec<bool> = Vec::with_capacity(final_calls.len());
         let mut pending: Vec<Pending> = Vec::with_capacity(final_calls.len());
+        let mut hook_contexts: Vec<String> = Vec::new();
+        let mut stop_after_step = false;
+        let mut stop_remaining_reason: Option<String> = None;
 
-        for tc in final_calls {
-            let parsed_args: Value = serde_json::from_str(&tc.function.arguments)
+        for mut tc in final_calls {
+            let mut parsed_args: Value = serde_json::from_str(&tc.function.arguments)
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+            if let Some(reason) = stop_remaining_reason.clone() {
+                on_event(AgentEvent::ToolCall {
+                    name: tc.function.name.clone(),
+                    call_id: tc.id.clone(),
+                    args: parsed_args.clone(),
+                    depth,
+                });
+                log_trace(TracePayload::ToolCall {
+                    call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    args: crate::turn_trace::redact_value(&parsed_args),
+                    depth,
+                });
+                tool_inputs.push(parsed_args);
+                original_tool_inputs.push(None);
+                run_post_hooks.push(false);
+                tcs.push(tc);
+                pending.push(Pending::Done(hook_block_output(&reason)));
+                continue;
+            }
+            let original_args = parsed_args.clone();
+            let mut rewritten_original_args = None;
+            let pre_outcome = dispatch_agent_hook(
+                hooks.as_ref(),
+                HookEventName::PreToolUse,
+                serde_json::json!({
+                    "tool_name": tc.function.name,
+                    "tool_use_id": tc.id,
+                    "tool_input": parsed_args,
+                    "depth": depth,
+                }),
+                Some(&tc.function.name),
+                &mut on_event,
+            )
+            .await;
+            hook_contexts.extend(hook_context_messages(
+                HookEventName::PreToolUse,
+                &pre_outcome,
+            ));
+            let pre_stop_reason = pre_outcome.stop_reason.clone();
+            if let Some(updated) = pre_outcome
+                .updated_input
+                .as_ref()
+                .and_then(updated_tool_input_from_hook)
+            {
+                parsed_args = updated;
+                tc.function.arguments =
+                    serde_json::to_string(&parsed_args).unwrap_or_else(|_| "{}".into());
+                if parsed_args != original_args {
+                    rewritten_original_args = Some(original_args.clone());
+                    let original_text = serde_json::to_string(&original_args)
+                        .unwrap_or_else(|_| "<unserializable>".into());
+                    let rewritten_text = serde_json::to_string(&parsed_args)
+                        .unwrap_or_else(|_| "<unserializable>".into());
+                    hook_contexts.push(format!(
+                        "PreToolUse hook rewrote {} input. original={} effective={}",
+                        tc.function.name,
+                        bounded_hook_context_text(&original_text),
+                        bounded_hook_context_text(&rewritten_text)
+                    ));
+                    log_trace(TracePayload::HookInputRewrite {
+                        tool: tc.function.name.clone(),
+                        call_id: tc.id.clone(),
+                        original_args: crate::turn_trace::redact_value(&original_args),
+                        effective_args: crate::turn_trace::redact_value(&parsed_args),
+                        depth,
+                    });
+                }
+            }
             on_event(AgentEvent::ToolCall {
                 name: tc.function.name.clone(),
                 call_id: tc.id.clone(),
@@ -420,40 +591,118 @@ where
                 depth,
             });
 
-            let entry = if let Some(tool) = tool_map.get(&tc.function.name) {
+            let mut run_post_hook = false;
+            let entry = if let Some(reason) = pre_outcome.blocking_reason {
+                Pending::Done(hook_block_output(&reason))
+            } else if let Some(reason) = pre_stop_reason {
+                stop_after_step = true;
+                stop_remaining_reason = Some(reason.clone());
+                Pending::Done(hook_block_output(&reason))
+            } else if let Some(tool) = tool_map.get(&tc.function.name) {
                 let needs_approval = tool.require_approval(&parsed_args);
                 let mut denied = false;
+                let mut denial_reason = "User denied execution.".to_string();
                 if needs_approval {
                     let preview = tool.preview(&parsed_args).await;
-                    if let Some(provider) = approve.as_deref_mut() {
-                        if !provider
-                            .approve(&tc.function.name, &parsed_args, preview.as_ref())
-                            .await
-                        {
+                    let preview_payload = preview.as_ref().map(|preview| {
+                        serde_json::json!({
+                            "summary": preview.summary,
+                            "diff": preview.diff,
+                            "risk": preview.risk,
+                        })
+                    });
+                    let permission_outcome = dispatch_agent_hook(
+                        hooks.as_ref(),
+                        HookEventName::PermissionRequest,
+                        serde_json::json!({
+                            "tool_name": tc.function.name,
+                            "tool_use_id": tc.id,
+                            "tool_input": parsed_args,
+                            "preview": preview_payload,
+                            "depth": depth,
+                        }),
+                        Some(&tc.function.name),
+                        &mut on_event,
+                    )
+                    .await;
+                    hook_contexts.extend(hook_context_messages(
+                        HookEventName::PermissionRequest,
+                        &permission_outcome,
+                    ));
+                    if let Some(reason) = permission_outcome.blocking_reason {
+                        denied = true;
+                        denial_reason = reason;
+                    }
+                    if let Some(reason) = permission_outcome.stop_reason {
+                        denied = true;
+                        denial_reason = reason.clone();
+                        stop_after_step = true;
+                        stop_remaining_reason = Some(reason);
+                    }
+                    if !permission_outcome.allowed && !denied {
+                        if let Some(provider) = approve.as_deref_mut() {
+                            if !provider
+                                .approve(&tc.function.name, &parsed_args, preview.as_ref())
+                                .await
+                            {
+                                denied = true;
+                            }
+                        } else {
                             denied = true;
                         }
-                    } else {
-                        denied = true;
                     }
                 }
                 if denied {
                     Pending::Done(
                         serde_json::to_string(&serde_json::json!({
-                            "error": "User denied execution."
+                            "error": denial_reason
                         }))
                         .unwrap(),
                     )
                 } else {
-                    if is_mutation_tool(&tc.function.name) {
-                        if let Some(c) = capturer.as_deref_mut() {
-                            c.snapshot_before_tool(&tc.function.name, &parsed_args)
-                                .await;
+                    let subagent_start = if tc.function.name == "task" {
+                        let outcome = dispatch_agent_hook(
+                            hooks.as_ref(),
+                            HookEventName::SubagentStart,
+                            serde_json::json!({
+                                "tool_name": tc.function.name,
+                                "tool_use_id": tc.id,
+                                "tool_input": parsed_args,
+                                "depth": depth,
+                            }),
+                            Some(&tc.function.name),
+                            &mut on_event,
+                        )
+                        .await;
+                        hook_contexts.extend(hook_context_messages(
+                            HookEventName::SubagentStart,
+                            &outcome,
+                        ));
+                        let stop_reason = outcome.stop_reason.clone();
+                        if let Some(reason) = stop_reason.clone() {
+                            stop_after_step = true;
+                            stop_remaining_reason = Some(reason);
                         }
-                    }
-                    Pending::Run {
-                        tool: tool.clone(),
-                        args: parsed_args,
-                        read_only: is_read_only_tool(&tc.function.name),
+                        outcome.blocking_reason.or(stop_reason)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = subagent_start {
+                        Pending::Done(hook_block_output(&reason))
+                    } else {
+                        if is_mutation_tool(&tc.function.name) {
+                            if let Some(c) = capturer.as_deref_mut() {
+                                c.snapshot_before_tool(&tc.function.name, &parsed_args)
+                                    .await;
+                            }
+                        }
+                        let pending_entry = Pending::Run {
+                            tool: tool.clone(),
+                            args: parsed_args.clone(),
+                            read_only: is_read_only_tool(&tc.function.name),
+                        };
+                        run_post_hook = true;
+                        pending_entry
                     }
                 }
             } else {
@@ -464,9 +713,26 @@ where
                     .unwrap(),
                 )
             };
+            tool_inputs.push(parsed_args);
+            original_tool_inputs.push(rewritten_original_args);
+            run_post_hooks.push(run_post_hook);
             tcs.push(tc);
             pending.push(entry);
         }
+
+        if let Some(reason) = stop_remaining_reason.as_deref() {
+            for (entry, run_post_hook) in pending.iter_mut().zip(run_post_hooks.iter_mut()) {
+                if matches!(entry, Pending::Run { .. }) {
+                    *entry = Pending::Done(hook_block_output(reason));
+                    *run_post_hook = false;
+                }
+            }
+        }
+
+        messages.push(ChatMessage::Assistant {
+            content: assistant_content,
+            tool_calls: tcs.clone(),
+        });
 
         fn value_to_string(result: &Value) -> String {
             if let Some(s) = result.as_str() {
@@ -526,9 +792,99 @@ where
             metrics.tool_ms += ms;
         }
 
-        for ((tc, output), duration_ms) in tcs.into_iter().zip(outputs).zip(tool_durations) {
+        for (((((tc, output), duration_ms), tool_input), original_tool_input), run_post_hook) in tcs
+            .into_iter()
+            .zip(outputs)
+            .zip(tool_durations)
+            .zip(tool_inputs)
+            .zip(original_tool_inputs)
+            .zip(run_post_hooks)
+        {
             let output_str = output.unwrap_or_else(|| "null".into());
-            let (trimmed, compact_info) = compact_tool_output(&tc.function.name, &output_str);
+            let (mut trimmed, compact_info) = compact_tool_output(&tc.function.name, &output_str);
+            if tc.function.name == "update_plan" {
+                if let Some(hooks_ref) = hooks.as_ref() {
+                    if let Some(payload) = plan_updated_payload_from_tool_result(
+                        &hooks_ref.context,
+                        &tc.id,
+                        &output_str,
+                    ) {
+                        let outcome = dispatch_hook_payload(
+                            &hooks_ref.registry,
+                            HookEventName::PlanUpdated,
+                            &payload,
+                            None,
+                            Some(hooks_ref.trace.clone()),
+                        )
+                        .await;
+                        for notice in &outcome.notices {
+                            on_event(AgentEvent::HookNotice(notice.clone()));
+                        }
+                        hook_contexts
+                            .extend(hook_context_messages(HookEventName::PlanUpdated, &outcome));
+                        if outcome.stop_reason.is_some() {
+                            stop_after_step = true;
+                        }
+                    }
+                }
+            }
+            let input_rewritten = original_tool_input.is_some();
+            let hook_tool_payload = |tool_response: &str| {
+                let mut payload = serde_json::json!({
+                    "tool_name": tc.function.name,
+                    "tool_use_id": tc.id,
+                    "tool_input": tool_input,
+                    "tool_response": tool_response,
+                    "input_rewritten": input_rewritten,
+                    "depth": depth,
+                });
+                if let (Some(obj), Some(original)) =
+                    (payload.as_object_mut(), original_tool_input.as_ref())
+                {
+                    obj.insert("original_tool_input".into(), original.clone());
+                }
+                payload
+            };
+            if tc.function.name == "task" && run_post_hook {
+                let subagent_stop = dispatch_agent_hook(
+                    hooks.as_ref(),
+                    HookEventName::SubagentStop,
+                    hook_tool_payload(&trimmed),
+                    Some(&tc.function.name),
+                    &mut on_event,
+                )
+                .await;
+                hook_contexts.extend(hook_context_messages(
+                    HookEventName::SubagentStop,
+                    &subagent_stop,
+                ));
+                if let Some(reason) = subagent_stop.blocking_reason {
+                    trimmed = hook_block_output(&reason);
+                }
+                if subagent_stop.stop_reason.is_some() {
+                    stop_after_step = true;
+                }
+            }
+            if run_post_hook && tc.function.name != "task" {
+                let post_outcome = dispatch_agent_hook(
+                    hooks.as_ref(),
+                    HookEventName::PostToolUse,
+                    hook_tool_payload(&trimmed),
+                    Some(&tc.function.name),
+                    &mut on_event,
+                )
+                .await;
+                hook_contexts.extend(hook_context_messages(
+                    HookEventName::PostToolUse,
+                    &post_outcome,
+                ));
+                if let Some(reason) = post_outcome.blocking_reason {
+                    trimmed = hook_block_output(&reason);
+                }
+                if post_outcome.stop_reason.is_some() {
+                    stop_after_step = true;
+                }
+            }
             if let Some(info) = &compact_info {
                 on_event(AgentEvent::ToolOutputCompacted {
                     name: tc.function.name.clone(),
@@ -557,33 +913,87 @@ where
             });
         }
 
+        append_hook_context_messages(&mut messages, hook_contexts);
+
+        if stop_after_step {
+            natural_stop = true;
+            break;
+        }
+
         if let Some((guard_params, system_prompt)) = &guard {
-            if let Some(notice) = maybe_compact_messages(
-                &mut messages,
-                system_prompt,
-                &tool_defs,
-                guard_params,
-                http,
-                backend,
-                model,
+            if !auto_compact_due(&messages, system_prompt, &tool_defs, guard_params) {
+                continue;
+            }
+            let pre_compact = dispatch_agent_hook(
+                hooks.as_ref(),
+                HookEventName::PreCompact,
+                serde_json::json!({
+                    "phase": "agent",
+                    "message_count": messages.len(),
+                    "depth": depth,
+                }),
+                None,
+                &mut on_event,
             )
-            .await?
-            {
-                if notice.transcript_rewritten {
-                    transcript_rewritten = true;
+            .await;
+            append_hook_context_messages(
+                &mut messages,
+                hook_context_messages(HookEventName::PreCompact, &pre_compact),
+            );
+            let mut stop_after_compact_hook = pre_compact.stop_reason.is_some();
+            if pre_compact.blocking_reason.is_none() {
+                if let Some(notice) = maybe_compact_messages(
+                    &mut messages,
+                    system_prompt,
+                    &tool_defs,
+                    guard_params,
+                    http,
+                    backend,
+                    model,
+                )
+                .await?
+                {
+                    if notice.transcript_rewritten {
+                        transcript_rewritten = true;
+                    }
+                    if let Some(summary) = notice.conversation_summary {
+                        conversation_summary = Some(summary);
+                    }
+                    log_trace(TracePayload::ContextCompacted {
+                        method: "auto".into(),
+                        before_msgs: messages.len(),
+                        after_msgs: messages.len(),
+                    });
+                    on_event(AgentEvent::ContextCompacted {
+                        notice: notice.line.clone(),
+                        conversation_summary: conversation_summary.clone(),
+                    });
+                    let post_compact = dispatch_agent_hook(
+                        hooks.as_ref(),
+                        HookEventName::PostCompact,
+                        serde_json::json!({
+                            "phase": "agent",
+                            "notice": notice.line,
+                            "conversation_summary": conversation_summary,
+                            "message_count": messages.len(),
+                            "depth": depth,
+                        }),
+                        None,
+                        &mut on_event,
+                    )
+                    .await;
+                    append_hook_context_messages(
+                        &mut messages,
+                        hook_context_messages(HookEventName::PostCompact, &post_compact),
+                    );
+                    if post_compact.stop_reason.is_some() {
+                        stop_after_compact_hook = true;
+                    }
                 }
-                if let Some(summary) = notice.conversation_summary {
-                    conversation_summary = Some(summary);
-                }
-                log_trace(TracePayload::ContextCompacted {
-                    method: "auto".into(),
-                    before_msgs: messages.len(),
-                    after_msgs: messages.len(),
-                });
-                on_event(AgentEvent::ContextCompacted {
-                    notice: notice.line,
-                    conversation_summary: conversation_summary.clone(),
-                });
+            }
+            if stop_after_compact_hook {
+                natural_stop = true;
+                break;
             }
         }
     }
@@ -740,5 +1150,86 @@ mod tests {
         let parsed: Value = serde_json::from_str(&compacted.0).unwrap();
         assert_eq!(parsed["compacted"].as_bool(), Some(true));
         assert_eq!(parsed["matches"].as_array().unwrap().len(), 50);
+    }
+
+    #[test]
+    fn updated_tool_input_accepts_direct_object_or_tool_input_field() {
+        let direct = serde_json::json!({ "command": "cargo test" });
+        assert_eq!(updated_tool_input_from_hook(&direct), Some(direct));
+        assert_eq!(
+            updated_tool_input_from_hook(&serde_json::json!({
+                "tool_input": { "command": "cargo check" }
+            })),
+            Some(serde_json::json!({ "command": "cargo check" }))
+        );
+        assert_eq!(
+            updated_tool_input_from_hook(&serde_json::json!("nope")),
+            None
+        );
+    }
+
+    #[test]
+    fn hook_outcome_context_includes_additional_context_and_feedback() {
+        let mut outcome = crate::hooks::HookOutcome::default();
+        outcome.additional_context.push("extra context".into());
+        outcome.notices.push(crate::hooks::HookNotice {
+            event: crate::hooks::HookEventName::PostToolUse,
+            hook_key: Some("managed:test:PostToolUse:0:0".into()),
+            level: crate::hooks::HookNoticeLevel::Feedback,
+            message: "try again".into(),
+        });
+
+        let messages = hook_context_messages(HookEventName::PostToolUse, &outcome);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("extra context"));
+        assert!(messages[1].contains("try again"));
+    }
+
+    #[test]
+    fn hook_context_appends_single_deduped_user_message() {
+        let mut messages = vec![ChatMessage::Assistant {
+            content: Some("done".into()),
+            tool_calls: Vec::new(),
+        }];
+
+        append_hook_context_messages(
+            &mut messages,
+            vec![
+                "extra context".into(),
+                "extra context".into(),
+                "PostToolUse hook feedback: try again".into(),
+            ],
+        );
+
+        assert_eq!(messages.len(), 2);
+        match messages.last().unwrap() {
+            ChatMessage::User { content } => {
+                let text = content.as_text();
+                assert!(text.contains("Additional context from hooks:"));
+                assert_eq!(text.matches("extra context").count(), 1);
+                assert!(text.contains("PostToolUse hook feedback: try again"));
+            }
+            other => panic!("expected user hook context message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_context_appending_caps_aggregate_context() {
+        let mut messages = Vec::new();
+        let contexts = (0..20)
+            .map(|idx| format!("context-{idx} {}", "x".repeat(2_000)))
+            .collect();
+
+        append_hook_context_messages(&mut messages, contexts);
+
+        match messages.last().unwrap() {
+            ChatMessage::User { content } => {
+                let text = content.as_text();
+                assert!(text.contains("[truncated]"));
+                assert!(text.len() < 9_000);
+            }
+            other => panic!("expected user hook context message, got {other:?}"),
+        }
     }
 }

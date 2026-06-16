@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -590,6 +591,7 @@ pub struct AgentConfig {
     pub openrouter: OpenRouterConfig,
     pub model_system: ModelSystemConfig,
     pub mcp_servers: BTreeMap<String, crate::mcp::McpServerConfig>,
+    pub hooks: crate::hooks::HookConfig,
 }
 
 const SYSTEM_PROMPT: &str = concat!(
@@ -670,6 +672,7 @@ impl Default for AgentConfig {
             openrouter: OpenRouterConfig::default(),
             model_system: ModelSystemConfig::default(),
             mcp_servers: BTreeMap::new(),
+            hooks: crate::hooks::HookConfig::default(),
         }
     }
 }
@@ -714,6 +717,7 @@ struct FileConfig {
     model_system: Option<ModelSystemConfig>,
     #[serde(rename = "mcpServers")]
     mcp_servers: Option<BTreeMap<String, crate::mcp::McpServerConfig>>,
+    hooks: Option<Value>,
 }
 
 impl AgentConfig {
@@ -874,111 +878,269 @@ pub(crate) fn layered_env(dotenv: &BTreeMap<String, String>, key: &str) -> Optio
     std::env::var(key).ok().or_else(|| dotenv.get(key).cloned())
 }
 
+fn parse_hooks_config<F>(value: Value, mut warn: F) -> crate::hooks::HookConfig
+where
+    F: FnMut(&str),
+{
+    let Some(obj) = value.as_object() else {
+        warn("agent.config.json hooks ignored: expected object");
+        return crate::hooks::HookConfig::default();
+    };
+    let mut hooks = crate::hooks::HookConfig::default();
+    for (key, value) in obj {
+        match key.as_str() {
+            "SessionStart" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.session_start = groups;
+                }
+            }
+            "UserPromptSubmit" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.user_prompt_submit = groups;
+                }
+            }
+            "PreToolUse" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.pre_tool_use = groups;
+                }
+            }
+            "PermissionRequest" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.permission_request = groups;
+                }
+            }
+            "PostToolUse" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.post_tool_use = groups;
+                }
+            }
+            "PreCompact" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.pre_compact = groups;
+                }
+            }
+            "PostCompact" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.post_compact = groups;
+                }
+            }
+            "PlanUpdated" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.plan_updated = groups;
+                }
+            }
+            "SubagentStart" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.subagent_start = groups;
+                }
+            }
+            "SubagentStop" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.subagent_stop = groups;
+                }
+            }
+            "Stop" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.stop = groups;
+                }
+            }
+            "SessionEnd" => {
+                if let Some(groups) = parse_hook_groups(key, value, &mut warn) {
+                    hooks.session_end = groups;
+                }
+            }
+            "state" => warn(
+                "agent.config.json hooks.state ignored: project config cannot grant hook trust",
+            ),
+            _ => warn(&format!(
+                "agent.config.json hooks.{key} ignored: unknown hook event"
+            )),
+        }
+    }
+    hooks
+}
+
+fn parse_hook_groups<F>(
+    key: &str,
+    value: &Value,
+    warn: &mut F,
+) -> Option<Vec<crate::hooks::HookGroupConfig>>
+where
+    F: FnMut(&str),
+{
+    let Some(groups) = value.as_array() else {
+        warn(&format!(
+            "agent.config.json hooks.{key} ignored: expected array"
+        ));
+        return None;
+    };
+    let mut parsed = Vec::new();
+    for (idx, group) in groups.iter().enumerate() {
+        if let Some(group) = parse_hook_group(key, idx, group, warn) {
+            parsed.push(group);
+        }
+    }
+    Some(parsed)
+}
+
+fn parse_hook_group<F>(
+    event_key: &str,
+    group_idx: usize,
+    value: &Value,
+    warn: &mut F,
+) -> Option<crate::hooks::HookGroupConfig>
+where
+    F: FnMut(&str),
+{
+    let Some(obj) = value.as_object() else {
+        warn(&format!(
+            "agent.config.json hooks.{event_key}[{group_idx}] ignored: expected object"
+        ));
+        return None;
+    };
+    let matcher = match obj.get("matcher") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            warn(&format!(
+                "agent.config.json hooks.{event_key}[{group_idx}] ignored: matcher must be a string"
+            ));
+            return None;
+        }
+    };
+    let mut hooks = Vec::new();
+    match obj.get("hooks") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for (hook_idx, hook) in items.iter().enumerate() {
+                match serde_json::from_value(hook.clone()) {
+                    Ok(hook) => hooks.push(hook),
+                    Err(e) => warn(&format!(
+                        "agent.config.json hooks.{event_key}[{group_idx}].hooks[{hook_idx}] ignored: {e}"
+                    )),
+                }
+            }
+        }
+        Some(_) => warn(&format!(
+            "agent.config.json hooks.{event_key}[{group_idx}].hooks ignored: expected array"
+        )),
+    }
+    Some(crate::hooks::HookGroupConfig { matcher, hooks })
+}
+
 pub fn load_config() -> AgentConfig {
     let mut config = AgentConfig::default();
     let dotenv = dotenv_values();
 
     let path = Path::new("agent.config.json");
     if path.exists() {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(file) = serde_json::from_str::<FileConfig>(&text) {
-                if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
-                    config.apply_operator_mode(m);
-                }
-                if let Some(b) = file.backend.as_deref().and_then(BackendName::parse) {
-                    config.backend = b;
-                }
-                if let Some(m) = file.model_override {
-                    config.model_override = Some(m);
-                }
-                if let Some(sp) = file.system_prompt {
-                    config.system_prompt = sp;
-                }
-                if let Some(s) = file.max_steps {
-                    config.max_steps = s;
-                }
-                if let Some(d) = file.session_dir {
-                    config.session_dir = d;
-                }
-                if let Some(w) = file.workspace_root {
-                    config.workspace_root = w;
-                }
-                if let Some(o) = file
-                    .outside_workspace
-                    .as_deref()
-                    .and_then(OutsideWorkspace::parse)
-                {
-                    config.outside_workspace = o;
-                }
-                if let Some(a) = file
-                    .approval_policy
-                    .as_deref()
-                    .and_then(ApprovalPolicy::parse)
-                {
-                    config.approval_policy = a;
-                }
-                if let Some(t) = file.tools {
-                    let valid: Vec<String> = t.into_iter().filter(|n| is_tool_name(n)).collect();
-                    if !valid.is_empty() {
-                        config.tools = valid;
+        match std::fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str::<FileConfig>(&text) {
+                Ok(file) => {
+                    if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
+                        config.apply_operator_mode(m);
+                    }
+                    if let Some(b) = file.backend.as_deref().and_then(BackendName::parse) {
+                        config.backend = b;
+                    }
+                    if let Some(m) = file.model_override {
+                        config.model_override = Some(m);
+                    }
+                    if let Some(sp) = file.system_prompt {
+                        config.system_prompt = sp;
+                    }
+                    if let Some(s) = file.max_steps {
+                        config.max_steps = s;
+                    }
+                    if let Some(d) = file.session_dir {
+                        config.session_dir = d;
+                    }
+                    if let Some(w) = file.workspace_root {
+                        config.workspace_root = w;
+                    }
+                    if let Some(o) = file
+                        .outside_workspace
+                        .as_deref()
+                        .and_then(OutsideWorkspace::parse)
+                    {
+                        config.outside_workspace = o;
+                    }
+                    if let Some(a) = file
+                        .approval_policy
+                        .as_deref()
+                        .and_then(ApprovalPolicy::parse)
+                    {
+                        config.approval_policy = a;
+                    }
+                    if let Some(t) = file.tools {
+                        let valid: Vec<String> =
+                            t.into_iter().filter(|n| is_tool_name(n)).collect();
+                        if !valid.is_empty() {
+                            config.tools = valid;
+                        }
+                    }
+                    if let Some(s) = file
+                        .tool_selection
+                        .as_deref()
+                        .and_then(ToolSelection::parse)
+                    {
+                        config.tool_selection = s;
+                    }
+                    if let Some(d) = file.display {
+                        config.display = d;
+                    }
+                    if let Some(s) = file.scorecard {
+                        config.scorecard = s;
+                    }
+                    if let Some(sc) = file.slash_commands {
+                        config.slash_commands = sc;
+                    }
+                    if let Some(c) = file.context {
+                        config.context = c;
+                    }
+                    if let Some(h) = file.history {
+                        config.history = h;
+                    }
+                    if let Some(p) = file.project_memory {
+                        config.project_memory = p;
+                    }
+                    if let Some(c) = file.checkpoints {
+                        config.checkpoints = c;
+                    }
+                    if let Some(f) = file.fix {
+                        config.fix = f;
+                    }
+                    if let Some(r) = file.rubric {
+                        config.rubric = r;
+                    }
+                    if let Some(i) = file.iterate {
+                        config.iterate = i;
+                    }
+                    if let Some(a) = file.auto {
+                        config.auto = a;
+                    }
+                    if let Some(p) = file.paths {
+                        config.paths = p;
+                    }
+                    if let Some(o) = file.openrouter {
+                        config.openrouter = o;
+                    }
+                    if let Some(m) = file.model_system {
+                        config.model_system = m;
+                    }
+                    if let Some(s) = file.mcp_servers {
+                        config.mcp_servers = s;
+                    }
+                    if let Some(h) = file.hooks {
+                        config.hooks = parse_hooks_config(h, |warning| eprintln!("{warning}"));
+                    }
+                    if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
+                        config.mode = m;
                     }
                 }
-                if let Some(s) = file
-                    .tool_selection
-                    .as_deref()
-                    .and_then(ToolSelection::parse)
-                {
-                    config.tool_selection = s;
-                }
-                if let Some(d) = file.display {
-                    config.display = d;
-                }
-                if let Some(s) = file.scorecard {
-                    config.scorecard = s;
-                }
-                if let Some(sc) = file.slash_commands {
-                    config.slash_commands = sc;
-                }
-                if let Some(c) = file.context {
-                    config.context = c;
-                }
-                if let Some(h) = file.history {
-                    config.history = h;
-                }
-                if let Some(p) = file.project_memory {
-                    config.project_memory = p;
-                }
-                if let Some(c) = file.checkpoints {
-                    config.checkpoints = c;
-                }
-                if let Some(f) = file.fix {
-                    config.fix = f;
-                }
-                if let Some(r) = file.rubric {
-                    config.rubric = r;
-                }
-                if let Some(i) = file.iterate {
-                    config.iterate = i;
-                }
-                if let Some(a) = file.auto {
-                    config.auto = a;
-                }
-                if let Some(p) = file.paths {
-                    config.paths = p;
-                }
-                if let Some(o) = file.openrouter {
-                    config.openrouter = o;
-                }
-                if let Some(m) = file.model_system {
-                    config.model_system = m;
-                }
-                if let Some(s) = file.mcp_servers {
-                    config.mcp_servers = s;
-                }
-                if let Some(m) = file.mode.as_deref().and_then(OperatorMode::parse) {
-                    config.mode = m;
-                }
-            }
+                Err(e) => eprintln!("{} ignored: failed to parse config: {e}", path.display()),
+            },
+            Err(e) => eprintln!("{} ignored: failed to read config: {e}", path.display()),
         }
     }
 
@@ -1176,5 +1338,199 @@ mod tests {
             stack.security_reviewer.as_ref().map(|m| m.model.as_str()),
             Some("openrouter/fusion")
         );
+    }
+
+    #[test]
+    fn parses_hooks_config() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "matcher": "shell",
+                    "hooks": [
+                      {
+                        "type": "command",
+                        "command": "$HOME/bin/check",
+                        "timeoutSec": 5
+                      }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let hooks: crate::hooks::HookConfig = serde_json::from_value(file.hooks.unwrap()).unwrap();
+        let groups = hooks.groups_for(crate::hooks::HookEventName::PreToolUse);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].matcher.as_deref(), Some("shell"));
+        assert_eq!(groups[0].hooks[0].command, "$HOME/bin/check");
+        assert_eq!(groups[0].hooks[0].timeout_sec, 5);
+    }
+
+    #[test]
+    fn malformed_hooks_do_not_break_other_file_config() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+              "maxSteps": 7,
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "hooks": [
+                      {
+                        "type": "unknown",
+                        "command": "echo nope"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(file.max_steps, Some(7));
+        assert!(file.hooks.is_some());
+        assert!(serde_json::from_value::<crate::hooks::HookConfig>(file.hooks.unwrap()).is_err());
+    }
+
+    #[test]
+    fn malformed_hook_section_warns_and_keeps_valid_sections() {
+        let mut warnings = Vec::new();
+        let hooks = parse_hooks_config(
+            serde_json::json!({
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "unknown",
+                                "command": "echo nope"
+                            }
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo stop"
+                            }
+                        ]
+                    }
+                ]
+            }),
+            |warning| warnings.push(warning.to_string()),
+        );
+
+        assert!(hooks.groups_for(crate::hooks::HookEventName::PreToolUse)[0]
+            .hooks
+            .is_empty());
+        assert_eq!(
+            hooks.groups_for(crate::hooks::HookEventName::Stop)[0].hooks[0].command,
+            "echo stop"
+        );
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("hooks.PreToolUse[0].hooks[0] ignored")));
+    }
+
+    #[test]
+    fn invalid_top_level_hooks_shape_warns_and_loads_empty_hooks() {
+        let mut warnings = Vec::new();
+        let hooks = parse_hooks_config(serde_json::json!("nope"), |warning| {
+            warnings.push(warning.to_string())
+        });
+
+        assert!(hooks
+            .groups_for(crate::hooks::HookEventName::Stop)
+            .is_empty());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("hooks ignored")));
+    }
+
+    #[test]
+    fn unknown_hook_event_warns_instead_of_silent_ignore() {
+        let mut warnings = Vec::new();
+        let hooks = parse_hooks_config(
+            serde_json::json!({
+                "PreToolUes": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo typo"
+                            }
+                        ]
+                    }
+                ]
+            }),
+            |warning| warnings.push(warning.to_string()),
+        );
+
+        assert!(hooks
+            .groups_for(crate::hooks::HookEventName::PreToolUse)
+            .is_empty());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("unknown hook event")));
+    }
+
+    #[test]
+    fn project_hook_state_warns_and_is_ignored() {
+        let mut warnings = Vec::new();
+        let hooks = parse_hooks_config(
+            serde_json::json!({
+                "state": {
+                    "project:/repo/agent.config.json:PreToolUse:0:0": {
+                        "enabled": true,
+                        "trustedHash": "sha256:abc"
+                    }
+                }
+            }),
+            |warning| warnings.push(warning.to_string()),
+        );
+
+        assert!(hooks
+            .groups_for(crate::hooks::HookEventName::PreToolUse)
+            .is_empty());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("hooks.state ignored")));
+    }
+
+    #[test]
+    fn malformed_hook_in_event_does_not_drop_valid_sibling_hook() {
+        let mut warnings = Vec::new();
+        let hooks = parse_hooks_config(
+            serde_json::json!({
+                "PreToolUse": [
+                    {
+                        "matcher": "shell",
+                        "hooks": [
+                            {
+                                "type": "unknown",
+                                "command": "echo typo"
+                            },
+                            {
+                                "type": "command",
+                                "command": "echo valid"
+                            }
+                        ]
+                    }
+                ]
+            }),
+            |warning| warnings.push(warning.to_string()),
+        );
+
+        let groups = hooks.groups_for(crate::hooks::HookEventName::PreToolUse);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].hooks.len(), 1);
+        assert_eq!(groups[0].hooks[0].command, "echo valid");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("hooks.PreToolUse[0].hooks[0] ignored")));
     }
 }

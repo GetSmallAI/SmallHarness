@@ -13,7 +13,11 @@ use crate::catalog::{format_usd, turn_cost_usd};
 use crate::config::OperatorMode;
 use crate::context_guard::{
     guard_config_from, maybe_auto_compact, merge_system_prompt, rewrite_session_transcript,
-    CompactSessionContext,
+    should_compact, CompactSessionContext,
+};
+use crate::hooks::{
+    dispatch_hook_payload, hook_context_messages, HookEventName, HookInvocationContext, HookNotice,
+    HookOutcome,
 };
 use crate::loader::Loader;
 use crate::model_system::EffortLevel;
@@ -43,6 +47,7 @@ pub struct TurnOptions {
     pub user_prompt: String,
     pub auto_verify_tests: bool,
     pub yolo_approve: bool,
+    pub source: &'static str,
 }
 
 #[allow(dead_code)]
@@ -187,6 +192,119 @@ fn set_system_message(messages: &mut Vec<ChatMessage>, system_prompt: String) ->
     }
 }
 
+fn hook_context_from_state(state: &AppState, source: &str) -> HookInvocationContext {
+    let turn_id = state
+        .trace
+        .lock()
+        .map(|trace| trace.current_turn())
+        .unwrap_or(0);
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| state.workspace_root())
+        .display()
+        .to_string();
+    HookInvocationContext {
+        session_id: state
+            .session_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("session")
+            .to_string(),
+        turn_id,
+        cwd,
+        workspace_root: state.workspace_root().display().to_string(),
+        transcript_path: state.session_path.display().to_string(),
+        events_path: crate::turn_trace::events_path_for_session(&state.session_path)
+            .display()
+            .to_string(),
+        backend: state.backend.name.as_str().into(),
+        model: state.model.clone(),
+        approval_policy: state.config.approval_policy.as_str().into(),
+        source: source.into(),
+    }
+}
+
+fn merge_payload_fields(mut payload: Value, fields: Option<Value>) -> Value {
+    let Some(Value::Object(extra)) = fields else {
+        return payload;
+    };
+    let Some(obj) = payload.as_object_mut() else {
+        return payload;
+    };
+    for (key, value) in extra {
+        obj.insert(key, value);
+    }
+    payload
+}
+
+fn render_hook_notices(renderer: &mut crate::renderer::TuiRenderer, notices: &[HookNotice]) {
+    for notice in notices {
+        renderer.handle(AgentEvent::HookNotice(notice.clone()));
+    }
+}
+
+fn append_hook_contexts(contexts: &mut Vec<String>, event: HookEventName, outcome: &HookOutcome) {
+    contexts.extend(hook_context_messages(event, outcome));
+}
+
+fn queue_hook_context(state: &mut AppState, event: HookEventName, outcome: &HookOutcome) {
+    append_hook_contexts(&mut state.pending_hook_contexts, event, outcome);
+}
+
+pub async fn dispatch_app_hook(
+    state: &mut AppState,
+    event: HookEventName,
+    fields: Option<Value>,
+    matcher_value: Option<&str>,
+) -> HookOutcome {
+    dispatch_app_hook_with_source(state, "interactive", event, fields, matcher_value).await
+}
+
+pub async fn dispatch_app_hook_with_source(
+    state: &mut AppState,
+    source: &str,
+    event: HookEventName,
+    fields: Option<Value>,
+    matcher_value: Option<&str>,
+) -> HookOutcome {
+    let ctx = hook_context_from_state(state, source);
+    let payload = merge_payload_fields(ctx.payload(event).into_value(), fields);
+    let outcome = dispatch_hook_payload(
+        &state.hooks,
+        event,
+        &payload,
+        matcher_value,
+        Some(state.trace.clone()),
+    )
+    .await;
+    render_hook_notices(&mut state.renderer, &outcome.notices);
+    outcome
+}
+
+pub(crate) fn updated_prompt_from_hook_input(value: &Value) -> Option<String> {
+    value.as_str().map(str::to_string).or_else(|| {
+        value
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+pub(crate) fn system_prompt_with_hook_context(
+    mut system_prompt: String,
+    contexts: &[String],
+) -> String {
+    if contexts.is_empty() {
+        return system_prompt;
+    }
+    system_prompt.push_str("\n\nAdditional context from hooks:\n");
+    for context in contexts {
+        system_prompt.push_str("- ");
+        system_prompt.push_str(&crate::hooks::bounded_hook_context_text(context));
+        system_prompt.push('\n');
+    }
+    system_prompt
+}
+
 fn maybe_print_context_pressure(
     state: &AppState,
     system_prompt: &str,
@@ -208,8 +326,9 @@ fn maybe_print_context_pressure(
 }
 
 pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<TurnOutcome> {
-    let trimmed = opts.user_prompt.trim();
-    if trimmed.is_empty() {
+    let hook_source = opts.source;
+    let mut user_prompt = opts.user_prompt.trim().to_string();
+    if user_prompt.is_empty() {
         anyhow::bail!("turn prompt is empty");
     }
 
@@ -218,8 +337,34 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.renderer.set_trace(state.trace_enabled);
 
+    let prompt_hook_outcome = dispatch_app_hook_with_source(
+        state,
+        hook_source,
+        HookEventName::UserPromptSubmit,
+        Some(serde_json::json!({ "prompt": user_prompt.clone() })),
+        None,
+    )
+    .await;
+    if let Some(reason) = prompt_hook_outcome.blocking_reason {
+        anyhow::bail!("UserPromptSubmit hook blocked prompt: {reason}");
+    }
+    if let Some(reason) = prompt_hook_outcome.stop_reason {
+        anyhow::bail!("UserPromptSubmit hook stopped prompt: {reason}");
+    }
+    if let Some(updated) = prompt_hook_outcome
+        .updated_input
+        .as_ref()
+        .and_then(updated_prompt_from_hook_input)
+    {
+        user_prompt = updated.trim().to_string();
+        if user_prompt.is_empty() {
+            anyhow::bail!("UserPromptSubmit hook rewrote prompt to empty");
+        }
+    }
+    let trimmed = user_prompt.as_str();
+
     let active_tool_names = select_tool_names(&state.config, trimmed);
-    let base_system_prompt = append_ship_context(
+    let raw_base_system_prompt = append_ship_context(
         &render_system_prompt_with_memory(
             &state.config,
             &state.backend,
@@ -229,6 +374,15 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         &state.config,
         state.tests_ran_this_session,
     );
+    let mut hook_prompt_contexts = Vec::new();
+    hook_prompt_contexts.extend(state.session_hook_contexts.clone());
+    hook_prompt_contexts.append(&mut state.pending_hook_contexts);
+    hook_prompt_contexts.extend(hook_context_messages(
+        HookEventName::UserPromptSubmit,
+        &prompt_hook_outcome,
+    ));
+    let mut base_system_prompt =
+        system_prompt_with_hook_context(raw_base_system_prompt.clone(), &hook_prompt_contexts);
     let mut system_prompt =
         merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
     if set_system_message(&mut state.messages, system_prompt.clone()) {
@@ -255,46 +409,114 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let _ = save_message(&state.session_path, &user_msg);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let drain_hook_registry = state.hooks.clone();
+    let drain_hook_trace = state.trace.clone();
+    let drain_hook_context = hook_context_from_state(state, hook_source);
+    let agent_hooks = crate::agent::AgentHooks {
+        registry: drain_hook_registry,
+        context: drain_hook_context,
+        trace: drain_hook_trace,
+    };
     let tool_runtime = ToolRuntimeContext {
         trace: state.trace.clone(),
         trace_enabled: state.trace_enabled,
         agent_events: Some(tx.clone()),
+        hooks: Some(agent_hooks.clone()),
     };
     let mut tools = build_tools_for_names(&state.config, &active_tool_names, Some(&tool_runtime));
     tools.extend(state.mcp_tools.iter().cloned());
     let tool_defs = crate::agent::to_openai_tools(&tools);
     maybe_print_context_pressure(state, &system_prompt, &tool_defs);
 
-    let mut compact_ctx = CompactSessionContext {
-        messages: &mut state.messages,
-        system_prompt: &base_system_prompt,
-        tool_defs: &tool_defs,
-        config: &state.config,
-        model: &state.model,
-        is_local: state.backend.is_local,
-        http: &state.http,
-        backend: &state.backend,
-        conversation_summary: state.conversation_summary.as_deref(),
-    };
-    if let Some(notice) = maybe_auto_compact(
-        &mut compact_ctx,
-        &state.session_dir,
-        &mut state.session_path,
-    )
-    .await?
-    {
-        println!("{}", notice.line);
-        if let Some(summary) = notice.conversation_summary {
-            state.conversation_summary = Some(summary);
-        }
-        state.context_guard_notice = Some(
-            notice
-                .line
-                .trim()
-                .trim_start_matches("\x1b[32m✓\x1b[0m \x1b[2m")
-                .trim_end_matches("\x1b[0m")
-                .to_string(),
+    let compact_guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
+    let active_compact_prompt =
+        merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
+    let compact_budget = measure_prompt_budget(&active_compact_prompt, &state.messages, &tool_defs);
+    let auto_compact_due = compact_guard.auto_compact
+        && should_compact(
+            &compact_budget,
+            compact_guard.effective_limit_bytes,
+            compact_guard.compact_threshold,
         );
+    let compact_allowed = if auto_compact_due {
+        let pre_compact = dispatch_app_hook_with_source(
+            state,
+            hook_source,
+            HookEventName::PreCompact,
+            Some(serde_json::json!({
+                "phase": "turn",
+                "message_count": state.messages.len(),
+            })),
+            None,
+        )
+        .await;
+        if let Some(reason) = pre_compact.stop_reason {
+            anyhow::bail!("PreCompact hook stopped turn: {reason}");
+        }
+        hook_prompt_contexts.extend(hook_context_messages(
+            HookEventName::PreCompact,
+            &pre_compact,
+        ));
+        base_system_prompt =
+            system_prompt_with_hook_context(raw_base_system_prompt.clone(), &hook_prompt_contexts);
+        pre_compact.blocking_reason.is_none()
+    } else {
+        true
+    };
+    if compact_allowed {
+        let mut compact_ctx = CompactSessionContext {
+            messages: &mut state.messages,
+            system_prompt: &base_system_prompt,
+            tool_defs: &tool_defs,
+            config: &state.config,
+            model: &state.model,
+            is_local: state.backend.is_local,
+            http: &state.http,
+            backend: &state.backend,
+            conversation_summary: state.conversation_summary.as_deref(),
+        };
+        if let Some(notice) = maybe_auto_compact(
+            &mut compact_ctx,
+            &state.session_dir,
+            &mut state.session_path,
+        )
+        .await?
+        {
+            println!("{}", notice.line);
+            let summary = notice.conversation_summary.clone();
+            if let Some(summary) = notice.conversation_summary {
+                state.conversation_summary = Some(summary);
+            }
+            state.context_guard_notice = Some(
+                notice
+                    .line
+                    .trim()
+                    .trim_start_matches("\x1b[32m✓\x1b[0m \x1b[2m")
+                    .trim_end_matches("\x1b[0m")
+                    .to_string(),
+            );
+            let post_compact = dispatch_app_hook_with_source(
+                state,
+                hook_source,
+                HookEventName::PostCompact,
+                Some(serde_json::json!({
+                    "phase": "turn",
+                    "notice": notice.line,
+                    "conversation_summary": summary,
+                    "message_count": state.messages.len(),
+                })),
+                None,
+            )
+            .await;
+            hook_prompt_contexts.extend(hook_context_messages(
+                HookEventName::PostCompact,
+                &post_compact,
+            ));
+            base_system_prompt = system_prompt_with_hook_context(
+                raw_base_system_prompt.clone(),
+                &hook_prompt_contexts,
+            );
+        }
     }
     system_prompt = merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
     if let Some(ChatMessage::System { content }) = state.messages.first_mut() {
@@ -421,6 +643,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             turn_capturer.as_mut(),
             Some(trace),
             0,
+            Some(agent_hooks),
         )
         .await
     };
@@ -503,6 +726,20 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             let _ = save_message(&state.session_path, message);
         }
     }
+    let stop_outcome = dispatch_app_hook_with_source(
+        state,
+        hook_source,
+        HookEventName::Stop,
+        Some(serde_json::json!({
+            "metrics": metrics.clone(),
+            "input_tokens": res.input_tokens,
+            "output_tokens": res.output_tokens,
+            "hit_step_limit": res.hit_step_limit,
+        })),
+        None,
+    )
+    .await;
+    queue_hook_context(state, HookEventName::Stop, &stop_outcome);
     state.total_in += res.input_tokens;
     state.total_out += res.output_tokens;
     if let Err(e) = crate::scorecard::record_turn(crate::scorecard::TurnRecordInput {
@@ -689,5 +926,70 @@ mod cost_tests {
         let s = format_timing_suffix(&metrics);
         assert!(s.contains("3 steps"));
         assert!(s.contains("model"));
+    }
+
+    #[test]
+    fn updated_prompt_accepts_string_or_prompt_field() {
+        assert_eq!(
+            updated_prompt_from_hook_input(&serde_json::json!("rewritten")),
+            Some("rewritten".to_string())
+        );
+        assert_eq!(
+            updated_prompt_from_hook_input(&serde_json::json!({ "prompt": "rewritten again" })),
+            Some("rewritten again".to_string())
+        );
+        assert_eq!(
+            updated_prompt_from_hook_input(&serde_json::json!({ "other": "ignored" })),
+            None
+        );
+    }
+
+    #[test]
+    fn hook_context_is_appended_to_system_prompt() {
+        let merged = system_prompt_with_hook_context(
+            "base prompt".to_string(),
+            &["first".to_string(), "second".to_string()],
+        );
+        assert!(merged.starts_with("base prompt"));
+        assert!(merged.contains("Additional context from hooks:"));
+        assert!(merged.contains("first"));
+        assert!(merged.contains("second"));
+        assert_eq!(
+            system_prompt_with_hook_context("base prompt".to_string(), &[]),
+            "base prompt"
+        );
+    }
+
+    #[test]
+    fn hook_context_in_system_prompt_is_redacted_and_bounded() {
+        let secret = "sk-secret123456789";
+        let merged = system_prompt_with_hook_context(
+            "base prompt".to_string(),
+            &[format!("{secret} {}", "x".repeat(20_000))],
+        );
+
+        assert!(!merged.contains(secret));
+        assert!(merged.contains("(redacted)"));
+        assert!(merged.contains("[truncated]"));
+        assert!(merged.len() < 10_000);
+    }
+
+    #[test]
+    fn stop_hook_context_can_be_queued_for_next_prompt() {
+        let mut outcome = HookOutcome::default();
+        outcome.additional_context.push("remember this".into());
+        outcome.notices.push(crate::hooks::HookNotice {
+            event: HookEventName::Stop,
+            hook_key: Some("managed:test:Stop:0:0".into()),
+            level: crate::hooks::HookNoticeLevel::Feedback,
+            message: "next turn feedback".into(),
+        });
+
+        let mut contexts = Vec::new();
+        append_hook_contexts(&mut contexts, HookEventName::Stop, &outcome);
+        let prompt = system_prompt_with_hook_context("base prompt".to_string(), &contexts);
+
+        assert!(prompt.contains("Stop hook additional context: remember this"));
+        assert!(prompt.contains("Stop hook feedback: next turn feedback"));
     }
 }

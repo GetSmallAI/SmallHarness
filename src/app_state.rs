@@ -5,6 +5,7 @@ use crate::agent_eval::AgentEvalCheckResult;
 use crate::approval::ApprovalCache;
 use crate::backends::{default_model, validate, BackendDescriptor};
 use crate::config::AgentConfig;
+use crate::hooks::HookRegistry;
 use crate::model_system::EffortLevel;
 use crate::openai::ChatMessage;
 use crate::renderer::TuiRenderer;
@@ -70,6 +71,15 @@ pub struct AppState {
     pub last_play_scorecard: Option<PlayScorecard>,
     pub approval_cache: ApprovalCache,
     pub renderer: TuiRenderer,
+    pub hooks: HookRegistry,
+    /// Hook context that should be visible for the active session, such as
+    /// SessionStart feedback. This is merged into each turn's system prompt
+    /// without being persisted as transcript messages.
+    pub session_hook_contexts: Vec<String>,
+    /// Hook context queued for the next turn only. Stop hooks use this to
+    /// hand feedback to the next model call without unbounded transcript
+    /// growth across looped runs.
+    pub pending_hook_contexts: Vec<String>,
     pub warmed_fingerprint: Option<u64>,
     pub tests_ran_this_session: bool,
     /// Image attachments staged via `/image <path>` that will be folded into

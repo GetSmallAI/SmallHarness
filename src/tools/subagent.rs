@@ -87,6 +87,7 @@ impl SubagentTool {
             .map(|r| r.trace_enabled)
             .unwrap_or(false);
         let event_tx = self.runtime.as_ref().and_then(|r| r.agent_events.clone());
+        let hooks = self.runtime.as_ref().and_then(|r| r.hooks.clone());
         let call_id = format!(
             "subagent-{}",
             args.task.chars().take(24).collect::<String>()
@@ -123,6 +124,7 @@ impl SubagentTool {
             None, // no checkpoint capturer
             trace.clone(),
             SUBAGENT_DEPTH,
+            hooks,
         )
         .await;
 
