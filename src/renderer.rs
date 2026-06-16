@@ -375,7 +375,9 @@ impl TuiRenderer {
                 ..
             } => self.render_compaction_notice(&name, &summary, depth),
             AgentEvent::Reasoning { delta } => {
-                self.end_answer();
+                if self.display.reasoning {
+                    self.end_answer();
+                }
                 self.render_reasoning(&delta)
             }
             AgentEvent::ContextCompacted { notice, .. } => {
@@ -812,6 +814,24 @@ mod tests {
 mod verbose_tests {
     use super::*;
     use crate::config::{DisplayConfig, ToolDisplay};
+
+    #[test]
+    fn hidden_reasoning_does_not_close_streaming_answer() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+        assert!(!r.reasoning_enabled());
+
+        r.handle(crate::agent::AgentEvent::Text {
+            delta: "Hel".into(),
+        });
+        assert!(r.answer_wrap.is_some());
+
+        r.handle(crate::agent::AgentEvent::Reasoning {
+            delta: "thinking".into(),
+        });
+
+        assert!(r.answer_wrap.is_some());
+        r.end_turn();
+    }
 
     #[test]
     fn verbose_toggle_restores_configured_display() {
