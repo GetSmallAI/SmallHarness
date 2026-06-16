@@ -131,75 +131,51 @@ pub async fn run_command_hook(handler: &HookCommandConfig, payload: &Value) -> H
     let mut read_stderr = tokio::spawn(read_to_limited_buffer(stderr, stderr_buf.clone()));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(handler.timeout_sec.max(1));
-    let timeout = tokio::time::sleep_until(deadline);
-    tokio::pin!(timeout);
-
-    let wait = tokio::select! {
-        status = child.wait() => Some(status),
-        _ = &mut timeout => None,
-    };
-    let mut exit_code = match &wait {
-        Some(Ok(status)) => Some(status.code().unwrap_or(1)),
-        Some(Err(_)) => None,
-        None => {
-            write_stdin.abort();
-            terminate_child_tree(&mut child, child_group).await;
-            let _ = wait_task_or_abort(&mut read_stdout, HOOK_CLEANUP_GRACE).await;
-            let _ = wait_task_or_abort(&mut read_stderr, HOOK_CLEANUP_GRACE).await;
-            None
-        }
-    };
-    let mut timed_out = wait.is_none();
-    let mut failure = if timed_out {
-        Some(HookRunFailure::Timeout)
-    } else if wait.as_ref().is_some_and(Result::is_err) {
-        Some(HookRunFailure::Wait)
-    } else {
-        None
-    };
-    if !timed_out
-        && tokio::select! {
-            result = &mut write_stdin => Some(result),
-            _ = &mut timeout => None,
-        }
-        .is_none()
+    let mut exit_code = None;
+    let mut timed_out = false;
+    let mut failure = None;
+    if tokio::time::timeout_at(deadline, &mut write_stdin)
+        .await
+        .is_err()
     {
         timed_out = true;
-        exit_code = None;
         failure = Some(HookRunFailure::Timeout);
         write_stdin.abort();
-        kill_hook_process_group(child_group);
+        exit_code = terminate_child_tree(&mut child, child_group).await;
         let _ = wait_task_or_abort(&mut read_stdout, HOOK_CLEANUP_GRACE).await;
         let _ = wait_task_or_abort(&mut read_stderr, HOOK_CLEANUP_GRACE).await;
     }
     if !timed_out {
-        match tokio::select! {
-            result = &mut read_stdout => Some(result),
-            _ = &mut timeout => None,
-        } {
-            Some(_) => {}
-            None => {
+        match tokio::time::timeout_at(deadline, &mut read_stdout).await {
+            Ok(_) => {}
+            Err(_) => {
                 timed_out = true;
-                exit_code = None;
                 failure = Some(HookRunFailure::Timeout);
-                kill_hook_process_group(child_group);
                 read_stdout.abort();
+                exit_code = terminate_child_tree(&mut child, child_group).await;
                 let _ = wait_task_or_abort(&mut read_stderr, HOOK_CLEANUP_GRACE).await;
             }
         }
     }
     if !timed_out {
-        match tokio::select! {
-            result = &mut read_stderr => Some(result),
-            _ = &mut timeout => None,
-        } {
-            Some(_) => {}
-            None => {
+        match tokio::time::timeout_at(deadline, &mut read_stderr).await {
+            Ok(_) => {}
+            Err(_) => {
                 timed_out = true;
-                exit_code = None;
                 failure = Some(HookRunFailure::Timeout);
-                kill_hook_process_group(child_group);
                 read_stderr.abort();
+                exit_code = terminate_child_tree(&mut child, child_group).await;
+            }
+        }
+    }
+    if !timed_out {
+        match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(Ok(status)) => exit_code = Some(status.code().unwrap_or(1)),
+            Ok(Err(_)) => failure = Some(HookRunFailure::Wait),
+            Err(_) => {
+                timed_out = true;
+                failure = Some(HookRunFailure::Timeout);
+                exit_code = terminate_child_tree(&mut child, child_group).await;
             }
         }
     }
@@ -294,7 +270,7 @@ where
 }
 
 async fn pipe_failure(start: Instant, mut child: Child, child_group: Option<u32>) -> HookRunResult {
-    terminate_child_tree(&mut child, child_group).await;
+    let _ = terminate_child_tree(&mut child, child_group).await;
     HookRunResult {
         exit_code: None,
         timed_out: false,
@@ -309,10 +285,14 @@ async fn pipe_failure(start: Instant, mut child: Child, child_group: Option<u32>
     }
 }
 
-async fn terminate_child_tree(child: &mut Child, child_group: Option<u32>) {
+async fn terminate_child_tree(child: &mut Child, child_group: Option<u32>) -> Option<i32> {
     kill_hook_process_group(child_group);
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(HOOK_CLEANUP_GRACE, child.wait()).await;
+    tokio::time::timeout(HOOK_CLEANUP_GRACE, child.wait())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|status| status.code())
 }
 
 async fn wait_task_or_abort<T>(

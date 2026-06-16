@@ -513,7 +513,7 @@ mod tests {
         .expect("hook reader handles should be bounded by the hook timeout");
 
         assert!(result.timed_out);
-        assert_eq!(result.exit_code, None);
+        assert_eq!(result.exit_code, Some(0));
     }
 
     #[cfg(unix)]
@@ -573,6 +573,30 @@ mod tests {
         assert!(result.timed_out);
         assert_eq!(result.effect.decision, Some(HookDecision::Block));
         assert_eq!(result.effect.reason.as_deref(), Some("already blocked"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_runner_preserves_exit_two_before_inherited_stdout_timeout() {
+        let handler = HookCommandConfig {
+            command: "sleep 5 & exit 2".into(),
+            timeout_sec: 1,
+            command_windows: None,
+            status_message: None,
+            async_handler: false,
+        };
+        let payload = HookPayload::new(HookEventName::PreToolUse, "s1").into_value();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            run_command_hook(&handler, &payload),
+        )
+        .await
+        .expect("hook runner should return at the hook timeout");
+
+        assert!(result.timed_out);
+        assert_eq!(result.exit_code, Some(2));
+        assert_eq!(result.effect.decision, Some(HookDecision::Block));
     }
 
     #[test]

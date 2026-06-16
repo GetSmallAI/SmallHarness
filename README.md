@@ -649,8 +649,10 @@ Hook events include `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PlanUpdated`, `SubagentStart`, `SubagentStop`, `Stop`, and `SessionEnd`.
 Payloads include common fields such as `hook_event_name`, `session_id`,
 `turn_id`, `cwd`, `workspace_root`, `transcript_path`, `events_path`, `backend`,
-`model`, and `approval_policy`, plus event-specific fields like `tool_name`,
-`tool_input`, `tool_response`, and `progress`.
+`model`, `approval_policy`, and `source`, plus event-specific fields like
+`tool_name`, `tool_input`, `tool_response`, and `progress`. `source` is
+`interactive`, `one-shot`, `auto`, `fix`, `iterate`, or `play` depending on
+what started the turn.
 
 Hook payload stdin is raw and unredacted so trusted hooks can make decisions on
 the actual prompt/tool data; do not log it unless your hook performs its own
