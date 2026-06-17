@@ -142,6 +142,8 @@ Useful commands:
 /ship push
 /ship pr
 /ship status
+/scorecard    show global quality PRs shipped
+/scorecard close "OAuth login PR"
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions
 /fusion tool  attach Fusion deliberation to an OpenRouter coding model

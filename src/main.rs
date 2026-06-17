@@ -36,6 +36,7 @@ mod prompt_library;
 mod recommend;
 mod renderer;
 mod rubric;
+mod scorecard;
 mod session;
 mod session_paths;
 mod session_turn;

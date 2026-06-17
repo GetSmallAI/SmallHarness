@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Global quality PR scorecard.** `/scorecard` now rewards well-verified PRs
+  instead of the lowest-token PRs. Small Harness still records successful
+  interactive turn token usage globally, but `/ship pr` closes the current
+  repo/branch with a quality snapshot from local ship readiness, test evidence,
+  and PR creation state. The default scorecard reports quality PRs shipped,
+  quality rate, average quality score, clean ships, follow-up count, and tokens
+  per quality PR.
+
 ## [1.0.1] - 2026-06-15
 
 ### Added

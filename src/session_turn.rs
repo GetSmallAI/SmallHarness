@@ -505,6 +505,14 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.total_in += res.input_tokens;
     state.total_out += res.output_tokens;
+    let _ = crate::scorecard::record_turn(crate::scorecard::TurnRecordInput {
+        workspace_root: &state.config.workspace_root,
+        session_path: &state.session_path,
+        backend: state.config.backend.as_str(),
+        model: &state.model,
+        input_tokens: res.input_tokens,
+        output_tokens: res.output_tokens,
+    });
     let turn_cost = res.reported_cost_usd.or_else(|| {
         turn_cost_usd(
             state.config.backend,

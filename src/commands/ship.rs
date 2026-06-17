@@ -460,6 +460,14 @@ async fn run_ship_pr(
             "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
             record_path.display()
         );
+        let quality = scorecard_quality_from_ship_pr(&readiness, &snapshot, false, false);
+        super::scorecard::close_scorecard_pr(
+            state,
+            &title,
+            None,
+            "manual command printed",
+            Some(quality),
+        )?;
         return Ok(());
     }
 
@@ -495,6 +503,8 @@ async fn run_ship_pr(
         "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
         record_path.display()
     );
+    let quality = scorecard_quality_from_ship_pr(&readiness, &snapshot, true, url.is_some());
+    super::scorecard::close_scorecard_pr(state, &title, url.as_deref(), "created", Some(quality))?;
     Ok(())
 }
 
@@ -1715,6 +1725,35 @@ fn evaluate_ship_pr_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) 
         status,
         blockers,
         warnings,
+    }
+}
+
+fn scorecard_quality_from_ship_pr<'a>(
+    readiness: &'a ShipReadiness,
+    snapshot: &'a ShipcheckSnapshot,
+    opened_by_gh: bool,
+    has_pr_url: bool,
+) -> crate::scorecard::PrQualityInput<'a> {
+    let score_readiness = match readiness.status {
+        ShipReadinessStatus::Ready => crate::scorecard::PrQualityReadiness::Ready,
+        ShipReadinessStatus::NeedsReview => crate::scorecard::PrQualityReadiness::NeedsReview,
+        ShipReadinessStatus::Blocked => crate::scorecard::PrQualityReadiness::Blocked,
+    };
+    let tests = match &snapshot.test_status {
+        Some(tests) if tests.failed == 0 && tests.exit_code == 0 && tests.error.is_none() => {
+            crate::scorecard::PrQualityTestStatus::Passed
+        }
+        Some(_) => crate::scorecard::PrQualityTestStatus::Failed,
+        None => crate::scorecard::PrQualityTestStatus::NotRun,
+    };
+
+    crate::scorecard::PrQualityInput {
+        readiness: score_readiness,
+        blockers: &readiness.blockers,
+        warnings: &readiness.warnings,
+        tests,
+        opened_by_gh,
+        has_pr_url,
     }
 }
 

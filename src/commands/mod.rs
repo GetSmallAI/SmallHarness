@@ -85,6 +85,7 @@ mod context_cmds;
 mod doctor;
 mod memory;
 mod route;
+mod scorecard;
 mod session;
 mod ship;
 mod workflow;
@@ -140,6 +141,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Expand a short intent into a product spec; /plan validate checks its Done Criteria against the diff",
     ),
     ("/session", "Show session info and token usage"),
+    (
+        "/scorecard",
+        "Show global quality PRs shipped and close PR units",
+    ),
     ("/sessions", "List saved sessions"),
     ("/resume", "Resume latest or named session"),
     ("/export", "Export a session to markdown or json"),
@@ -260,6 +265,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/handoff" => cmd_handoff(&args, state).await?,
         "/plan" => cmd_plan(&args, state).await?,
         "/session" => session::cmd_session(&args, state)?,
+        "/scorecard" => scorecard::cmd_scorecard(&args, state)?,
         "/sessions" => session::cmd_sessions(&args, state)?,
         "/resume" => session::cmd_resume(&args, state)?,
         "/export" => session::cmd_export(&args, state)?,
