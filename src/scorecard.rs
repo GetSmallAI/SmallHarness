@@ -81,6 +81,8 @@ pub struct ScorecardQuality {
     pub counts: bool,
     pub status: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<String>,
@@ -171,6 +173,39 @@ pub struct ScorecardReport {
     pub current_streak: usize,
     pub longest_streak: usize,
     pub today: NaiveDate,
+    pub diagnostics: Option<ScorecardStoreDiagnostics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedScorecardLine {
+    pub line_number: usize,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardStoreDiagnostics {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub bytes: u64,
+    pub total_lines: usize,
+    pub blank_lines: usize,
+    pub event_count: usize,
+    pub turn_count: usize,
+    pub pr_count: usize,
+    pub malformed_count: usize,
+    pub malformed_lines: Vec<MalformedScorecardLine>,
+}
+
+#[derive(Debug, Clone)]
+struct ScorecardRead {
+    events: Vec<ScorecardEvent>,
+    diagnostics: ScorecardStoreDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardResetSummary {
+    pub path: PathBuf,
+    pub backup_path: Option<PathBuf>,
 }
 
 pub fn scorecard_path() -> Option<PathBuf> {
@@ -234,15 +269,19 @@ pub fn close_pr_for_workspace(input: PrCloseInput<'_>) -> Result<Option<PrCloseS
 
 pub fn load_report(workspace_root: &str) -> Result<ScorecardReport> {
     let path = scorecard_path();
-    let events = match &path {
-        Some(path) => read_events(path)?,
-        None => Vec::new(),
+    let (events, diagnostics) = match &path {
+        Some(path) => {
+            let read = read_events_with_diagnostics(path)?;
+            (read.events, Some(read.diagnostics))
+        }
+        None => (Vec::new(), None),
     };
     Ok(build_report(
         path,
         &events,
         current_work_unit(workspace_root),
         Utc::now().date_naive(),
+        diagnostics,
     ))
 }
 
@@ -270,14 +309,38 @@ pub fn recent_pr_by_index(index: usize) -> Result<Option<ScorecardPr>> {
     Ok(prs.get(index - 1).cloned())
 }
 
-pub fn reset_store() -> Result<Option<PathBuf>> {
+pub fn scorecard_diagnostics() -> Result<Option<ScorecardStoreDiagnostics>> {
     let Some(path) = scorecard_path() else {
         return Ok(None);
     };
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    Ok(Some(read_events_with_diagnostics(&path)?.diagnostics))
+}
+
+pub fn export_store(target: Option<&Path>) -> Result<Option<PathBuf>> {
+    let Some(path) = scorecard_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
     }
-    Ok(Some(path))
+    let out_path = target
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_export_path_for(&path));
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+    }
+    fs::copy(&path, &out_path)
+        .with_context(|| format!("copying {} to {}", path.display(), out_path.display()))?;
+    Ok(Some(out_path))
+}
+
+pub fn reset_store() -> Result<Option<ScorecardResetSummary>> {
+    let Some(path) = scorecard_path() else {
+        return Ok(None);
+    };
+    Ok(Some(reset_store_at_path(&path)?))
 }
 
 pub fn render_report(report: &ScorecardReport) -> String {
@@ -300,6 +363,14 @@ pub fn render_report(report: &ScorecardReport) -> String {
             path.display()
         )),
         None => out.push_str(&format!("  {DIM}store{RESET}           unavailable\n")),
+    }
+    if let Some(diagnostics) = report.diagnostics.as_ref() {
+        if diagnostics.malformed_count > 0 {
+            out.push_str(&format!(
+                "  {YELLOW}!{RESET} {DIM}store warning{RESET}  skipped {} malformed line(s); run /scorecard doctor\n",
+                diagnostics.malformed_count
+            ));
+        }
     }
     out.push('\n');
     out.push_str(&format!(
@@ -368,6 +439,57 @@ pub fn render_report(report: &ScorecardReport) -> String {
             "\n  {DIM}Daily grid shows quality PRs shipped. Tokens are context, not the score.{RESET}\n"
         ));
         out.push_str(&format!("  {DIM}recent detail → /scorecard pr 1{RESET}\n"));
+    }
+    out
+}
+
+pub fn render_diagnostics(diagnostics: &ScorecardStoreDiagnostics) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("  {DIM}scorecard doctor{RESET}\n"));
+    out.push_str(&format!(
+        "  {DIM}store{RESET}           {}\n",
+        diagnostics.path.display()
+    ));
+    out.push_str(&format!(
+        "  {DIM}exists{RESET}          {}\n",
+        if diagnostics.exists { "yes" } else { "no" }
+    ));
+    out.push_str(&format!(
+        "  {DIM}size{RESET}            {} byte(s)\n",
+        diagnostics.bytes
+    ));
+    out.push_str(&format!(
+        "  {DIM}lines{RESET}           {} total · {} blank · {} malformed\n",
+        diagnostics.total_lines, diagnostics.blank_lines, diagnostics.malformed_count
+    ));
+    out.push_str(&format!(
+        "  {DIM}events{RESET}          {} valid · {} turn(s) · {} PR close(s)\n",
+        diagnostics.event_count, diagnostics.turn_count, diagnostics.pr_count
+    ));
+    if diagnostics.malformed_count == 0 {
+        out.push_str(&format!(
+            "  {GREEN}✓{RESET} {DIM}scorecard store is readable{RESET}\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "  {YELLOW}!{RESET} {DIM}malformed lines were skipped while reading the scorecard store{RESET}\n"
+        ));
+        for line in &diagnostics.malformed_lines {
+            out.push_str(&format!(
+                "    {YELLOW}!{RESET} line {}: {}\n",
+                line.line_number,
+                one_line(&line.error, 96)
+            ));
+        }
+        if diagnostics.malformed_count > diagnostics.malformed_lines.len() {
+            out.push_str(&format!(
+                "    {DIM}... {} more malformed line(s){RESET}\n",
+                diagnostics.malformed_count - diagnostics.malformed_lines.len()
+            ));
+        }
+        out.push_str(&format!(
+            "  {DIM}export a copy before manual repair → /scorecard export{RESET}\n"
+        ));
     }
     out
 }
@@ -442,6 +564,12 @@ pub fn render_pr_detail(pr: &ScorecardPr, index: usize) -> String {
             out.push_str(&format!("  {DIM}evidence{RESET}\n"));
             for item in &quality.evidence {
                 out.push_str(&format!("    {GREEN}·{RESET} {item}\n"));
+            }
+        }
+        if !quality.reasons.is_empty() {
+            out.push_str(&format!("  {DIM}why not counted{RESET}\n"));
+            for item in &quality.reasons {
+                out.push_str(&format!("    {YELLOW}!{RESET} {item}\n"));
             }
         }
         if !quality.blockers.is_empty() {
@@ -523,6 +651,9 @@ fn render_pr_evidence_line(pr: &ScorecardPr) -> String {
     if let Some(quality) = pr.quality.as_ref() {
         if !quality.evidence.is_empty() {
             parts.push(quality.evidence.join(" · "));
+        }
+        if !quality.counts && !quality.reasons.is_empty() {
+            parts.push(format!("not counted: {}", quality.reasons.join(" · ")));
         }
     }
     parts.join(" · ")
@@ -606,6 +737,7 @@ fn build_report(
     events: &[ScorecardEvent],
     current_unit: WorkUnit,
     today: NaiveDate,
+    diagnostics: Option<ScorecardStoreDiagnostics>,
 ) -> ScorecardReport {
     let mut lifetime_tokens = 0_u64;
     let mut turn_count = 0_usize;
@@ -657,6 +789,7 @@ fn build_report(
         current_streak,
         longest_streak,
         today,
+        diagnostics,
     }
 }
 
@@ -870,6 +1003,23 @@ fn assess_pr_quality(input: PrQualityInput, quality_threshold: u8) -> ScorecardQ
         && input.readiness != PrQualityReadiness::Blocked
         && input.tests == PrQualityTestStatus::Passed
         && has_pr_evidence;
+    let mut reasons = Vec::new();
+    if score < quality_threshold {
+        reasons.push(format!(
+            "score {score}/100 is below quality threshold {quality_threshold}/100"
+        ));
+    }
+    if input.readiness == PrQualityReadiness::Blocked {
+        reasons.push("ship readiness is blocked".to_string());
+    }
+    match input.tests {
+        PrQualityTestStatus::Passed => {}
+        PrQualityTestStatus::Failed => reasons.push("tests failed".to_string()),
+        PrQualityTestStatus::NotRun => reasons.push("tests were not run".to_string()),
+    }
+    if !has_pr_evidence {
+        reasons.push("no PR URL or successful PR command was captured".to_string());
+    }
     let status = if counts {
         "quality"
     } else if input.readiness == PrQualityReadiness::Blocked {
@@ -883,6 +1033,7 @@ fn assess_pr_quality(input: PrQualityInput, quality_threshold: u8) -> ScorecardQ
         grade: grade_for_score(score).to_string(),
         counts,
         status: status.to_string(),
+        reasons,
         evidence,
         blockers: input.blockers,
         warnings: input.warnings,
@@ -905,22 +1056,104 @@ fn append_event(path: &Path, event: &ScorecardEvent) -> Result<()> {
 }
 
 fn read_events(path: &Path) -> Result<Vec<ScorecardEvent>> {
+    Ok(read_events_with_diagnostics(path)?.events)
+}
+
+fn read_events_with_diagnostics(path: &Path) -> Result<ScorecardRead> {
+    const MAX_MALFORMED_LINES: usize = 5;
+    let metadata = fs::metadata(path).ok();
+    let mut diagnostics = ScorecardStoreDiagnostics {
+        path: path.to_path_buf(),
+        exists: metadata.is_some(),
+        bytes: metadata.map(|m| m.len()).unwrap_or(0),
+        total_lines: 0,
+        blank_lines: 0,
+        event_count: 0,
+        turn_count: 0,
+        pr_count: 0,
+        malformed_count: 0,
+        malformed_lines: Vec::new(),
+    };
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(ScorecardRead {
+            events: Vec::new(),
+            diagnostics,
+        });
     }
     let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
-    for line in reader.lines() {
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        diagnostics.total_lines += 1;
         let line = line?;
         if line.trim().is_empty() {
+            diagnostics.blank_lines += 1;
             continue;
         }
-        if let Ok(event) = serde_json::from_str::<ScorecardEvent>(&line) {
-            events.push(event);
+        match serde_json::from_str::<ScorecardEvent>(&line) {
+            Ok(event) => {
+                diagnostics.event_count += 1;
+                match &event {
+                    ScorecardEvent::Turn(_) => diagnostics.turn_count += 1,
+                    ScorecardEvent::Pr(_) => diagnostics.pr_count += 1,
+                }
+                events.push(event);
+            }
+            Err(error) => {
+                diagnostics.malformed_count += 1;
+                if diagnostics.malformed_lines.len() < MAX_MALFORMED_LINES {
+                    diagnostics.malformed_lines.push(MalformedScorecardLine {
+                        line_number,
+                        error: error.to_string(),
+                    });
+                }
+            }
         }
     }
-    Ok(events)
+    Ok(ScorecardRead {
+        events,
+        diagnostics,
+    })
+}
+
+fn reset_store_at_path(path: &Path) -> Result<ScorecardResetSummary> {
+    let backup_path = if path.exists() {
+        let backup = backup_path_for(path, "reset");
+        if let Some(parent) = backup.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::copy(path, &backup)
+            .with_context(|| format!("backing up {} to {}", path.display(), backup.display()))?;
+        fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        Some(backup)
+    } else {
+        None
+    };
+    Ok(ScorecardResetSummary {
+        path: path.to_path_buf(),
+        backup_path,
+    })
+}
+
+fn default_export_path_for(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!(
+        "events-{}-export.jsonl",
+        Utc::now().format("%Y%m%dT%H%M%S%3fZ")
+    ))
+}
+
+fn backup_path_for(path: &Path, reason: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("events");
+    parent.join(format!(
+        "{stem}-{}-{reason}.backup.jsonl",
+        Utc::now().format("%Y%m%dT%H%M%S%3fZ")
+    ))
 }
 
 fn current_work_unit(workspace_root: &str) -> WorkUnit {
@@ -1096,7 +1329,7 @@ fn average_quality_score(prs: &[ScorecardPr]) -> Option<u8> {
         count += 1;
         total += quality.score as u64;
     }
-    (count > 0).then_some((total / count) as u8)
+    total.checked_div(count).map(|score| score as u8)
 }
 
 fn average_tokens_per_quality_pr(prs: &[ScorecardPr]) -> Option<u64> {
@@ -1109,7 +1342,7 @@ fn average_tokens_per_quality_pr(prs: &[ScorecardPr]) -> Option<u64> {
         count += 1;
         total += pr.total_tokens;
     }
-    (count > 0).then_some(total / count)
+    total.checked_div(count)
 }
 
 fn top_quality_pr(prs: &[ScorecardPr]) -> Option<(&ScorecardPr, &ScorecardQuality)> {
@@ -1233,7 +1466,7 @@ fn format_tokens(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     fn ts(day: u32) -> String {
@@ -1297,6 +1530,7 @@ mod tests {
                 grade: grade_for_score(score).into(),
                 counts,
                 status: if counts { "quality" } else { "needsReview" }.into(),
+                reasons: Vec::new(),
                 evidence: vec!["tests passed".into()],
                 blockers: Vec::new(),
                 warnings: Vec::new(),
@@ -1336,6 +1570,7 @@ mod tests {
                 branch: "feature".into(),
             },
             NaiveDate::from_ymd_opt(2026, 6, 11).unwrap(),
+            None,
         );
         let (top, quality) = top_quality_pr(&report.closed_prs).unwrap();
         assert_eq!(top.title, "well tested");
@@ -1401,6 +1636,107 @@ mod tests {
         assert_eq!(quality.grade, "D");
         assert!(!quality.counts);
         assert_eq!(quality.status, "needsReview");
+        assert!(quality
+            .reasons
+            .contains(&"score 65/100 is below quality threshold 80/100".to_string()));
+        assert!(quality.reasons.contains(&"tests were not run".to_string()));
+    }
+
+    #[test]
+    fn read_events_reports_malformed_jsonl_without_dropping_valid_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let valid = serde_json::to_string(&turn(10, 1000, "a")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{valid}\nnot json\n\n{{\"kind\":\"unknown\"}}\n"),
+        )
+        .unwrap();
+
+        let read = read_events_with_diagnostics(&path).unwrap();
+
+        assert_eq!(read.events.len(), 1);
+        assert_eq!(read.diagnostics.total_lines, 4);
+        assert_eq!(read.diagnostics.blank_lines, 1);
+        assert_eq!(read.diagnostics.event_count, 1);
+        assert_eq!(read.diagnostics.turn_count, 1);
+        assert_eq!(read.diagnostics.malformed_count, 2);
+        assert_eq!(read.diagnostics.malformed_lines[0].line_number, 2);
+        assert_eq!(read.diagnostics.malformed_lines[1].line_number, 4);
+    }
+
+    #[test]
+    fn render_report_warns_when_store_has_malformed_lines() {
+        let diagnostics = ScorecardStoreDiagnostics {
+            path: PathBuf::from("/tmp/events.jsonl"),
+            exists: true,
+            bytes: 10,
+            total_lines: 2,
+            blank_lines: 0,
+            event_count: 1,
+            turn_count: 1,
+            pr_count: 0,
+            malformed_count: 1,
+            malformed_lines: vec![MalformedScorecardLine {
+                line_number: 2,
+                error: "expected value".into(),
+            }],
+        };
+        let report = build_report(
+            Some(PathBuf::from("/tmp/events.jsonl")),
+            &[turn(10, 1000, "a")],
+            WorkUnit {
+                repo: "/repo/demo".into(),
+                branch: "feature".into(),
+            },
+            NaiveDate::from_ymd_opt(2026, 6, 11).unwrap(),
+            Some(diagnostics),
+        );
+
+        let rendered = render_report(&report);
+
+        assert!(rendered.contains("store warning"));
+        assert!(rendered.contains("/scorecard doctor"));
+    }
+
+    #[test]
+    fn render_diagnostics_lists_malformed_lines() {
+        let diagnostics = ScorecardStoreDiagnostics {
+            path: PathBuf::from("/tmp/events.jsonl"),
+            exists: true,
+            bytes: 10,
+            total_lines: 2,
+            blank_lines: 0,
+            event_count: 1,
+            turn_count: 1,
+            pr_count: 0,
+            malformed_count: 1,
+            malformed_lines: vec![MalformedScorecardLine {
+                line_number: 2,
+                error: "expected value".into(),
+            }],
+        };
+
+        let rendered = render_diagnostics(&diagnostics);
+
+        assert!(rendered.contains("scorecard doctor"));
+        assert!(rendered.contains("line 2"));
+        assert!(rendered.contains("/scorecard export"));
+    }
+
+    #[test]
+    fn reset_store_at_path_copies_backup_before_removing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "scorecard data\n").unwrap();
+
+        let reset = reset_store_at_path(&path).unwrap();
+
+        assert_eq!(reset.path, path);
+        assert!(!reset.path.exists());
+        let backup = reset.backup_path.expect("backup path");
+        assert!(backup.exists());
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "scorecard data\n");
     }
 
     #[test]
@@ -1524,6 +1860,7 @@ mod tests {
                 grade: "A".into(),
                 counts: true,
                 status: "quality".into(),
+                reasons: Vec::new(),
                 evidence: vec!["tests passed".into()],
                 blockers: Vec::new(),
                 warnings: Vec::new(),
@@ -1550,6 +1887,25 @@ mod tests {
         assert!(rendered.contains("sess-a"));
         assert!(rendered.contains("ship record"));
         assert!(rendered.contains("4 tool(s)"));
+    }
+
+    #[test]
+    fn render_pr_detail_explains_quality_failures() {
+        let pr = match quality_pr(12, 42000, "thin evidence", 65, false) {
+            ScorecardEvent::Pr(mut pr) => {
+                pr.quality.as_mut().unwrap().reasons = vec![
+                    "score 65/100 is below quality threshold 80/100".into(),
+                    "tests were not run".into(),
+                ];
+                pr
+            }
+            _ => unreachable!(),
+        };
+
+        let rendered = render_pr_detail(&pr, 1);
+
+        assert!(rendered.contains("why not counted"));
+        assert!(rendered.contains("tests were not run"));
     }
 
     #[test]

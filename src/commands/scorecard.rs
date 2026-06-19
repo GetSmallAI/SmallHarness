@@ -60,16 +60,42 @@ pub(super) fn cmd_scorecard(args: &str, state: &AppState) -> Result<()> {
                 "  {YELLOW}!{RESET} {DIM}scorecard store unavailable: HOME is unset{RESET}"
             ),
         },
+        "doctor" => match crate::scorecard::scorecard_diagnostics()? {
+            Some(diagnostics) => print!("{}", crate::scorecard::render_diagnostics(&diagnostics)),
+            None => println!(
+                "  {YELLOW}!{RESET} {DIM}scorecard store unavailable: HOME is unset{RESET}"
+            ),
+        },
+        "export" => {
+            let path = parts.next().map(std::path::PathBuf::from);
+            match crate::scorecard::export_store(path.as_deref())? {
+                Some(path) => println!(
+                    "  {GREEN}✓{RESET} {DIM}scorecard exported →{RESET} {}",
+                    path.display()
+                ),
+                None => {
+                    println!("  {YELLOW}!{RESET} {DIM}scorecard store unavailable or empty{RESET}")
+                }
+            }
+        }
         "reset" => {
             if parts.next() != Some("--yes") {
                 println!("  {DIM}Usage: /scorecard reset --yes{RESET}");
                 return Ok(());
             }
             match crate::scorecard::reset_store()? {
-                Some(path) => println!(
-                    "  {GREEN}✓{RESET} {DIM}scorecard reset:{RESET} {}",
-                    path.display()
-                ),
+                Some(summary) => {
+                    println!(
+                        "  {GREEN}✓{RESET} {DIM}scorecard reset:{RESET} {}",
+                        summary.path.display()
+                    );
+                    if let Some(backup) = summary.backup_path {
+                        println!(
+                            "  {GREEN}✓{RESET} {DIM}backup saved →{RESET} {}",
+                            backup.display()
+                        );
+                    }
+                }
                 None => println!(
                     "  {YELLOW}!{RESET} {DIM}scorecard store unavailable: HOME is unset{RESET}"
                 ),
@@ -125,6 +151,14 @@ pub(super) fn close_scorecard_pr(
                 "  {GREEN}✓{RESET} {DIM}scorecard PR closed:{RESET} {quality} · {} tokens · {} turn(s)",
                 summary.pr.total_tokens, summary.pr.turn_count
             );
+            if let Some(quality) = summary.pr.quality.as_ref() {
+                if !quality.counts && !quality.reasons.is_empty() {
+                    println!(
+                        "  {YELLOW}!{RESET} {DIM}not counted:{RESET} {}",
+                        quality.reasons.join(" · ")
+                    );
+                }
+            }
             if !summary.pr.session_ids.is_empty() {
                 println!(
                     "  {DIM}scorecard sessions{RESET}  {}",
@@ -170,7 +204,7 @@ fn parse_scorecard_close_args(args: &[&str]) -> Result<(String, Option<String>, 
 
 fn print_scorecard_usage() {
     println!(
-        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|pr <n>|close <label> [--url <url>] [--tests]|path|reset --yes]{RESET}"
+        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|pr <n>|close <label> [--url <url>] [--tests]|doctor|export [path]|path|reset --yes]{RESET}"
     );
 }
 

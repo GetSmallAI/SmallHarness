@@ -2,6 +2,11 @@
 name = "small-harness"
 version = "1.0.3"
 edition = "2021"
+description = "Terminal-based agent harness for running small LLMs on your Mac"
+license = "MIT"
+repository = "https://github.com/GetSmallAI/SmallHarness"
+homepage = "https://github.com/GetSmallAI/SmallHarness"
+readme = "README.md"
 
 [[bin]]
 name = "small-harness"

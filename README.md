@@ -332,6 +332,8 @@ this exact call`. The session cache resets on `/new`.
 /scorecard prs [limit]            list recent closed PRs (numbered)
 /scorecard pr <n>                 drill into PR quality, sessions, and trace audit
 /scorecard close <label> [--url <url>] [--tests]  close branch with shipcheck quality score
+/scorecard doctor                inspect the local scorecard ledger for malformed JSONL
+/scorecard export [path]          copy the raw scorecard ledger before repair or sharing
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop
@@ -445,7 +447,8 @@ clean ships, PRs needing follow-up, tokens per quality PR, the open branch
 total, and a GitHub-style daily grid. `/scorecard prs` lists numbered recent
 closes with session and ship-record hints; `/scorecard pr <n>` shows the full
 audit captured at close time — quality rubric, per-session turn-trace summaries
-(turns, steps, tool calls, timing), and paths to session event logs.
+(turns, steps, tool calls, timing), paths to session event logs, and explicit
+reasons when a scored PR did not count as quality-shipped.
 
 After enough turns on a feature branch, the turn footer nudges you to close via
 `/ship pr`. Audit snapshots come from local event logs at close time; export raw
@@ -456,7 +459,10 @@ A PR counts as quality-shipped when its local score meets `scorecard.qualityThre
 creation command succeeded or a PR URL was captured with `--url`. Configure via
 `scorecard` in `agent.config.json` or disable with `scorecard.enabled: false`.
 Data is stored locally under the Small Harness data directory; `/scorecard path`
-prints the exact JSONL file.
+prints the exact JSONL file. Use `/scorecard doctor` if the ledger looks wrong;
+malformed JSONL lines are skipped rather than allowed to break the scorecard, and
+`/scorecard export [path]` copies the raw ledger before manual repair. `/scorecard
+reset --yes` now saves a timestamped backup before removing the active store.
 
 **Note:** `/play score` shows playground fixture results — unrelated to this
 global quality PR scorecard.

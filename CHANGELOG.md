@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Scorecard diagnostics.** `/scorecard doctor` inspects the local append-only
+  scorecard ledger, reports valid turns/PRs, and lists skipped malformed JSONL
+  lines. `/scorecard export [path]` copies the raw ledger before repair or
+  sharing.
+
+### Changed
+
+- **Scorecard quality explanations.** Scored PR records now store explicit
+  reasons when they do not count as quality-shipped, and `/scorecard pr <n>`
+  renders those reasons next to the local evidence.
+- **Safer scorecard reset.** `/scorecard reset --yes` now saves a timestamped
+  backup before removing the active scorecard store.
+
 ## [1.0.3] - 2026-06-19
 
 ### Added
