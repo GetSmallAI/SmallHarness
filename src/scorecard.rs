@@ -14,8 +14,8 @@ const YELLOW: &str = crate::theme::WARN;
 const CYAN: &str = "\x1b[36m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const STORE_DIR_ENV: &str = "SMALL_HARNESS_SCORECARD_DIR";
+#[cfg(test)]
 const DEFAULT_QUALITY_PR_THRESHOLD: u8 = 80;
-const DEFAULT_NUDGE_MIN_TURNS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkUnit {
@@ -24,6 +24,7 @@ pub struct WorkUnit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ScorecardEvent {
     Turn(ScorecardTurn),
@@ -798,14 +799,6 @@ pub fn format_scorecard_suffix(
     ))
 }
 
-pub fn default_quality_threshold() -> u8 {
-    DEFAULT_QUALITY_PR_THRESHOLD
-}
-
-pub fn default_nudge_min_turns() -> usize {
-    DEFAULT_NUDGE_MIN_TURNS
-}
-
 fn latest_pr_timestamp(events: &[ScorecardEvent], unit: &WorkUnit) -> Option<DateTime<Utc>> {
     events
         .iter()
@@ -872,10 +865,11 @@ fn assess_pr_quality(input: PrQualityInput, quality_threshold: u8) -> ScorecardQ
     score -= (input.warnings.len() as i16 * 5).min(20);
 
     let score = score.clamp(0, 100) as u8;
+    let has_pr_evidence = input.opened_by_gh || input.has_pr_url;
     let counts = score >= quality_threshold
         && input.readiness != PrQualityReadiness::Blocked
         && input.tests == PrQualityTestStatus::Passed
-        && input.opened_by_gh;
+        && has_pr_evidence;
     let status = if counts {
         "quality"
     } else if input.readiness == PrQualityReadiness::Blocked {
@@ -1492,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_quality_input_penalizes_missing_gh_but_still_scores() {
+    fn manual_quality_input_counts_with_url_and_tests() {
         let quality = assess_pr_quality(
             PrQualityInput {
                 readiness: PrQualityReadiness::Ready,
@@ -1505,7 +1499,7 @@ mod tests {
             DEFAULT_QUALITY_PR_THRESHOLD,
         );
         assert_eq!(quality.score, 85);
-        assert!(!quality.counts);
+        assert!(quality.counts);
     }
 
     #[test]

@@ -452,10 +452,11 @@ After enough turns on a feature branch, the turn footer nudges you to close via
 traces with `/export <session> events`.
 
 A PR counts as quality-shipped when its local score meets `scorecard.qualityThreshold`
-(default 80), tests passed, the PR creation command succeeded, and readiness was
-not blocked. Configure via `scorecard` in `agent.config.json` or disable with
-`scorecard.enabled: false`. Data is stored locally under the Small Harness data
-directory; `/scorecard path` prints the exact JSONL file.
+(default 80), tests passed, readiness was not blocked, and either the PR
+creation command succeeded or a PR URL was captured with `--url`. Configure via
+`scorecard` in `agent.config.json` or disable with `scorecard.enabled: false`.
+Data is stored locally under the Small Harness data directory; `/scorecard path`
+prints the exact JSONL file.
 
 **Note:** `/play score` shows playground fixture results — unrelated to this
 global quality PR scorecard.

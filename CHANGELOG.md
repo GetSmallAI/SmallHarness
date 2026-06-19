@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Manual scorecard closes.** `/scorecard close <label> --url <pr> --tests`
+  can count as a quality PR when the local quality bar is met, even though the
+  PR was opened outside `/ship pr`.
 - **Turn trace JSON.** Event log timing fields now use `u64` milliseconds so
   turn summaries deserialize correctly from JSONL (fixes scorecard audit reads).
 
