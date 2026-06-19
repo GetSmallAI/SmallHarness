@@ -505,14 +505,19 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.total_in += res.input_tokens;
     state.total_out += res.output_tokens;
-    let _ = crate::scorecard::record_turn(crate::scorecard::TurnRecordInput {
+    if let Err(e) = crate::scorecard::record_turn(crate::scorecard::TurnRecordInput {
         workspace_root: &state.config.workspace_root,
         session_path: &state.session_path,
         backend: state.config.backend.as_str(),
         model: &state.model,
         input_tokens: res.input_tokens,
         output_tokens: res.output_tokens,
-    });
+        enabled: state.config.scorecard.enabled,
+    }) {
+        if state.renderer.verbose_enabled() {
+            println!("  {YELLOW}!{RESET} {DIM}scorecard turn not recorded: {e}{RESET}");
+        }
+    }
     let turn_cost = res.reported_cost_usd.or_else(|| {
         turn_cost_usd(
             state.config.backend,
@@ -589,8 +594,15 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
+    let scorecard_suffix = crate::scorecard::format_scorecard_suffix(
+        &state.config.workspace_root,
+        state.config.scorecard.enabled,
+        state.config.scorecard.nudge_min_turns,
+    )
+    .unwrap_or_default();
+
     println!(
-        "{GRAY}  {} in · {} out{}{}{}{}{RESET}",
+        "{GRAY}  {} in · {} out{}{}{}{}{}{RESET}",
         format_tokens(res.input_tokens),
         format_tokens(res.output_tokens),
         format_cost_suffix(
@@ -602,6 +614,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         format_effort_suffix(state.active_effort),
         format_timing_suffix(&metrics),
         format_path_suffix(state),
+        scorecard_suffix,
     );
 
     Ok(TurnOutcome {

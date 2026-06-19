@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Scorecard quality loop.** Manual `/scorecard close` now runs shipcheck and
+  scores PR units with the same readiness/test rubric as `/ship pr`. Supports
+  `--url` and `--tests`. Closed PR records store session IDs and optional ship
+  record paths. Turn footer and `/ship` preview nudge when a branch accumulates
+  tracked turns. Configure via `scorecard.enabled`, `qualityThreshold`, and
+  `nudgeMinTurns` in `agent.config.json`.
+
 ## [1.0.2] - 2026-06-18
 
 ### Added

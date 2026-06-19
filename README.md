@@ -212,8 +212,8 @@ A handful of moves worth knowing right away:
   guarded `git push`; `/ship pr` opens a draft pull request through GitHub CLI
   when available, and `/ship status` summarizes open PR checks/review state.
 - `/scorecard` shows global quality PRs shipped; `/ship pr` closes a PR unit
-  with readiness/test evidence, and `/scorecard close <label>` covers PRs
-  opened outside Small Harness as unrated local units.
+  with readiness/test evidence. `/scorecard close <label>` scores manual closes
+  from shipcheck (not the separate `/play score` fixture report).
 - `/plan <intent>` drafts a spec; `/iterate <goal>` runs a generate→evaluate
   loop where a separate critic grades each pass against a rubric.
 - `/play fix-failing-test` runs a bundled demo in an isolated sandbox so you
@@ -329,7 +329,7 @@ this exact call`. The session cache resets on `/new`.
 /ship status                     summarize open PR checks and review state
 /scorecard                       show global quality PRs shipped
 /scorecard current               show tracked tokens on the current repo/branch
-/scorecard close <label>         manually close current repo/branch as a PR unit
+/scorecard close <label> [--url <url>] [--tests]  close branch with shipcheck quality score
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop
@@ -427,20 +427,31 @@ The `/model` picker shows the same data while you choose:
 ### Quality PR scorecard
 
 `/scorecard` tracks whether Small Harness-assisted PRs are shipping with good
-local quality evidence. Each successful interactive turn still records input +
-output tokens under the current repo and branch, but tokens are context rather
-than the score. `/ship pr` closes that branch as a PR unit automatically and
-attaches a quality snapshot from local ship readiness: blockers, warnings,
-whether tests passed, and whether the GitHub PR command succeeded. If you open
-a PR outside the built-in flow, run `/scorecard close <label>` to close it
-manually as an unrated local unit.
+**local** quality evidence at close time — not post-merge CI on GitHub. Each
+successful interactive turn still records input + output tokens under the current
+repo and branch, but tokens are context rather than the score. `/ship pr` closes
+that branch as a PR unit automatically and attaches a quality snapshot from local
+ship readiness: blockers, warnings, whether tests passed, and whether the GitHub
+PR command succeeded.
+
+If you open a PR outside the built-in flow, run `/scorecard close <label>` to
+close it with the same shipcheck-based score. Add `--url <github-pr-url>` when
+you have a PR link and `--tests` to run tests before scoring.
 
 The default view shows quality PR count, quality rate, average quality score,
 clean ships, PRs needing follow-up, tokens per quality PR, the open branch
-total, and a GitHub-style daily grid. A PR counts as quality-shipped when its
-local score is at least 80, tests passed, the PR creation command succeeded,
-and readiness was not blocked. Data is stored locally under the Small Harness
-data directory; `/scorecard path` prints the exact JSONL file.
+total, and a GitHub-style daily grid. `/scorecard prs` lists recent closes with
+session counts and ship-record pointers when available. After enough turns on a
+feature branch, the turn footer nudges you to close via `/ship pr`.
+
+A PR counts as quality-shipped when its local score meets `scorecard.qualityThreshold`
+(default 80), tests passed, the PR creation command succeeded, and readiness was
+not blocked. Configure via `scorecard` in `agent.config.json` or disable with
+`scorecard.enabled: false`. Data is stored locally under the Small Harness data
+directory; `/scorecard path` prints the exact JSONL file.
+
+**Note:** `/play score` shows playground fixture results — unrelated to this
+global quality PR scorecard.
 
 ---
 
@@ -691,6 +702,11 @@ root. Common shape:
   "display": {
     "toolDisplay": "grouped",
     "eventLog": { "enabled": true }
+  },
+  "scorecard": {
+    "enabled": true,
+    "qualityThreshold": 80,
+    "nudgeMinTurns": 3
   },
   "workspaceRoot": "/path/to/project",
   "outsideWorkspace": "prompt",

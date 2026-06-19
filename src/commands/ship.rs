@@ -7,7 +7,10 @@ use crate::handoff::{
     HandoffContext, HANDOFF_CONTEXT_LIMIT_BYTES,
 };
 use crate::project_memory::project_index_freshness;
-use crate::shipcheck::{collect_shipcheck, collect_shipcheck_with_tests, ShipcheckSnapshot};
+use crate::shipcheck::{
+    collect_shipcheck, collect_shipcheck_with_tests, evaluate_ship_pr_readiness,
+    quality_input_from_shipcheck, ShipReadiness, ShipReadinessStatus, ShipcheckSnapshot,
+};
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +235,16 @@ pub(super) async fn cmd_ship(args: &str, state: &AppState) -> Result<()> {
     );
     print_shipcheck(&snapshot, freshness.as_ref());
     print_ship_readiness(&readiness);
+    if state.config.scorecard.enabled {
+        if let Ok(summary) = crate::scorecard::current_summary(&state.config.workspace_root) {
+            if summary.turn_count > 0 {
+                println!(
+                    "  {DIM}scorecard{RESET}       {} turn(s) tracked on this branch",
+                    summary.turn_count
+                );
+            }
+        }
+    }
 
     if args.action == ShipAction::Preview {
         match collect_handoff_context(&snapshot)? {
@@ -460,13 +473,14 @@ async fn run_ship_pr(
             "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
             record_path.display()
         );
-        let quality = scorecard_quality_from_ship_pr(&readiness, &snapshot, false, false);
+        let quality = quality_input_from_shipcheck(&snapshot, args.allow_behind, false, false);
         super::scorecard::close_scorecard_pr(
             state,
             &title,
             None,
             "manual command printed",
             Some(quality),
+            Some(&record_path),
         )?;
         return Ok(());
     }
@@ -503,8 +517,15 @@ async fn run_ship_pr(
         "  {GREEN}✓{RESET} {DIM}ship record saved →{RESET} {}",
         record_path.display()
     );
-    let quality = scorecard_quality_from_ship_pr(&readiness, &snapshot, true, url.is_some());
-    super::scorecard::close_scorecard_pr(state, &title, url.as_deref(), "created", Some(quality))?;
+    let quality = quality_input_from_shipcheck(&snapshot, args.allow_behind, true, url.is_some());
+    super::scorecard::close_scorecard_pr(
+        state,
+        &title,
+        url.as_deref(),
+        "created",
+        Some(quality),
+        Some(&record_path),
+    )?;
     Ok(())
 }
 
@@ -1532,20 +1553,6 @@ fn markdown_heading_text(line: &str) -> Option<&str> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShipReadinessStatus {
-    Ready,
-    NeedsReview,
-    Blocked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ShipReadiness {
-    status: ShipReadinessStatus,
-    blockers: Vec<String>,
-    warnings: Vec<String>,
-}
-
 fn evaluate_ship_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> ShipReadiness {
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
@@ -1661,99 +1668,6 @@ fn evaluate_ship_push_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool
         status,
         blockers,
         warnings,
-    }
-}
-
-fn evaluate_ship_pr_readiness(snapshot: &ShipcheckSnapshot, allow_behind: bool) -> ShipReadiness {
-    let mut blockers = Vec::new();
-    let mut warnings = Vec::new();
-
-    if snapshot.branch.head.as_deref() == Some("(detached)") || snapshot.branch.head.is_none() {
-        blockers.push("cannot create a PR from a detached or unknown HEAD".into());
-    }
-    if snapshot.branch.upstream.is_none() {
-        blockers.push("branch has no upstream; run /ship push first".into());
-    }
-    if snapshot.branch.ahead > 0 {
-        blockers.push(format!(
-            "branch has {} unpushed commit(s); run /ship push first",
-            snapshot.branch.ahead
-        ));
-    }
-    if snapshot.branch.behind > 0 && !allow_behind {
-        blockers.push(format!(
-            "branch is behind upstream by {} commit(s); pull/rebase or pass --allow-behind",
-            snapshot.branch.behind
-        ));
-    }
-    if snapshot.conflict_count() > 0 {
-        blockers.push(format!(
-            "{} conflicted file(s) must be resolved before opening a PR",
-            snapshot.conflict_count()
-        ));
-    }
-    if snapshot.staged_count() + snapshot.unstaged_count() > 0 || snapshot.untracked_count() > 0 {
-        warnings.push(format!(
-            "{} uncommitted file(s) are not part of this PR",
-            snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
-        ));
-    }
-    if snapshot.test_status.is_none() {
-        warnings.push("tests were not run for this PR; use /ship pr --tests if desired".into());
-    }
-    if let Some(tests) = &snapshot.test_status {
-        if tests.failed > 0 || tests.exit_code != 0 {
-            blockers.push(format!(
-                "tests failed: {} failed, exit code {}",
-                tests.failed, tests.exit_code
-            ));
-        }
-        if let Some(error) = &tests.error {
-            blockers.push(format!("test execution error: {error}"));
-        }
-    }
-
-    let status = if !blockers.is_empty() {
-        ShipReadinessStatus::Blocked
-    } else if !warnings.is_empty() {
-        ShipReadinessStatus::NeedsReview
-    } else {
-        ShipReadinessStatus::Ready
-    };
-
-    ShipReadiness {
-        status,
-        blockers,
-        warnings,
-    }
-}
-
-fn scorecard_quality_from_ship_pr<'a>(
-    readiness: &'a ShipReadiness,
-    snapshot: &'a ShipcheckSnapshot,
-    opened_by_gh: bool,
-    has_pr_url: bool,
-) -> crate::scorecard::PrQualityInput<'a> {
-    let score_readiness = match readiness.status {
-        ShipReadinessStatus::Ready => crate::scorecard::PrQualityReadiness::Ready,
-        ShipReadinessStatus::NeedsReview => crate::scorecard::PrQualityReadiness::NeedsReview,
-        ShipReadinessStatus::Blocked => crate::scorecard::PrQualityReadiness::Blocked,
-    };
-    let tests = match &snapshot.test_status {
-        Some(tests) if tests.failed == 0 && tests.exit_code == 0 && tests.error.is_none() => {
-            crate::scorecard::PrQualityTestStatus::Passed
-        }
-        Some(_) => crate::scorecard::PrQualityTestStatus::Failed,
-        None => crate::scorecard::PrQualityTestStatus::NotRun,
-    };
-
-    crate::scorecard::PrQualityInput {
-        readiness: score_readiness,
-        blockers: &readiness.blockers,
-        warnings: &readiness.warnings,
-        tests,
-        opened_by_gh,
-        has_pr_url,
     }
 }
 

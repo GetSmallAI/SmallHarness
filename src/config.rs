@@ -212,6 +212,35 @@ impl Default for DisplayConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScorecardConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "qualityThreshold", default = "default_quality_threshold")]
+    pub quality_threshold: u8,
+    #[serde(rename = "nudgeMinTurns", default = "default_nudge_min_turns")]
+    pub nudge_min_turns: usize,
+}
+
+fn default_quality_threshold() -> u8 {
+    80
+}
+
+fn default_nudge_min_turns() -> usize {
+    3
+}
+
+impl Default for ScorecardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quality_threshold: default_quality_threshold(),
+            nudge_min_turns: default_nudge_min_turns(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -547,6 +576,7 @@ pub struct AgentConfig {
     pub tools: Vec<String>,
     pub tool_selection: ToolSelection,
     pub display: DisplayConfig,
+    pub scorecard: ScorecardConfig,
     pub slash_commands: bool,
     pub context: ContextConfig,
     pub history: HistoryConfig,
@@ -626,6 +656,7 @@ impl Default for AgentConfig {
             ],
             tool_selection: ToolSelection::Auto,
             display: DisplayConfig::default(),
+            scorecard: ScorecardConfig::default(),
             slash_commands: true,
             context: ContextConfig::default(),
             history: HistoryConfig::default(),
@@ -665,6 +696,7 @@ struct FileConfig {
     #[serde(rename = "toolSelection")]
     tool_selection: Option<String>,
     display: Option<DisplayConfig>,
+    scorecard: Option<ScorecardConfig>,
     #[serde(rename = "slashCommands")]
     slash_commands: Option<bool>,
     context: Option<ContextConfig>,
@@ -900,6 +932,9 @@ pub fn load_config() -> AgentConfig {
                 }
                 if let Some(d) = file.display {
                     config.display = d;
+                }
+                if let Some(s) = file.scorecard {
+                    config.scorecard = s;
                 }
                 if let Some(sc) = file.slash_commands {
                     config.slash_commands = sc;

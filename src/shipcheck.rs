@@ -538,6 +538,117 @@ pub fn file_status_label(file: &GitFileState) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShipReadinessStatus {
+    Ready,
+    NeedsReview,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShipReadiness {
+    pub status: ShipReadinessStatus,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn evaluate_ship_pr_readiness(
+    snapshot: &ShipcheckSnapshot,
+    allow_behind: bool,
+) -> ShipReadiness {
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    if snapshot.branch.head.as_deref() == Some("(detached)") || snapshot.branch.head.is_none() {
+        blockers.push("cannot create a PR from a detached or unknown HEAD".into());
+    }
+    if snapshot.branch.upstream.is_none() {
+        blockers.push("branch has no upstream; run /ship push first".into());
+    }
+    if snapshot.branch.ahead > 0 {
+        blockers.push(format!(
+            "branch has {} unpushed commit(s); run /ship push first",
+            snapshot.branch.ahead
+        ));
+    }
+    if snapshot.branch.behind > 0 && !allow_behind {
+        blockers.push(format!(
+            "branch is behind upstream by {} commit(s); pull/rebase or pass --allow-behind",
+            snapshot.branch.behind
+        ));
+    }
+    if snapshot.conflict_count() > 0 {
+        blockers.push(format!(
+            "{} conflicted file(s) must be resolved before opening a PR",
+            snapshot.conflict_count()
+        ));
+    }
+    if snapshot.staged_count() + snapshot.unstaged_count() > 0 || snapshot.untracked_count() > 0 {
+        warnings.push(format!(
+            "{} uncommitted file(s) are not part of this PR",
+            snapshot.staged_count() + snapshot.unstaged_count() + snapshot.untracked_count()
+        ));
+    }
+    if snapshot.test_status.is_none() {
+        warnings.push("tests were not run for this PR; use /ship pr --tests if desired".into());
+    }
+    if let Some(tests) = &snapshot.test_status {
+        if tests.failed > 0 || tests.exit_code != 0 {
+            blockers.push(format!(
+                "tests failed: {} failed, exit code {}",
+                tests.failed, tests.exit_code
+            ));
+        }
+        if let Some(error) = &tests.error {
+            blockers.push(format!("test execution error: {error}"));
+        }
+    }
+
+    let status = if !blockers.is_empty() {
+        ShipReadinessStatus::Blocked
+    } else if !warnings.is_empty() {
+        ShipReadinessStatus::NeedsReview
+    } else {
+        ShipReadinessStatus::Ready
+    };
+
+    ShipReadiness {
+        status,
+        blockers,
+        warnings,
+    }
+}
+
+pub fn quality_input_from_shipcheck(
+    snapshot: &ShipcheckSnapshot,
+    allow_behind: bool,
+    opened_by_gh: bool,
+    has_pr_url: bool,
+) -> crate::scorecard::PrQualityInput {
+    let readiness = evaluate_ship_pr_readiness(snapshot, allow_behind);
+    let score_readiness = match readiness.status {
+        ShipReadinessStatus::Ready => crate::scorecard::PrQualityReadiness::Ready,
+        ShipReadinessStatus::NeedsReview => crate::scorecard::PrQualityReadiness::NeedsReview,
+        ShipReadinessStatus::Blocked => crate::scorecard::PrQualityReadiness::Blocked,
+    };
+    let tests = match &snapshot.test_status {
+        Some(tests) if tests.failed == 0 && tests.exit_code == 0 && tests.error.is_none() => {
+            crate::scorecard::PrQualityTestStatus::Passed
+        }
+        Some(_) => crate::scorecard::PrQualityTestStatus::Failed,
+        None => crate::scorecard::PrQualityTestStatus::NotRun,
+    };
+
+    crate::scorecard::PrQualityInput {
+        readiness: score_readiness,
+        blockers: readiness.blockers,
+        warnings: readiness.warnings,
+        tests,
+        opened_by_gh,
+        has_pr_url,
+    }
+}
+
 pub fn default_export_path(session_dir: &str) -> std::path::PathBuf {
     Path::new(session_dir).join("shipcheck").join(format!(
         "{}.md",
@@ -708,6 +819,41 @@ u UU N... 100644 100644 100644 100644 a b c src/conflict.rs
         assert_eq!(json.branch, "main -> origin/main (+1/-0)");
         assert!(json.ready_to_ship);
         assert_eq!(json.staged_files, 0);
+    }
+
+    #[test]
+    fn quality_input_from_shipcheck_penalizes_missing_gh() {
+        let snapshot = ShipcheckSnapshot {
+            workspace_root: "/repo".to_string(),
+            git_root: "/repo".to_string(),
+            branch: GitBranchState {
+                head: Some("feature".to_string()),
+                upstream: Some("origin/feature".to_string()),
+                ahead: 0,
+                behind: 0,
+                oid: Some("abc".to_string()),
+            },
+            files: vec![],
+            staged_diff_stat: String::new(),
+            unstaged_diff_stat: String::new(),
+            test_status: Some(TestStatus {
+                framework: "cargo".to_string(),
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                exit_code: 0,
+                error: None,
+            }),
+        };
+        let quality = quality_input_from_shipcheck(&snapshot, false, false, true);
+        assert_eq!(quality.tests, crate::scorecard::PrQualityTestStatus::Passed);
+        assert!(!quality.opened_by_gh);
+        assert!(quality.has_pr_url);
+        assert_eq!(
+            quality.readiness,
+            crate::scorecard::PrQualityReadiness::Ready
+        );
     }
 
     #[test]

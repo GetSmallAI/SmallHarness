@@ -14,7 +14,8 @@ const YELLOW: &str = crate::theme::WARN;
 const CYAN: &str = "\x1b[36m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const STORE_DIR_ENV: &str = "SMALL_HARNESS_SCORECARD_DIR";
-const QUALITY_PR_THRESHOLD: u8 = 80;
+const DEFAULT_QUALITY_PR_THRESHOLD: u8 = 80;
+const DEFAULT_NUDGE_MIN_TURNS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkUnit {
@@ -59,6 +60,12 @@ pub struct ScorecardPr {
     pub total_tokens: u64,
     pub turn_count: usize,
     pub session_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship_record_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<ScorecardQuality>,
 }
@@ -92,11 +99,11 @@ pub enum PrQualityTestStatus {
     NotRun,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct PrQualityInput<'a> {
+#[derive(Debug, Clone)]
+pub struct PrQualityInput {
     pub readiness: PrQualityReadiness,
-    pub blockers: &'a [String],
-    pub warnings: &'a [String],
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
     pub tests: PrQualityTestStatus,
     pub opened_by_gh: bool,
     pub has_pr_url: bool,
@@ -109,6 +116,7 @@ pub struct TurnRecordInput<'a> {
     pub model: &'a str,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub enabled: bool,
 }
 
 pub struct PrCloseInput<'a> {
@@ -116,7 +124,9 @@ pub struct PrCloseInput<'a> {
     pub title: &'a str,
     pub url: Option<&'a str>,
     pub status: &'a str,
-    pub quality: Option<PrQualityInput<'a>>,
+    pub quality: Option<PrQualityInput>,
+    pub ship_record_path: Option<&'a str>,
+    pub quality_threshold: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +188,9 @@ pub fn scorecard_path() -> Option<PathBuf> {
 }
 
 pub fn record_turn(input: TurnRecordInput<'_>) -> Result<Option<PathBuf>> {
+    if !input.enabled {
+        return Ok(None);
+    }
     if input.input_tokens == 0 && input.output_tokens == 0 {
         return Ok(None);
     }
@@ -371,8 +384,28 @@ pub fn render_recent_prs(prs: &[ScorecardPr]) -> String {
             one_line(&pr.title, 72),
             url
         ));
+        let evidence = render_pr_evidence_line(pr);
+        if !evidence.is_empty() {
+            out.push_str(&format!("      {DIM}{evidence}{RESET}\n"));
+        }
     }
     out
+}
+
+fn render_pr_evidence_line(pr: &ScorecardPr) -> String {
+    let mut parts = Vec::new();
+    if !pr.session_ids.is_empty() {
+        parts.push(format!("{} session(s)", pr.session_ids.len()));
+    }
+    if pr.ship_record_path.is_some() {
+        parts.push("ship record".into());
+    }
+    if let Some(quality) = pr.quality.as_ref() {
+        if !quality.evidence.is_empty() {
+            parts.push(quality.evidence.join(" · "));
+        }
+    }
+    parts.join(" · ")
 }
 
 pub fn render_current(summary: &OpenUnitSummary) -> String {
@@ -410,6 +443,7 @@ fn close_pr_at_path(
     if open.turn_count == 0 {
         return Ok(None);
     }
+    let open_sessions = open_sessions_for_unit(&events, &unit);
     let pr = ScorecardPr {
         timestamp: now.to_rfc3339(),
         repo: unit.repo,
@@ -426,7 +460,16 @@ fn close_pr_at_path(
         total_tokens: open.total_tokens,
         turn_count: open.turn_count,
         session_count: open.session_count,
-        quality: input.quality.map(assess_pr_quality),
+        quality: input
+            .quality
+            .map(|quality| assess_pr_quality(quality, input.quality_threshold)),
+        session_ids: open_sessions.session_ids,
+        session_paths: open_sessions.session_paths,
+        ship_record_path: input
+            .ship_record_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string),
     };
     append_event(path, &ScorecardEvent::Pr(pr.clone()))?;
     Ok(Some(PrCloseSummary {
@@ -530,6 +573,66 @@ fn open_summary_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUnit
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenUnitSessions {
+    session_ids: Vec<String>,
+    session_paths: Vec<String>,
+}
+
+fn open_sessions_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUnitSessions {
+    let latest_close = latest_pr_timestamp(events, unit);
+    let mut session_ids = BTreeSet::new();
+    let mut session_paths = BTreeSet::new();
+
+    for event in events {
+        let ScorecardEvent::Turn(turn) = event else {
+            continue;
+        };
+        if turn.repo != unit.repo || turn.branch != unit.branch {
+            continue;
+        }
+        if !is_after(&turn.timestamp, latest_close.as_ref()) {
+            continue;
+        }
+        session_ids.insert(turn.session_id.clone());
+        session_paths.insert(turn.session_path.clone());
+    }
+
+    OpenUnitSessions {
+        session_ids: session_ids.into_iter().collect(),
+        session_paths: session_paths.into_iter().collect(),
+    }
+}
+
+pub fn format_scorecard_suffix(
+    workspace_root: &str,
+    enabled: bool,
+    nudge_min_turns: usize,
+) -> Result<String> {
+    if !enabled {
+        return Ok(String::new());
+    }
+    let summary = current_summary(workspace_root)?;
+    if summary.turn_count == 0 || summary.turn_count < nudge_min_turns {
+        return Ok(String::new());
+    }
+    if summary.branch == "main" || summary.branch == "master" {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        " · {} turn(s) tracked · /ship pr closes scorecard",
+        summary.turn_count
+    ))
+}
+
+pub fn default_quality_threshold() -> u8 {
+    DEFAULT_QUALITY_PR_THRESHOLD
+}
+
+pub fn default_nudge_min_turns() -> usize {
+    DEFAULT_NUDGE_MIN_TURNS
+}
+
 fn latest_pr_timestamp(events: &[ScorecardEvent], unit: &WorkUnit) -> Option<DateTime<Utc>> {
     events
         .iter()
@@ -551,7 +654,7 @@ fn is_after(timestamp: &str, after: Option<&DateTime<Utc>>) -> bool {
     }
 }
 
-fn assess_pr_quality(input: PrQualityInput<'_>) -> ScorecardQuality {
+fn assess_pr_quality(input: PrQualityInput, quality_threshold: u8) -> ScorecardQuality {
     let mut score = 100_i16;
     let mut evidence = Vec::new();
 
@@ -596,7 +699,7 @@ fn assess_pr_quality(input: PrQualityInput<'_>) -> ScorecardQuality {
     score -= (input.warnings.len() as i16 * 5).min(20);
 
     let score = score.clamp(0, 100) as u8;
-    let counts = score >= QUALITY_PR_THRESHOLD
+    let counts = score >= quality_threshold
         && input.readiness != PrQualityReadiness::Blocked
         && input.tests == PrQualityTestStatus::Passed
         && input.opened_by_gh;
@@ -614,8 +717,8 @@ fn assess_pr_quality(input: PrQualityInput<'_>) -> ScorecardQuality {
         counts,
         status: status.to_string(),
         evidence,
-        blockers: input.blockers.to_vec(),
-        warnings: input.warnings.to_vec(),
+        blockers: input.blockers,
+        warnings: input.warnings,
     }
 }
 
@@ -998,6 +1101,9 @@ mod tests {
             total_tokens: tokens,
             turn_count: 1,
             session_count: 1,
+            session_ids: Vec::new(),
+            session_paths: Vec::new(),
+            ship_record_path: None,
             quality: None,
         })
     }
@@ -1015,6 +1121,9 @@ mod tests {
             total_tokens: tokens,
             turn_count: 1,
             session_count: 1,
+            session_ids: Vec::new(),
+            session_paths: Vec::new(),
+            ship_record_path: None,
             quality: Some(ScorecardQuality {
                 score,
                 grade: grade_for_score(score).into(),
@@ -1106,14 +1215,17 @@ mod tests {
     #[test]
     fn quality_assessment_requires_tests_and_pr_creation() {
         let warnings = vec!["tests were not run for this PR".to_string()];
-        let quality = assess_pr_quality(PrQualityInput {
-            readiness: PrQualityReadiness::NeedsReview,
-            blockers: &[],
-            warnings: &warnings,
-            tests: PrQualityTestStatus::NotRun,
-            opened_by_gh: true,
-            has_pr_url: true,
-        });
+        let quality = assess_pr_quality(
+            PrQualityInput {
+                readiness: PrQualityReadiness::NeedsReview,
+                blockers: vec![],
+                warnings,
+                tests: PrQualityTestStatus::NotRun,
+                opened_by_gh: true,
+                has_pr_url: true,
+            },
+            DEFAULT_QUALITY_PR_THRESHOLD,
+        );
 
         assert_eq!(quality.score, 65);
         assert_eq!(quality.grade, "D");
@@ -1155,12 +1267,14 @@ mod tests {
                 status: "created",
                 quality: Some(PrQualityInput {
                     readiness: PrQualityReadiness::Ready,
-                    blockers: &[],
-                    warnings: &[],
+                    blockers: vec![],
+                    warnings: vec![],
                     tests: PrQualityTestStatus::Passed,
                     opened_by_gh: true,
                     has_pr_url: true,
                 }),
+                ship_record_path: Some(".sessions/ship-pr.md"),
+                quality_threshold: DEFAULT_QUALITY_PR_THRESHOLD,
             },
             DateTime::parse_from_rfc3339("2026-06-14T12:00:00Z")
                 .unwrap()
@@ -1175,6 +1289,11 @@ mod tests {
         assert_eq!(closed.pr.url.as_deref(), Some("https://example.com/pr/1"));
         assert_eq!(closed.pr.quality.as_ref().unwrap().score, 100);
         assert!(closed.pr.quality.as_ref().unwrap().counts);
+        assert_eq!(closed.pr.session_ids, vec!["a".to_string()]);
+        assert_eq!(
+            closed.pr.ship_record_path.as_deref(),
+            Some(".sessions/ship-pr.md")
+        );
         assert!(close_pr_at_path(
             &path,
             PrCloseInput {
@@ -1183,6 +1302,8 @@ mod tests {
                 url: None,
                 status: "manual",
                 quality: None,
+                ship_record_path: None,
+                quality_threshold: DEFAULT_QUALITY_PR_THRESHOLD,
             },
             DateTime::parse_from_rfc3339("2026-06-14T13:00:00Z")
                 .unwrap()
@@ -1190,5 +1311,51 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn manual_quality_input_penalizes_missing_gh_but_still_scores() {
+        let quality = assess_pr_quality(
+            PrQualityInput {
+                readiness: PrQualityReadiness::Ready,
+                blockers: vec![],
+                warnings: vec![],
+                tests: PrQualityTestStatus::Passed,
+                opened_by_gh: false,
+                has_pr_url: true,
+            },
+            DEFAULT_QUALITY_PR_THRESHOLD,
+        );
+        assert_eq!(quality.score, 85);
+        assert!(!quality.counts);
+    }
+
+    #[test]
+    fn open_sessions_collects_unique_session_metadata() {
+        let events = vec![
+            turn(10, 1000, "a"),
+            ScorecardEvent::Turn(ScorecardTurn {
+                timestamp: ts(11),
+                repo: "/repo/demo".into(),
+                branch: "feature".into(),
+                session_id: "a".into(),
+                session_path: ".sessions/a.jsonl".into(),
+                backend: "openrouter".into(),
+                model: "model".into(),
+                input_tokens: 100,
+                output_tokens: 100,
+                total_tokens: 200,
+            }),
+            turn(12, 300, "b"),
+        ];
+        let sessions = open_sessions_for_unit(
+            &events,
+            &WorkUnit {
+                repo: "/repo/demo".into(),
+                branch: "feature".into(),
+            },
+        );
+        assert_eq!(sessions.session_ids, vec!["a", "b"]);
+        assert_eq!(sessions.session_paths.len(), 2);
     }
 }
