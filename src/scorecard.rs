@@ -68,6 +68,8 @@ pub struct ScorecardPr {
     pub ship_record_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<ScorecardQuality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_traces: Vec<crate::turn_trace::SessionTraceSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,6 +123,7 @@ pub struct TurnRecordInput<'a> {
 
 pub struct PrCloseInput<'a> {
     pub workspace_root: &'a str,
+    pub session_dir: &'a str,
     pub title: &'a str,
     pub url: Option<&'a str>,
     pub status: &'a str,
@@ -204,12 +207,13 @@ pub fn record_turn(input: TurnRecordInput<'_>) -> Result<Option<PathBuf>> {
         .and_then(|stem| stem.to_str())
         .unwrap_or("session")
         .to_string();
+    let session_path = session_path_for_storage(input.workspace_root, input.session_path);
     let event = ScorecardEvent::Turn(ScorecardTurn {
         timestamp: Utc::now().to_rfc3339(),
         repo: unit.repo,
         branch: unit.branch,
         session_id,
-        session_path: input.session_path.display().to_string(),
+        session_path,
         backend: input.backend.to_string(),
         model: input.model.to_string(),
         input_tokens: input.input_tokens as u64,
@@ -255,6 +259,14 @@ pub fn recent_prs(limit: usize) -> Result<Vec<ScorecardPr>> {
     prs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     prs.truncate(limit);
     Ok(prs)
+}
+
+pub fn recent_pr_by_index(index: usize) -> Result<Option<ScorecardPr>> {
+    if index == 0 {
+        return Ok(None);
+    }
+    let prs = recent_prs(index)?;
+    Ok(prs.get(index - 1).cloned())
 }
 
 pub fn reset_store() -> Result<Option<PathBuf>> {
@@ -354,6 +366,7 @@ pub fn render_report(report: &ScorecardReport) -> String {
         out.push_str(&format!(
             "\n  {DIM}Daily grid shows quality PRs shipped. Tokens are context, not the score.{RESET}\n"
         ));
+        out.push_str(&format!("  {DIM}recent detail → /scorecard pr 1{RESET}\n"));
     }
     out
 }
@@ -367,7 +380,7 @@ pub fn render_recent_prs(prs: &[ScorecardPr]) -> String {
         ));
         return out;
     }
-    for pr in prs {
+    for (index, pr) in prs.iter().enumerate() {
         let url = pr
             .url
             .as_deref()
@@ -375,20 +388,126 @@ pub fn render_recent_prs(prs: &[ScorecardPr]) -> String {
             .unwrap_or_default();
         let quality = format_quality_cell(pr.quality.as_ref());
         out.push_str(&format!(
-            "  {}  {:<18} {:>8}  {} · {} · {}{}\n",
+            "  #{:<3} {}  {:<18} {:>8}  {} · {} · {}{}\n",
+            index + 1,
             pr_date_label(&pr.timestamp),
             quality,
             format_tokens(pr.total_tokens),
             repo_label(&pr.repo),
             pr.branch,
-            one_line(&pr.title, 72),
+            one_line(&pr.title, 64),
             url
         ));
         let evidence = render_pr_evidence_line(pr);
         if !evidence.is_empty() {
-            out.push_str(&format!("      {DIM}{evidence}{RESET}\n"));
+            out.push_str(&format!("        {DIM}{evidence}{RESET}\n"));
         }
     }
+    out.push_str(&format!("\n  {DIM}detail → /scorecard pr <n>{RESET}\n"));
+    out
+}
+
+pub fn render_pr_detail(pr: &ScorecardPr, index: usize) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("  {DIM}scorecard PR{RESET}     #{index}\n"));
+    out.push_str(&format!(
+        "  {DIM}title{RESET}           {}\n",
+        one_line(&pr.title, 120)
+    ));
+    out.push_str(&format!(
+        "  {DIM}closed{RESET}          {} · {} · {}\n",
+        pr_date_label(&pr.timestamp),
+        repo_label(&pr.repo),
+        pr.branch
+    ));
+    out.push_str(&format!(
+        "  {DIM}status{RESET}          {} · {} tokens · {} turn(s) · {} session(s)\n",
+        pr.status,
+        format_tokens(pr.total_tokens),
+        pr.turn_count,
+        pr.session_count
+    ));
+    if let Some(url) = pr.url.as_deref() {
+        out.push_str(&format!("  {DIM}url{RESET}             {url}\n"));
+    }
+    if let Some(quality) = pr.quality.as_ref() {
+        out.push_str(&format!(
+            "  {DIM}quality{RESET}         {} {} · {}\n",
+            quality.grade,
+            format_quality_score(quality.score),
+            quality.status
+        ));
+        if !quality.evidence.is_empty() {
+            out.push_str(&format!("  {DIM}evidence{RESET}\n"));
+            for item in &quality.evidence {
+                out.push_str(&format!("    {GREEN}·{RESET} {item}\n"));
+            }
+        }
+        if !quality.blockers.is_empty() {
+            out.push_str(&format!("  {DIM}blockers{RESET}\n"));
+            for item in &quality.blockers {
+                out.push_str(&format!("    {YELLOW}!{RESET} {item}\n"));
+            }
+        }
+        if !quality.warnings.is_empty() {
+            out.push_str(&format!("  {DIM}warnings{RESET}\n"));
+            for item in &quality.warnings {
+                out.push_str(&format!("    {YELLOW}!{RESET} {item}\n"));
+            }
+        }
+    } else {
+        out.push_str(&format!("  {DIM}quality{RESET}         unrated\n"));
+    }
+    if let Some(path) = pr.ship_record_path.as_deref() {
+        out.push_str(&format!("  {DIM}ship record{RESET}    {path}\n"));
+    }
+    out.push('\n');
+    if pr.session_traces.is_empty() && pr.session_ids.is_empty() {
+        out.push_str(&format!(
+            "  {DIM}sessions{RESET}        no session audit captured at close\n"
+        ));
+    } else if !pr.session_traces.is_empty() {
+        out.push_str(&format!("  {DIM}sessions{RESET}\n"));
+        for trace in &pr.session_traces {
+            out.push_str(&format!("    {CYAN}{}{RESET}\n", trace.session_id));
+            if trace.trace_found {
+                out.push_str(&format!(
+                    "      {} turn(s) · {} step(s) · {} tool(s) · {} subagent(s) · {} approval(s)\n",
+                    trace.turn_count,
+                    trace.total_steps,
+                    trace.tool_calls,
+                    trace.subagent_runs,
+                    trace.approvals
+                ));
+                out.push_str(&format!(
+                    "      model {:.1}s · tools {:.1}s · approval {:.1}s · total {:.1}s\n",
+                    trace.model_ms as f64 / 1000.0,
+                    trace.tool_ms as f64 / 1000.0,
+                    trace.approval_ms as f64 / 1000.0,
+                    trace.total_ms as f64 / 1000.0
+                ));
+                out.push_str(&format!(
+                    "      {DIM}events → {}{RESET}\n",
+                    trace.events_path
+                ));
+            } else {
+                out.push_str(&format!(
+                    "      {DIM}no event log at close (display.eventLog.enabled may have been off){RESET}\n"
+                ));
+            }
+        }
+    } else {
+        out.push_str(&format!(
+            "  {DIM}sessions{RESET}        {}\n",
+            pr.session_ids.join(", ")
+        ));
+        for path in &pr.session_paths {
+            out.push_str(&format!("    {DIM}session → {path}{RESET}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\n  {DIM}raw trace export → /export <session> events{RESET}\n"
+    ));
     out
 }
 
@@ -444,6 +563,8 @@ fn close_pr_at_path(
         return Ok(None);
     }
     let open_sessions = open_sessions_for_unit(&events, &unit);
+    let session_traces =
+        collect_session_traces(&open_sessions, input.workspace_root, input.session_dir);
     let pr = ScorecardPr {
         timestamp: now.to_rfc3339(),
         repo: unit.repo,
@@ -470,6 +591,7 @@ fn close_pr_at_path(
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .map(str::to_string),
+        session_traces,
     };
     append_event(path, &ScorecardEvent::Pr(pr.clone()))?;
     Ok(Some(PrCloseSummary {
@@ -574,15 +696,21 @@ fn open_summary_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUnit
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRef {
+    session_id: String,
+    session_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct OpenUnitSessions {
+    sessions: Vec<SessionRef>,
     session_ids: Vec<String>,
     session_paths: Vec<String>,
 }
 
 fn open_sessions_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUnitSessions {
     let latest_close = latest_pr_timestamp(events, unit);
-    let mut session_ids = BTreeSet::new();
-    let mut session_paths = BTreeSet::new();
+    let mut sessions = BTreeMap::new();
 
     for event in events {
         let ScorecardEvent::Turn(turn) = event else {
@@ -594,14 +722,59 @@ fn open_sessions_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUni
         if !is_after(&turn.timestamp, latest_close.as_ref()) {
             continue;
         }
-        session_ids.insert(turn.session_id.clone());
-        session_paths.insert(turn.session_path.clone());
+        sessions
+            .entry(turn.session_id.clone())
+            .or_insert_with(|| turn.session_path.clone());
     }
 
+    let sessions: Vec<SessionRef> = sessions
+        .into_iter()
+        .map(|(session_id, session_path)| SessionRef {
+            session_id,
+            session_path,
+        })
+        .collect();
+    let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
+    let session_paths: Vec<String> = sessions.iter().map(|s| s.session_path.clone()).collect();
+
     OpenUnitSessions {
-        session_ids: session_ids.into_iter().collect(),
-        session_paths: session_paths.into_iter().collect(),
+        sessions,
+        session_ids,
+        session_paths,
     }
+}
+
+fn collect_session_traces(
+    open_sessions: &OpenUnitSessions,
+    workspace_root: &str,
+    session_dir: &str,
+) -> Vec<crate::turn_trace::SessionTraceSummary> {
+    open_sessions
+        .sessions
+        .iter()
+        .map(|session| {
+            let resolved = crate::turn_trace::resolve_session_path(
+                &session.session_path,
+                workspace_root,
+                session_dir,
+                &session.session_id,
+            );
+            let mut summary = crate::turn_trace::summarize_session_trace(&resolved);
+            summary.session_id = session.session_id.clone();
+            summary.events_path = crate::turn_trace::events_path_for_session(&resolved)
+                .display()
+                .to_string();
+            summary
+        })
+        .collect()
+}
+
+fn session_path_for_storage(workspace_root: &str, session_path: &Path) -> String {
+    let workspace = Path::new(workspace_root);
+    session_path
+        .strip_prefix(workspace)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| session_path.display().to_string())
 }
 
 pub fn format_scorecard_suffix(
@@ -1105,6 +1278,7 @@ mod tests {
             session_paths: Vec::new(),
             ship_record_path: None,
             quality: None,
+            session_traces: Vec::new(),
         })
     }
 
@@ -1133,6 +1307,7 @@ mod tests {
                 blockers: Vec::new(),
                 warnings: Vec::new(),
             }),
+            session_traces: Vec::new(),
         })
     }
 
@@ -1206,6 +1381,7 @@ mod tests {
             _ => unreachable!(),
         }];
         let rendered = render_recent_prs(&prs);
+        assert!(rendered.contains("#1  "));
         assert!(rendered.contains("A"));
         assert!(rendered.contains("91/100"));
         assert!(rendered.contains("42.0k"));
@@ -1262,6 +1438,7 @@ mod tests {
             &path,
             PrCloseInput {
                 workspace_root: repo.path().to_str().unwrap(),
+                session_dir: ".sessions",
                 title: "feature PR",
                 url: Some("https://example.com/pr/1"),
                 status: "created",
@@ -1298,6 +1475,7 @@ mod tests {
             &path,
             PrCloseInput {
                 workspace_root: repo.path().to_str().unwrap(),
+                session_dir: ".sessions",
                 title: "duplicate",
                 url: None,
                 status: "manual",
@@ -1331,31 +1509,118 @@ mod tests {
     }
 
     #[test]
-    fn open_sessions_collects_unique_session_metadata() {
-        let events = vec![
-            turn(10, 1000, "a"),
-            ScorecardEvent::Turn(ScorecardTurn {
-                timestamp: ts(11),
-                repo: "/repo/demo".into(),
-                branch: "feature".into(),
-                session_id: "a".into(),
-                session_path: ".sessions/a.jsonl".into(),
+    fn render_pr_detail_includes_quality_and_sessions() {
+        let pr = ScorecardPr {
+            timestamp: ts(12),
+            repo: "/repo/demo".into(),
+            branch: "feature".into(),
+            title: "audit me".into(),
+            url: Some("https://example.com/pr/2".into()),
+            status: "created".into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            turn_count: 3,
+            session_count: 1,
+            session_ids: vec!["sess-a".into()],
+            session_paths: vec![".sessions/sess-a.jsonl".into()],
+            ship_record_path: Some(".sessions/ship-pr.md".into()),
+            quality: Some(ScorecardQuality {
+                score: 91,
+                grade: "A".into(),
+                counts: true,
+                status: "quality".into(),
+                evidence: vec!["tests passed".into()],
+                blockers: Vec::new(),
+                warnings: Vec::new(),
+            }),
+            session_traces: vec![crate::turn_trace::SessionTraceSummary {
+                session_id: "sess-a".into(),
+                events_path: ".sessions/sess-a.events.jsonl".into(),
+                turn_count: 3,
+                total_steps: 8,
+                tool_calls: 4,
+                subagent_runs: 1,
+                approvals: 2,
+                model_ms: 1000,
+                tool_ms: 2000,
+                approval_ms: 100,
+                total_ms: 3200,
+                trace_found: true,
+            }],
+        };
+        let rendered = render_pr_detail(&pr, 1);
+        assert!(rendered.contains("#1"));
+        assert!(rendered.contains("audit me"));
+        assert!(rendered.contains("A 91/100"));
+        assert!(rendered.contains("sess-a"));
+        assert!(rendered.contains("ship record"));
+        assert!(rendered.contains("4 tool(s)"));
+    }
+
+    #[test]
+    fn close_pr_attaches_session_traces_when_events_exist() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "feature"]);
+        let sessions_dir = repo.path().join(".sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_path = sessions_dir.join("audit-a.jsonl");
+        let mut trace = crate::turn_trace::TurnTrace::open(&session_path, true).unwrap();
+        trace.begin_turn();
+        trace
+            .log_turn_summary(crate::turn_trace::TurnMetrics {
+                steps: 2,
+                ttft_ms: None,
+                model_ms: 100,
+                tool_ms: 200,
+                approval_ms: 0,
+                total_ms: 0,
+                hit_step_limit: false,
+            })
+            .unwrap();
+
+        let path = repo.path().join("events.jsonl");
+        let unit = current_work_unit(repo.path().to_str().unwrap());
+        append_event(
+            &path,
+            &ScorecardEvent::Turn(ScorecardTurn {
+                timestamp: ts(13),
+                repo: unit.repo.clone(),
+                branch: unit.branch.clone(),
+                session_id: "audit-a".into(),
+                session_path: ".sessions/audit-a.jsonl".into(),
                 backend: "openrouter".into(),
                 model: "model".into(),
-                input_tokens: 100,
-                output_tokens: 100,
-                total_tokens: 200,
+                input_tokens: 500,
+                output_tokens: 500,
+                total_tokens: 1000,
             }),
-            turn(12, 300, "b"),
-        ];
-        let sessions = open_sessions_for_unit(
-            &events,
-            &WorkUnit {
-                repo: "/repo/demo".into(),
-                branch: "feature".into(),
+        )
+        .unwrap();
+
+        let closed = close_pr_at_path(
+            &path,
+            PrCloseInput {
+                workspace_root: repo.path().to_str().unwrap(),
+                session_dir: ".sessions",
+                title: "traced PR",
+                url: None,
+                status: "manual",
+                quality: None,
+                ship_record_path: None,
+                quality_threshold: DEFAULT_QUALITY_PR_THRESHOLD,
             },
-        );
-        assert_eq!(sessions.session_ids, vec!["a", "b"]);
-        assert_eq!(sessions.session_paths.len(), 2);
+            DateTime::parse_from_rfc3339("2026-06-14T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(closed.pr.session_traces.len(), 1);
+        assert!(closed.pr.session_traces[0].trace_found);
+        assert_eq!(closed.pr.session_traces[0].turn_count, 1);
+        assert_eq!(closed.pr.session_traces[0].total_steps, 2);
     }
 }

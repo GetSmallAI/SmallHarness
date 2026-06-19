@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.1-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.3-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -329,6 +329,8 @@ this exact call`. The session cache resets on `/new`.
 /ship status                     summarize open PR checks and review state
 /scorecard                       show global quality PRs shipped
 /scorecard current               show tracked tokens on the current repo/branch
+/scorecard prs [limit]            list recent closed PRs (numbered)
+/scorecard pr <n>                 drill into PR quality, sessions, and trace audit
 /scorecard close <label> [--url <url>] [--tests]  close branch with shipcheck quality score
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
@@ -440,9 +442,14 @@ you have a PR link and `--tests` to run tests before scoring.
 
 The default view shows quality PR count, quality rate, average quality score,
 clean ships, PRs needing follow-up, tokens per quality PR, the open branch
-total, and a GitHub-style daily grid. `/scorecard prs` lists recent closes with
-session counts and ship-record pointers when available. After enough turns on a
-feature branch, the turn footer nudges you to close via `/ship pr`.
+total, and a GitHub-style daily grid. `/scorecard prs` lists numbered recent
+closes with session and ship-record hints; `/scorecard pr <n>` shows the full
+audit captured at close time — quality rubric, per-session turn-trace summaries
+(turns, steps, tool calls, timing), and paths to session event logs.
+
+After enough turns on a feature branch, the turn footer nudges you to close via
+`/ship pr`. Audit snapshots come from local event logs at close time; export raw
+traces with `/export <session> events`.
 
 A PR counts as quality-shipped when its local score meets `scorecard.qualityThreshold`
 (default 80), tests passed, the PR creation command succeeded, and readiness was

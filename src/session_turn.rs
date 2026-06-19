@@ -71,7 +71,7 @@ impl ApprovalProvider for YoloApproval {
 struct TracingApproval<'a> {
     inner: &'a mut crate::approval::ApprovalCache,
     trace: crate::turn_trace::SharedTurnTrace,
-    approval_ms: std::cell::Cell<u128>,
+    approval_ms: std::cell::Cell<u64>,
 }
 
 #[async_trait]
@@ -86,7 +86,7 @@ impl ApprovalProvider for TracingApproval<'_> {
                 .unwrap_or("")
         );
         let allowed = self.inner.approve(name, args, preview).await;
-        let elapsed = start.elapsed().as_millis();
+        let elapsed = start.elapsed().as_millis() as u64;
         self.approval_ms.set(self.approval_ms.get() + elapsed);
         let decision = if allowed {
             ApprovalDecision::Allowed
@@ -339,7 +339,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             );
             if let Ok(trace) = state.trace.lock() {
                 let _ = trace.append(TracePayload::Warmup {
-                    duration_ms: ms,
+                    duration_ms: ms as u64,
                     reason: "fingerprint_changed".into(),
                 });
             }

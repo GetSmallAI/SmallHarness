@@ -143,6 +143,7 @@ Useful commands:
 /ship pr
 /ship status
 /scorecard    show global quality PRs shipped
+/scorecard pr 1   drill into the most recent closed PR audit
 /scorecard close "OAuth login PR" --url https://github.com/org/repo/pull/42
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions

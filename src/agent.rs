@@ -270,7 +270,7 @@ where
                     if !saw_first_token {
                         saw_first_token = true;
                         if !ttft_recorded {
-                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis());
+                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis() as u64);
                             ttft_recorded = true;
                         }
                     }
@@ -282,7 +282,7 @@ where
                     if !saw_first_token && !content.is_empty() {
                         saw_first_token = true;
                         if !ttft_recorded {
-                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis());
+                            metrics.ttft_ms = Some(turn_started.elapsed().as_millis() as u64);
                             ttft_recorded = true;
                         }
                     }
@@ -331,7 +331,7 @@ where
         if let Some(cost) = step_reported_cost_usd {
             reported_cost_usd = Some(reported_cost_usd.unwrap_or(0.0) + cost);
         }
-        metrics.model_ms += step_start.elapsed().as_millis();
+        metrics.model_ms += step_start.elapsed().as_millis() as u64;
 
         let mut final_calls: Vec<ToolCall> = tool_calls
             .into_values()
@@ -478,7 +478,7 @@ where
 
         let pending_len = pending.len();
         let mut outputs: Vec<Option<String>> = (0..pending_len).map(|_| None).collect();
-        let mut tool_durations: Vec<u128> = vec![0; pending_len];
+        let mut tool_durations: Vec<u64> = vec![0; pending_len];
         let mut read_idx: Vec<usize> = Vec::new();
         let mut read_futs = Vec::new();
         let mut serial: Vec<(usize, Arc<dyn Tool>, Value)> = Vec::new();
@@ -496,7 +496,7 @@ where
                     read_futs.push(async move {
                         let start = Instant::now();
                         let out = value_to_string(&tool.execute_cancelable(args, c).await);
-                        (out, start.elapsed().as_millis())
+                        (out, start.elapsed().as_millis() as u64)
                     });
                 }
                 Pending::Run {
@@ -521,7 +521,7 @@ where
             outputs[i] = Some(value_to_string(
                 &tool.execute_cancelable(args, cancel.clone()).await,
             ));
-            let ms = start.elapsed().as_millis();
+            let ms = start.elapsed().as_millis() as u64;
             tool_durations[i] = ms;
             metrics.tool_ms += ms;
         }
@@ -596,7 +596,7 @@ where
 
     metrics.steps = steps_taken;
     metrics.hit_step_limit = hit_step_limit;
-    metrics.total_ms = turn_started.elapsed().as_millis();
+    metrics.total_ms = turn_started.elapsed().as_millis() as u64;
 
     Ok(RunResult {
         messages,

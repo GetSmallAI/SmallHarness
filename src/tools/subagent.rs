@@ -136,7 +136,7 @@ impl SubagentTool {
                     call_id,
                     input_tokens,
                     output_tokens,
-                    duration_ms: start.elapsed().as_millis(),
+                    duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
         }

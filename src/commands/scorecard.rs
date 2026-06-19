@@ -28,6 +28,19 @@ pub(super) fn cmd_scorecard(args: &str, state: &AppState) -> Result<()> {
             let prs = crate::scorecard::recent_prs(limit)?;
             print!("{}", crate::scorecard::render_recent_prs(&prs));
         }
+        "pr" => {
+            let index = parts
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| anyhow::anyhow!("usage: /scorecard pr <n>"))?;
+            match crate::scorecard::recent_pr_by_index(index)? {
+                Some(pr) => print!("{}", crate::scorecard::render_pr_detail(&pr, index)),
+                None => println!(
+                    "  {YELLOW}!{RESET} {DIM}scorecard PR #{index} not found (try /scorecard prs){RESET}"
+                ),
+            }
+        }
         "close" => {
             let rest: Vec<&str> = parts.collect();
             let (label, url, run_tests) = parse_scorecard_close_args(&rest)?;
@@ -88,6 +101,7 @@ pub(super) fn close_scorecard_pr(
     let ship_record_path = ship_record_path.map(|path| path.display().to_string());
     match crate::scorecard::close_pr_for_workspace(crate::scorecard::PrCloseInput {
         workspace_root: &state.config.workspace_root,
+        session_dir: &state.config.session_dir,
         title,
         url,
         status,
@@ -121,6 +135,7 @@ pub(super) fn close_scorecard_pr(
                 "  {GREEN}✓{RESET} {DIM}scorecard saved →{RESET} {}",
                 summary.path.display()
             );
+            println!("  {DIM}detail → /scorecard pr 1{RESET}");
         }
         None => {
             println!(
@@ -155,7 +170,7 @@ fn parse_scorecard_close_args(args: &[&str]) -> Result<(String, Option<String>, 
 
 fn print_scorecard_usage() {
     println!(
-        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|close <label> [--url <url>] [--tests]|path|reset --yes]{RESET}"
+        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|pr <n>|close <label> [--url <url>] [--tests]|path|reset --yes]{RESET}"
     );
 }
 

@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -53,11 +53,11 @@ pub enum ApprovalDecision {
 pub struct TurnMetrics {
     pub steps: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttft_ms: Option<u128>,
-    pub model_ms: u128,
-    pub tool_ms: u128,
-    pub approval_ms: u128,
-    pub total_ms: u128,
+    pub ttft_ms: Option<u64>,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub approval_ms: u64,
+    pub total_ms: u64,
     pub hit_step_limit: bool,
 }
 
@@ -98,7 +98,7 @@ pub enum TracePayload {
     ToolResult {
         call_id: String,
         name: String,
-        duration_ms: u128,
+        duration_ms: u64,
         #[serde(default)]
         compacted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,7 +109,7 @@ pub enum TracePayload {
         tool: String,
         decision: ApprovalDecision,
         cache_key: String,
-        duration_ms: u128,
+        duration_ms: u64,
     },
     ContextCompacted {
         method: String,
@@ -124,18 +124,21 @@ pub enum TracePayload {
         call_id: String,
         input_tokens: u32,
         output_tokens: u32,
-        duration_ms: u128,
+        duration_ms: u64,
     },
     Warmup {
-        duration_ms: u128,
+        duration_ms: u64,
         reason: String,
     },
-    TurnSummary(TurnMetrics),
+    TurnSummary {
+        #[serde(flatten)]
+        metrics: TurnMetrics,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TraceLine {
+pub struct TraceLine {
     timestamp: String,
     turn: u32,
     #[serde(flatten)]
@@ -234,8 +237,8 @@ impl TurnTrace {
     }
 
     pub fn log_turn_summary(&self, mut metrics: TurnMetrics) -> Result<()> {
-        metrics.total_ms = self.turn_started.elapsed().as_millis();
-        self.append(TracePayload::TurnSummary(metrics))
+        metrics.total_ms = self.turn_started.elapsed().as_millis() as u64;
+        self.append(TracePayload::TurnSummary { metrics })
     }
 }
 
@@ -252,6 +255,118 @@ pub fn sync_trace_path(session_path: &Path, trace: &SharedTurnTrace) -> Result<(
     let mut guard = trace.lock().expect("turn trace mutex");
     guard.path = events_path_for_session(session_path);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTraceSummary {
+    pub session_id: String,
+    pub events_path: String,
+    pub turn_count: usize,
+    pub total_steps: usize,
+    pub tool_calls: usize,
+    pub subagent_runs: usize,
+    pub approvals: usize,
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub approval_ms: u64,
+    pub total_ms: u64,
+    pub trace_found: bool,
+}
+
+pub fn read_trace_events(path: &Path) -> Result<Vec<TraceLine>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<TraceLine>(&line) {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
+pub fn summarize_session_trace(session_path: &Path) -> SessionTraceSummary {
+    let session_id = session_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("session")
+        .to_string();
+    let events_path_buf = events_path_for_session(session_path);
+    let events_path = events_path_buf.display().to_string();
+    let mut summary = SessionTraceSummary {
+        session_id,
+        events_path,
+        turn_count: 0,
+        total_steps: 0,
+        tool_calls: 0,
+        subagent_runs: 0,
+        approvals: 0,
+        model_ms: 0,
+        tool_ms: 0,
+        approval_ms: 0,
+        total_ms: 0,
+        trace_found: false,
+    };
+    let Ok(events) = read_trace_events(&events_path_buf) else {
+        return summary;
+    };
+    if events.is_empty() {
+        return summary;
+    }
+    summary.trace_found = true;
+    for event in events {
+        match event.payload {
+            TracePayload::ToolCall { .. } => summary.tool_calls += 1,
+            TracePayload::SubagentEnd { .. } => summary.subagent_runs += 1,
+            TracePayload::Approval { .. } => summary.approvals += 1,
+            TracePayload::TurnSummary { metrics } => {
+                summary.turn_count += 1;
+                summary.total_steps += metrics.steps;
+                summary.model_ms += metrics.model_ms;
+                summary.tool_ms += metrics.tool_ms;
+                summary.approval_ms += metrics.approval_ms;
+                summary.total_ms += metrics.total_ms;
+            }
+            _ => {}
+        }
+    }
+    summary
+}
+
+/// Resolve a stored session path against workspace and session directory.
+pub fn resolve_session_path(
+    stored_path: &str,
+    workspace_root: &str,
+    session_dir: &str,
+    session_id: &str,
+) -> PathBuf {
+    let stored = Path::new(stored_path);
+    if stored.is_absolute() && stored.exists() {
+        return stored.to_path_buf();
+    }
+    let workspace = Path::new(workspace_root);
+    let from_workspace = workspace.join(stored_path);
+    if from_workspace.exists() {
+        return from_workspace;
+    }
+    if stored.exists() {
+        return stored.to_path_buf();
+    }
+    let from_session_dir = workspace
+        .join(session_dir)
+        .join(format!("{session_id}.jsonl"));
+    if from_session_dir.exists() {
+        return from_session_dir;
+    }
+    from_workspace
 }
 
 /// Test helper: disabled event log on a throwaway session path.
@@ -313,5 +428,113 @@ mod tests {
         assert!(s.contains("TTFT"));
         assert!(s.contains("model"));
         assert!(s.contains("tools"));
+    }
+
+    #[test]
+    fn deserializes_turn_summary_line() {
+        let line = r#"{"timestamp":"2026-06-19T02:36:38.670440+00:00","turn":1,"kind":"turnSummary","steps":2,"modelMs":100,"toolMs":200,"approvalMs":0,"totalMs":0,"hitStepLimit":false}"#;
+        let parsed: TraceLine = serde_json::from_str(line).expect("trace line");
+        match parsed.payload {
+            TracePayload::TurnSummary { metrics } => assert_eq!(metrics.steps, 2),
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_trace_events_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let session = dir.path().join("roundtrip.jsonl");
+        let mut trace = TurnTrace::open(&session, true).unwrap();
+        trace.begin_turn();
+        trace
+            .append(TracePayload::ToolCall {
+                call_id: "1".into(),
+                name: "grep".into(),
+                args: serde_json::json!({ "pattern": "foo" }),
+                depth: 0,
+            })
+            .unwrap();
+        trace
+            .log_turn_summary(TurnMetrics {
+                steps: 2,
+                ttft_ms: None,
+                model_ms: 100,
+                tool_ms: 200,
+                approval_ms: 0,
+                total_ms: 0,
+                hit_step_limit: false,
+            })
+            .unwrap();
+        let events = read_trace_events(&events_path_for_session(&session)).unwrap();
+        assert_eq!(events.len(), 2, "parsed trace lines");
+        assert!(matches!(events[0].payload, TracePayload::ToolCall { .. }));
+        assert!(matches!(
+            events[1].payload,
+            TracePayload::TurnSummary { .. }
+        ));
+    }
+
+    #[test]
+    fn summarize_session_trace_aggregates_turn_metrics() {
+        let dir = TempDir::new().unwrap();
+        let session = dir.path().join("audit-session.jsonl");
+        let mut trace = TurnTrace::open(&session, true).unwrap();
+        trace.begin_turn();
+        trace
+            .append(TracePayload::ToolCall {
+                call_id: "1".into(),
+                name: "grep".into(),
+                args: serde_json::json!({ "pattern": "foo" }),
+                depth: 0,
+            })
+            .unwrap();
+        trace
+            .append(TracePayload::SubagentEnd {
+                call_id: "task-1".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                duration_ms: 200,
+            })
+            .unwrap();
+        trace
+            .append(TracePayload::Approval {
+                tool: "file_edit".into(),
+                decision: ApprovalDecision::Allowed,
+                cache_key: "edit".into(),
+                duration_ms: 50,
+            })
+            .unwrap();
+        trace
+            .log_turn_summary(TurnMetrics {
+                steps: 3,
+                ttft_ms: Some(100),
+                model_ms: 500,
+                tool_ms: 1200,
+                approval_ms: 50,
+                total_ms: 0,
+                hit_step_limit: false,
+            })
+            .unwrap();
+
+        let summary = summarize_session_trace(&session);
+        assert!(summary.trace_found);
+        assert_eq!(summary.session_id, "audit-session");
+        assert_eq!(summary.turn_count, 1);
+        assert_eq!(summary.total_steps, 3);
+        assert_eq!(summary.tool_calls, 1);
+        assert_eq!(summary.subagent_runs, 1);
+        assert_eq!(summary.approvals, 1);
+        assert_eq!(summary.model_ms, 500);
+        assert_eq!(summary.tool_ms, 1200);
+        assert_eq!(summary.approval_ms, 50);
+    }
+
+    #[test]
+    fn summarize_missing_trace_returns_not_found() {
+        let dir = TempDir::new().unwrap();
+        let session = dir.path().join("missing.jsonl");
+        let summary = summarize_session_trace(&session);
+        assert!(!summary.trace_found);
+        assert_eq!(summary.turn_count, 0);
     }
 }

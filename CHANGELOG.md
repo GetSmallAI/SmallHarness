@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-19
+
 ### Added
 
 - **Scorecard quality loop.** Manual `/scorecard close` now runs shipcheck and
@@ -14,6 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   record paths. Turn footer and `/ship` preview nudge when a branch accumulates
   tracked turns. Configure via `scorecard.enabled`, `qualityThreshold`, and
   `nudgeMinTurns` in `agent.config.json`.
+- **Scorecard audit trail.** PR close now snapshots per-session turn-trace
+  summaries (turns, steps, tool calls, timing) from local `.events.jsonl` logs.
+  `/scorecard prs` shows numbered rows; `/scorecard pr <n>` drills into quality
+  evidence, sessions, and artifact paths captured at close time.
+
+### Fixed
+
+- **Turn trace JSON.** Event log timing fields now use `u64` milliseconds so
+  turn summaries deserialize correctly from JSONL (fixes scorecard audit reads).
 
 ## [1.0.2] - 2026-06-18
 
