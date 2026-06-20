@@ -331,6 +331,7 @@ this exact call`. The session cache resets on `/new`.
 /scorecard current               show tracked tokens on the current repo/branch
 /scorecard prs [limit]            list recent closed PRs (numbered)
 /scorecard pr <n>                 drill into PR quality, sessions, and trace audit
+/scorecard verify <n>|--all       append GitHub PR checks/review/merge verification
 /scorecard close <label> [--url <url>] [--tests]  close branch with shipcheck quality score
 /scorecard doctor                inspect the local scorecard ledger for malformed JSONL
 /scorecard export [path]          copy the raw scorecard ledger before repair or sharing
@@ -449,6 +450,12 @@ closes with session and ship-record hints; `/scorecard pr <n>` shows the full
 audit captured at close time — quality rubric, per-session turn-trace summaries
 (turns, steps, tool calls, timing), paths to session event logs, and explicit
 reasons when a scored PR did not count as quality-shipped.
+
+For PRs with GitHub URLs, `/scorecard verify <n>` refreshes the remote outcome
+through `gh pr view`: PR state, review decision, mergeability, and check-rollup
+status. `/scorecard verify --all` appends verification events for all recent
+verifiable PRs. This does not rewrite the local close-time score; it adds later
+remote evidence that `/scorecard pr <n>` renders next to the original audit.
 
 After enough turns on a feature branch, the turn footer nudges you to close via
 `/ship pr`. Audit snapshots come from local event logs at close time; export raw

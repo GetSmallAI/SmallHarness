@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scorecard ledger, reports valid turns/PRs, and lists skipped malformed JSONL
   lines. `/scorecard export [path]` copies the raw ledger before repair or
   sharing.
+- **Scorecard remote verification.** `/scorecard verify <n>` fetches GitHub PR
+  state, review decision, mergeability, and check-rollup status for a closed PR
+  with a stored GitHub URL. `/scorecard verify --all` refreshes all verifiable
+  recent PRs and appends verification events without mutating the original local
+  close-time audit snapshot.
 
 ### Changed
 

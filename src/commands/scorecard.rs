@@ -41,6 +41,33 @@ pub(super) fn cmd_scorecard(args: &str, state: &AppState) -> Result<()> {
                 ),
             }
         }
+        "verify" => {
+            let target = parts.next().unwrap_or("");
+            if target == "--all" {
+                match crate::scorecard::verify_all_prs(&state.config.workspace_root)? {
+                    Some(summary) => {
+                        print!("{}", crate::scorecard::render_verify_all_summary(&summary))
+                    }
+                    None => println!(
+                        "  {YELLOW}!{RESET} {DIM}scorecard store unavailable: HOME is unset{RESET}"
+                    ),
+                }
+            } else {
+                let index = target
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| anyhow::anyhow!("usage: /scorecard verify <n>|--all"))?;
+                match crate::scorecard::verify_recent_pr(index, &state.config.workspace_root)? {
+                    Some(summary) => {
+                        print!("{}", crate::scorecard::render_verification_summary(&summary))
+                    }
+                    None => println!(
+                        "  {YELLOW}!{RESET} {DIM}scorecard PR #{index} not found (try /scorecard prs){RESET}"
+                    ),
+                }
+            }
+        }
         "close" => {
             let rest: Vec<&str> = parts.collect();
             let (label, url, run_tests) = parse_scorecard_close_args(&rest)?;
@@ -204,7 +231,7 @@ fn parse_scorecard_close_args(args: &[&str]) -> Result<(String, Option<String>, 
 
 fn print_scorecard_usage() {
     println!(
-        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|pr <n>|close <label> [--url <url>] [--tests]|doctor|export [path]|path|reset --yes]{RESET}"
+        "  {DIM}Usage: /scorecard [daily|current|prs [limit]|pr <n>|verify <n>|verify --all|close <label> [--url <url>] [--tests]|doctor|export [path]|path|reset --yes]{RESET}"
     );
 }
 

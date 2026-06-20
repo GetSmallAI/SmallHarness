@@ -29,6 +29,7 @@ pub struct WorkUnit {
 pub enum ScorecardEvent {
     Turn(ScorecardTurn),
     Pr(ScorecardPr),
+    Verification(ScorecardVerification),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +72,58 @@ pub struct ScorecardPr {
     pub quality: Option<ScorecardQuality>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_traces: Vec<crate::turn_trace::SessionTraceSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<ScorecardVerification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScorecardVerification {
+    pub timestamp: String,
+    pub pr_timestamp: String,
+    pub source: String,
+    pub url: String,
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub head_branch: String,
+    pub base_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<String>,
+    pub checks: ScorecardRemoteChecks,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_runs: Vec<ScorecardRemoteCheck>,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScorecardRemoteChecks {
+    pub total: usize,
+    pub success: usize,
+    pub failing: usize,
+    pub pending: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScorecardRemoteCheck {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +245,7 @@ pub struct ScorecardStoreDiagnostics {
     pub event_count: usize,
     pub turn_count: usize,
     pub pr_count: usize,
+    pub verification_count: usize,
     pub malformed_count: usize,
     pub malformed_lines: Vec<MalformedScorecardLine>,
 }
@@ -206,6 +260,35 @@ struct ScorecardRead {
 pub struct ScorecardResetSummary {
     pub path: PathBuf,
     pub backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardVerifySummary {
+    pub path: PathBuf,
+    pub index: usize,
+    pub verification: ScorecardVerification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardVerifySkip {
+    pub index: usize,
+    pub title: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardVerifyError {
+    pub index: usize,
+    pub title: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScorecardVerifyAllSummary {
+    pub path: PathBuf,
+    pub verified: Vec<ScorecardVerifySummary>,
+    pub skipped: Vec<ScorecardVerifySkip>,
+    pub failed: Vec<ScorecardVerifyError>,
 }
 
 pub fn scorecard_path() -> Option<PathBuf> {
@@ -289,13 +372,7 @@ pub fn recent_prs(limit: usize) -> Result<Vec<ScorecardPr>> {
     let Some(path) = scorecard_path() else {
         return Ok(Vec::new());
     };
-    let mut prs: Vec<ScorecardPr> = read_events(&path)?
-        .into_iter()
-        .filter_map(|event| match event {
-            ScorecardEvent::Pr(pr) => Some(pr),
-            ScorecardEvent::Turn(_) => None,
-        })
-        .collect();
+    let mut prs = closed_prs_with_verifications(&read_events(&path)?);
     prs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     prs.truncate(limit);
     Ok(prs)
@@ -343,6 +420,27 @@ pub fn reset_store() -> Result<Option<ScorecardResetSummary>> {
     Ok(Some(reset_store_at_path(&path)?))
 }
 
+pub fn verify_recent_pr(
+    index: usize,
+    workspace_root: &str,
+) -> Result<Option<ScorecardVerifySummary>> {
+    let Some(path) = scorecard_path() else {
+        return Ok(None);
+    };
+    verify_recent_pr_at_path(&path, index, |pr| {
+        fetch_github_pr_verification(workspace_root, pr, Utc::now())
+    })
+}
+
+pub fn verify_all_prs(workspace_root: &str) -> Result<Option<ScorecardVerifyAllSummary>> {
+    let Some(path) = scorecard_path() else {
+        return Ok(None);
+    };
+    Ok(Some(verify_all_prs_at_path(&path, |pr| {
+        fetch_github_pr_verification(workspace_root, pr, Utc::now())
+    })?))
+}
+
 pub fn render_report(report: &ScorecardReport) -> String {
     let mut out = String::new();
     let total_prs = report.closed_prs.len();
@@ -353,6 +451,7 @@ pub fn render_report(report: &ScorecardReport) -> String {
     let avg_quality = average_quality_score(&report.closed_prs);
     let tokens_per_quality_pr = average_tokens_per_quality_pr(&report.closed_prs);
     let top_quality = top_quality_pr(&report.closed_prs);
+    let (remote_ok, remote_checked) = remote_verified_count(&report.closed_prs);
 
     out.push_str(&format!(
         "  {DIM}scorecard{RESET}       global quality PRs shipped\n"
@@ -413,6 +512,19 @@ pub fn render_report(report: &ScorecardReport) -> String {
         "All turns",
         report.turn_count
     ));
+    out.push_str(&format!(
+        "  {CYAN}{:<13}{RESET} {:>10}   {CYAN}{:<13}{RESET} {:>10}   {CYAN}{:<13}{RESET} {:>10}\n",
+        "Remote OK",
+        if remote_checked == 0 {
+            "n/a".to_string()
+        } else {
+            format!("{remote_ok}/{remote_checked}")
+        },
+        "Remote rate",
+        format_rate(remote_ok, remote_checked),
+        "Verified",
+        remote_checked
+    ));
     out.push('\n');
     out.push_str(&format!(
         "  {DIM}current{RESET}         {} · {}\n",
@@ -439,6 +551,9 @@ pub fn render_report(report: &ScorecardReport) -> String {
             "\n  {DIM}Daily grid shows quality PRs shipped. Tokens are context, not the score.{RESET}\n"
         ));
         out.push_str(&format!("  {DIM}recent detail → /scorecard pr 1{RESET}\n"));
+        out.push_str(&format!(
+            "  {DIM}remote check → /scorecard verify 1 or /scorecard verify --all{RESET}\n"
+        ));
     }
     out
 }
@@ -463,8 +578,11 @@ pub fn render_diagnostics(diagnostics: &ScorecardStoreDiagnostics) -> String {
         diagnostics.total_lines, diagnostics.blank_lines, diagnostics.malformed_count
     ));
     out.push_str(&format!(
-        "  {DIM}events{RESET}          {} valid · {} turn(s) · {} PR close(s)\n",
-        diagnostics.event_count, diagnostics.turn_count, diagnostics.pr_count
+        "  {DIM}events{RESET}          {} valid · {} turn(s) · {} PR close(s) · {} verification(s)\n",
+        diagnostics.event_count,
+        diagnostics.turn_count,
+        diagnostics.pr_count,
+        diagnostics.verification_count
     ));
     if diagnostics.malformed_count == 0 {
         out.push_str(&format!(
@@ -587,6 +705,13 @@ pub fn render_pr_detail(pr: &ScorecardPr, index: usize) -> String {
     } else {
         out.push_str(&format!("  {DIM}quality{RESET}         unrated\n"));
     }
+    if let Some(remote) = pr.remote.as_ref() {
+        out.push_str(&render_remote_verification(remote));
+    } else if pr.url.as_deref().and_then(parse_github_pr_url).is_some() {
+        out.push_str(&format!(
+            "  {DIM}remote{RESET}          not verified yet · run /scorecard verify {index}\n"
+        ));
+    }
     if let Some(path) = pr.ship_record_path.as_deref() {
         out.push_str(&format!("  {DIM}ship record{RESET}    {path}\n"));
     }
@@ -656,7 +781,138 @@ fn render_pr_evidence_line(pr: &ScorecardPr) -> String {
             parts.push(format!("not counted: {}", quality.reasons.join(" · ")));
         }
     }
+    if let Some(remote) = pr.remote.as_ref() {
+        parts.push(format!(
+            "remote {} · {} success · {} failing · {} pending",
+            remote_outcome_label(&remote.outcome),
+            remote.checks.success,
+            remote.checks.failing,
+            remote.checks.pending
+        ));
+    }
     parts.join(" · ")
+}
+
+pub fn render_verification_summary(summary: &ScorecardVerifySummary) -> String {
+    let remote = &summary.verification;
+    format!(
+        "  {GREEN}✓{RESET} {DIM}scorecard remote verified:{RESET} #{} {} · {} · {} success · {} failing · {} pending\n  {GREEN}✓{RESET} {DIM}scorecard saved →{RESET} {}\n  {DIM}detail → /scorecard pr {}{RESET}\n",
+        remote.number,
+        one_line(&remote.title, 72),
+        remote_outcome_label(&remote.outcome),
+        remote.checks.success,
+        remote.checks.failing,
+        remote.checks.pending,
+        summary.path.display(),
+        summary.index
+    )
+}
+
+pub fn render_verify_all_summary(summary: &ScorecardVerifyAllSummary) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {GREEN}✓{RESET} {DIM}scorecard remote verify:{RESET} {} verified · {} skipped · {} failed\n",
+        summary.verified.len(),
+        summary.skipped.len(),
+        summary.failed.len()
+    ));
+    for item in &summary.verified {
+        out.push_str(&format!(
+            "    #{:<3} {} · {} success · {} failing · {} pending · {}\n",
+            item.index,
+            remote_outcome_label(&item.verification.outcome),
+            item.verification.checks.success,
+            item.verification.checks.failing,
+            item.verification.checks.pending,
+            one_line(&item.verification.title, 64)
+        ));
+    }
+    for item in &summary.skipped {
+        out.push_str(&format!(
+            "    {YELLOW}!{RESET} #{:<3} skipped · {} · {}\n",
+            item.index,
+            item.reason,
+            one_line(&item.title, 64)
+        ));
+    }
+    for item in &summary.failed {
+        out.push_str(&format!(
+            "    {YELLOW}!{RESET} #{:<3} failed · {} · {}\n",
+            item.index,
+            one_line(&item.error, 80),
+            one_line(&item.title, 64)
+        ));
+    }
+    out.push_str(&format!(
+        "  {GREEN}✓{RESET} {DIM}scorecard saved →{RESET} {}\n",
+        summary.path.display()
+    ));
+    out
+}
+
+fn render_remote_verification(remote: &ScorecardVerification) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {DIM}remote{RESET}          {} · checked {} · GitHub #{}\n",
+        remote_outcome_label(&remote.outcome),
+        pr_date_label(&remote.timestamp),
+        remote.number
+    ));
+    out.push_str(&format!(
+        "  {DIM}remote state{RESET}    {} · review {} · mergeable {}\n",
+        remote.state,
+        remote.review_decision.as_deref().unwrap_or("none"),
+        remote.mergeable.as_deref().unwrap_or("unknown")
+    ));
+    out.push_str(&format!(
+        "  {DIM}remote checks{RESET}   {} success · {} failing · {} pending · {} skipped\n",
+        remote.checks.success, remote.checks.failing, remote.checks.pending, remote.checks.skipped
+    ));
+    for reason in &remote.reasons {
+        out.push_str(&format!("    {YELLOW}!{RESET} {reason}\n"));
+    }
+    for check in remote.check_runs.iter().take(6) {
+        out.push_str(&format!(
+            "    {} {}\n",
+            remote_check_marker(remote_check_bucket(check)),
+            remote_check_line(check)
+        ));
+    }
+    if remote.check_runs.len() > 6 {
+        out.push_str(&format!(
+            "    {DIM}... {} more check(s){RESET}\n",
+            remote.check_runs.len() - 6
+        ));
+    }
+    out
+}
+
+fn remote_check_marker(bucket: RemoteCheckBucket) -> &'static str {
+    match bucket {
+        RemoteCheckBucket::Success => "✓",
+        RemoteCheckBucket::Failing => "✗",
+        RemoteCheckBucket::Pending => "...",
+        RemoteCheckBucket::Skipped => "-",
+    }
+}
+
+fn remote_check_line(check: &ScorecardRemoteCheck) -> String {
+    let mut label = String::new();
+    if let Some(workflow) = &check.workflow {
+        label.push_str(workflow);
+        label.push_str(" / ");
+    }
+    label.push_str(&check.name);
+    let state = check
+        .conclusion
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&check.status);
+    label.push_str(&format!(" ({state})"));
+    if let Some(url) = &check.details_url {
+        label.push_str(&format!(" {url}"));
+    }
+    label
 }
 
 pub fn render_current(summary: &OpenUnitSummary) -> String {
@@ -681,6 +937,75 @@ pub fn current_summary(workspace_root: &str) -> Result<OpenUnitSummary> {
         &events,
         &current_work_unit(workspace_root),
     ))
+}
+
+fn verify_recent_pr_at_path<F>(
+    path: &Path,
+    index: usize,
+    mut fetch: F,
+) -> Result<Option<ScorecardVerifySummary>>
+where
+    F: FnMut(&ScorecardPr) -> Result<ScorecardVerification>,
+{
+    if index == 0 {
+        return Ok(None);
+    }
+    let mut prs = closed_prs_with_verifications(&read_events(path)?);
+    prs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    let Some(pr) = prs.get(index - 1) else {
+        return Ok(None);
+    };
+    ensure_verifiable_github_pr(pr)?;
+    let verification = fetch(pr)?;
+    append_event(path, &ScorecardEvent::Verification(verification.clone()))?;
+    Ok(Some(ScorecardVerifySummary {
+        path: path.to_path_buf(),
+        index,
+        verification,
+    }))
+}
+
+fn verify_all_prs_at_path<F>(path: &Path, mut fetch: F) -> Result<ScorecardVerifyAllSummary>
+where
+    F: FnMut(&ScorecardPr) -> Result<ScorecardVerification>,
+{
+    let mut prs = closed_prs_with_verifications(&read_events(path)?);
+    prs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    let mut summary = ScorecardVerifyAllSummary {
+        path: path.to_path_buf(),
+        verified: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+    };
+
+    for (offset, pr) in prs.iter().enumerate() {
+        let index = offset + 1;
+        if let Err(error) = ensure_verifiable_github_pr(pr) {
+            summary.skipped.push(ScorecardVerifySkip {
+                index,
+                title: pr.title.clone(),
+                reason: error.to_string(),
+            });
+            continue;
+        }
+        match fetch(pr) {
+            Ok(verification) => {
+                append_event(path, &ScorecardEvent::Verification(verification.clone()))?;
+                summary.verified.push(ScorecardVerifySummary {
+                    path: path.to_path_buf(),
+                    index,
+                    verification,
+                });
+            }
+            Err(error) => summary.failed.push(ScorecardVerifyError {
+                index,
+                title: pr.title.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    Ok(summary)
 }
 
 fn close_pr_at_path(
@@ -724,6 +1049,7 @@ fn close_pr_at_path(
             .filter(|path| !path.is_empty())
             .map(str::to_string),
         session_traces,
+        remote: None,
     };
     append_event(path, &ScorecardEvent::Pr(pr.clone()))?;
     Ok(Some(PrCloseSummary {
@@ -741,7 +1067,7 @@ fn build_report(
 ) -> ScorecardReport {
     let mut lifetime_tokens = 0_u64;
     let mut turn_count = 0_usize;
-    let mut closed_prs = Vec::new();
+    let mut closed_prs = closed_prs_with_verifications(events);
     let mut daily_scores: BTreeMap<NaiveDate, DailyScore> = BTreeMap::new();
 
     for event in events {
@@ -770,8 +1096,8 @@ fn build_report(
                         }
                     }
                 }
-                closed_prs.push(pr.clone());
             }
+            ScorecardEvent::Verification(_) => {}
         }
     }
 
@@ -791,6 +1117,306 @@ fn build_report(
         today,
         diagnostics,
     }
+}
+
+fn closed_prs_with_verifications(events: &[ScorecardEvent]) -> Vec<ScorecardPr> {
+    let mut latest: BTreeMap<(String, String), ScorecardVerification> = BTreeMap::new();
+    for event in events {
+        let ScorecardEvent::Verification(verification) = event else {
+            continue;
+        };
+        latest.insert(
+            (
+                verification.pr_timestamp.clone(),
+                normalize_url_key(&verification.url),
+            ),
+            verification.clone(),
+        );
+    }
+
+    events
+        .iter()
+        .filter_map(|event| {
+            let ScorecardEvent::Pr(pr) = event else {
+                return None;
+            };
+            let mut pr = pr.clone();
+            if let Some(url) = pr.url.as_deref() {
+                pr.remote = latest
+                    .get(&(pr.timestamp.clone(), normalize_url_key(url)))
+                    .cloned();
+            }
+            Some(pr)
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubPrRef {
+    repo: String,
+    number: u64,
+    url: String,
+}
+
+fn ensure_verifiable_github_pr(pr: &ScorecardPr) -> Result<()> {
+    let url = pr
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("PR has no URL"))?;
+    parse_github_pr_url(url)
+        .map(|_| ())
+        .ok_or_else(|| anyhow::anyhow!("PR URL is not a GitHub pull request URL"))
+}
+
+fn fetch_github_pr_verification(
+    workspace_root: &str,
+    pr: &ScorecardPr,
+    now: DateTime<Utc>,
+) -> Result<ScorecardVerification> {
+    let command = build_github_pr_view_command(pr)?;
+    let output = run_command_capture_combined(workspace_root, &command)?;
+    parse_github_pr_view_json(pr, &output, now)
+}
+
+fn build_github_pr_view_command(pr: &ScorecardPr) -> Result<Vec<String>> {
+    let url = pr
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("PR has no URL"))?;
+    let target = parse_github_pr_url(url)
+        .ok_or_else(|| anyhow::anyhow!("PR URL is not a GitHub pull request URL"))?;
+    Ok(vec![
+        "gh".to_string(),
+        "pr".to_string(),
+        "view".to_string(),
+        target.url,
+        "--repo".to_string(),
+        target.repo,
+        "--json".to_string(),
+        "number,url,title,state,isDraft,mergedAt,headRefName,baseRefName,reviewDecision,mergeable,statusCheckRollup"
+            .to_string(),
+    ])
+}
+
+fn parse_github_pr_url(url: &str) -> Option<GithubPrRef> {
+    let mut trimmed = url.trim();
+    let query_pos = trimmed.find('?').into_iter().chain(trimmed.find('#')).min();
+    if let Some(pos) = query_pos {
+        trimmed = &trimmed[..pos];
+    }
+    trimmed = trimmed.trim_end_matches('/');
+    let rest = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+        .or_else(|| trimmed.strip_prefix("https://www.github.com/"))
+        .or_else(|| trimmed.strip_prefix("http://www.github.com/"))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    let marker = parts.next()?.trim();
+    let number = parts.next()?.trim().parse::<u64>().ok()?;
+    if owner.is_empty() || repo.is_empty() || marker != "pull" {
+        return None;
+    }
+    Some(GithubPrRef {
+        repo: format!("{owner}/{repo}"),
+        number,
+        url: format!("https://github.com/{owner}/{repo}/pull/{number}"),
+    })
+}
+
+fn parse_github_pr_view_json(
+    local_pr: &ScorecardPr,
+    output: &str,
+    now: DateTime<Utc>,
+) -> Result<ScorecardVerification> {
+    let value: serde_json::Value = serde_json::from_str(output.trim())
+        .map_err(|e| anyhow::anyhow!("failed to parse gh PR JSON: {e}"))?;
+    let url = json_string(&value, "url")
+        .or_else(|| local_pr.url.clone())
+        .ok_or_else(|| anyhow::anyhow!("gh PR JSON did not include a URL"))?;
+    let target = parse_github_pr_url(&url)
+        .ok_or_else(|| anyhow::anyhow!("gh PR JSON URL is not a GitHub pull request URL"))?;
+    let check_runs = parse_remote_checks(&value);
+    let checks = remote_check_counts(&check_runs);
+    let state = json_string(&value, "state").unwrap_or_else(|| "UNKNOWN".into());
+    let merged = state.eq_ignore_ascii_case("MERGED") || json_string(&value, "mergedAt").is_some();
+    let draft = value
+        .get("isDraft")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let review_decision = json_string(&value, "reviewDecision");
+    let mergeable = json_string(&value, "mergeable");
+    let (outcome, reasons) =
+        classify_remote_outcome(&state, merged, draft, review_decision.as_deref(), checks);
+
+    Ok(ScorecardVerification {
+        timestamp: now.to_rfc3339(),
+        pr_timestamp: local_pr.timestamp.clone(),
+        source: "github".into(),
+        url: target.url,
+        repo: target.repo,
+        number: value
+            .get("number")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(target.number),
+        title: json_string(&value, "title").unwrap_or_else(|| local_pr.title.clone()),
+        state,
+        merged,
+        draft,
+        head_branch: json_string(&value, "headRefName").unwrap_or_default(),
+        base_branch: json_string(&value, "baseRefName").unwrap_or_default(),
+        review_decision,
+        mergeable,
+        checks,
+        check_runs,
+        outcome,
+        reasons,
+    })
+}
+
+fn parse_remote_checks(value: &serde_json::Value) -> Vec<ScorecardRemoteCheck> {
+    value
+        .get("statusCheckRollup")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| ScorecardRemoteCheck {
+                    name: json_string(item, "name")
+                        .or_else(|| json_string(item, "context"))
+                        .unwrap_or_else(|| "unnamed check".into()),
+                    workflow: json_string(item, "workflowName"),
+                    status: json_string(item, "status")
+                        .or_else(|| json_string(item, "state"))
+                        .unwrap_or_else(|| "UNKNOWN".into()),
+                    conclusion: json_string(item, "conclusion"),
+                    details_url: json_string(item, "detailsUrl")
+                        .or_else(|| json_string(item, "targetUrl")),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn remote_check_counts(checks: &[ScorecardRemoteCheck]) -> ScorecardRemoteChecks {
+    let mut counts = ScorecardRemoteChecks {
+        total: checks.len(),
+        ..ScorecardRemoteChecks::default()
+    };
+    for check in checks {
+        match remote_check_bucket(check) {
+            RemoteCheckBucket::Success => counts.success += 1,
+            RemoteCheckBucket::Failing => counts.failing += 1,
+            RemoteCheckBucket::Pending => counts.pending += 1,
+            RemoteCheckBucket::Skipped => counts.skipped += 1,
+        }
+    }
+    counts
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteCheckBucket {
+    Success,
+    Failing,
+    Pending,
+    Skipped,
+}
+
+fn remote_check_bucket(check: &ScorecardRemoteCheck) -> RemoteCheckBucket {
+    let conclusion = check.conclusion.as_deref().map(str::to_ascii_uppercase);
+    let status = check.status.to_ascii_uppercase();
+
+    if matches!(conclusion.as_deref(), Some("SUCCESS")) || status == "SUCCESS" {
+        RemoteCheckBucket::Success
+    } else if matches!(
+        conclusion.as_deref(),
+        Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "ERROR")
+    ) || matches!(status.as_str(), "FAILURE" | "ERROR")
+    {
+        RemoteCheckBucket::Failing
+    } else if matches!(conclusion.as_deref(), Some("SKIPPED" | "NEUTRAL")) {
+        RemoteCheckBucket::Skipped
+    } else {
+        RemoteCheckBucket::Pending
+    }
+}
+
+fn classify_remote_outcome(
+    state: &str,
+    merged: bool,
+    draft: bool,
+    review_decision: Option<&str>,
+    checks: ScorecardRemoteChecks,
+) -> (String, Vec<String>) {
+    let mut reasons = Vec::new();
+    let state_upper = state.to_ascii_uppercase();
+
+    if checks.failing > 0 {
+        reasons.push(format!("{} remote check(s) failing", checks.failing));
+        return ("failing".into(), reasons);
+    }
+    if checks.pending > 0 {
+        reasons.push(format!("{} remote check(s) pending", checks.pending));
+        return ("pending".into(), reasons);
+    }
+    if state_upper == "CLOSED" && !merged {
+        reasons.push("PR is closed without merge".into());
+        return ("closed".into(), reasons);
+    }
+    if draft {
+        reasons.push("PR is still draft".into());
+        return ("draft".into(), reasons);
+    }
+    if review_decision == Some("CHANGES_REQUESTED") {
+        reasons.push("review changes requested".into());
+        return ("changesRequested".into(), reasons);
+    }
+    if checks.total == 0 {
+        reasons.push("no remote checks reported".into());
+        return ("unchecked".into(), reasons);
+    }
+    if review_decision == Some("REVIEW_REQUIRED") && !merged {
+        reasons.push("review still required".into());
+        return ("reviewRequired".into(), reasons);
+    }
+    if merged {
+        return ("merged".into(), reasons);
+    }
+    ("verified".into(), reasons)
+}
+
+fn run_command_capture_combined(workspace_root: &str, args: &[String]) -> Result<String> {
+    let Some((program, rest)) = args.split_first() else {
+        anyhow::bail!("empty command");
+    };
+    let output = Command::new(program)
+        .current_dir(workspace_root)
+        .args(rest)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run {program}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let detail = stderr.trim();
+        anyhow::bail!(
+            "gh PR verification failed{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    let mut combined = String::new();
+    combined.push_str(&stdout);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    Ok(combined)
 }
 
 fn open_summary_for_unit(events: &[ScorecardEvent], unit: &WorkUnit) -> OpenUnitSummary {
@@ -1071,6 +1697,7 @@ fn read_events_with_diagnostics(path: &Path) -> Result<ScorecardRead> {
         event_count: 0,
         turn_count: 0,
         pr_count: 0,
+        verification_count: 0,
         malformed_count: 0,
         malformed_lines: Vec::new(),
     };
@@ -1097,6 +1724,7 @@ fn read_events_with_diagnostics(path: &Path) -> Result<ScorecardRead> {
                 match &event {
                     ScorecardEvent::Turn(_) => diagnostics.turn_count += 1,
                     ScorecardEvent::Pr(_) => diagnostics.pr_count += 1,
+                    ScorecardEvent::Verification(_) => diagnostics.verification_count += 1,
                 }
                 events.push(event);
             }
@@ -1322,6 +1950,18 @@ fn clean_ship_count(prs: &[ScorecardPr]) -> usize {
         .count()
 }
 
+fn remote_verified_count(prs: &[ScorecardPr]) -> (usize, usize) {
+    let mut checked = 0_usize;
+    let mut ok = 0_usize;
+    for verification in prs.iter().filter_map(|pr| pr.remote.as_ref()) {
+        checked += 1;
+        if remote_outcome_is_ok(&verification.outcome) {
+            ok += 1;
+        }
+    }
+    (ok, checked)
+}
+
 fn average_quality_score(prs: &[ScorecardPr]) -> Option<u8> {
     let mut count = 0_u64;
     let mut total = 0_u64;
@@ -1365,6 +2005,25 @@ fn format_quality_cell(quality: Option<&ScorecardQuality>) -> String {
 
 fn format_quality_score(score: u8) -> String {
     format!("{score}/100")
+}
+
+fn remote_outcome_label(outcome: &str) -> &'static str {
+    match outcome {
+        "merged" => "merged",
+        "verified" => "verified",
+        "pending" => "pending",
+        "failing" => "failing",
+        "changesRequested" => "changes requested",
+        "reviewRequired" => "review required",
+        "draft" => "draft",
+        "closed" => "closed",
+        "unchecked" => "unchecked",
+        _ => "unknown",
+    }
+}
+
+fn remote_outcome_is_ok(outcome: &str) -> bool {
+    matches!(outcome, "verified" | "merged")
 }
 
 fn format_rate(numerator: usize, denominator: usize) -> String {
@@ -1431,6 +2090,26 @@ fn one_line(text: &str, max_chars: usize) -> String {
     truncated.push('…');
     out = truncated;
     out
+}
+
+fn normalize_url_key(url: &str) -> String {
+    if let Some(target) = parse_github_pr_url(url) {
+        return target.url.to_ascii_lowercase();
+    }
+    let mut key = url.trim().to_ascii_lowercase();
+    while key.ends_with('/') {
+        key.pop();
+    }
+    key
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn month_label(month: u32) -> &'static str {
@@ -1506,6 +2185,7 @@ mod tests {
             ship_record_path: None,
             quality: None,
             session_traces: Vec::new(),
+            remote: None,
         })
     }
 
@@ -1536,7 +2216,52 @@ mod tests {
                 warnings: Vec::new(),
             }),
             session_traces: Vec::new(),
+            remote: None,
         })
+    }
+
+    fn github_pr_event(day: u32, title: &str) -> ScorecardEvent {
+        let ScorecardEvent::Pr(mut pr) = quality_pr(day, 1000, title, 92, true) else {
+            unreachable!();
+        };
+        pr.url =
+            Some("https://github.com/GetSmallAI/SmallHarness/pull/42/files?check_suite=1".into());
+        ScorecardEvent::Pr(pr)
+    }
+
+    fn verification_for(pr: &ScorecardPr, outcome: &str) -> ScorecardVerification {
+        ScorecardVerification {
+            timestamp: "2026-06-20T12:00:00Z".into(),
+            pr_timestamp: pr.timestamp.clone(),
+            source: "github".into(),
+            url: pr.url.clone().unwrap(),
+            repo: "GetSmallAI/SmallHarness".into(),
+            number: 42,
+            title: pr.title.clone(),
+            state: "OPEN".into(),
+            merged: false,
+            draft: false,
+            head_branch: "feature".into(),
+            base_branch: "main".into(),
+            review_decision: Some("APPROVED".into()),
+            mergeable: Some("MERGEABLE".into()),
+            checks: ScorecardRemoteChecks {
+                total: 2,
+                success: 2,
+                failing: 0,
+                pending: 0,
+                skipped: 0,
+            },
+            check_runs: vec![ScorecardRemoteCheck {
+                name: "cargo test".into(),
+                workflow: Some("CI".into()),
+                status: "COMPLETED".into(),
+                conclusion: Some("SUCCESS".into()),
+                details_url: Some("https://example.com/check".into()),
+            }],
+            outcome: outcome.into(),
+            reasons: Vec::new(),
+        }
     }
 
     fn git(dir: &Path, args: &[&str]) {
@@ -1618,6 +2343,114 @@ mod tests {
     }
 
     #[test]
+    fn parses_github_pr_urls_for_remote_verification() {
+        let parsed = parse_github_pr_url(
+            "https://github.com/GetSmallAI/SmallHarness/pull/42/files?check_suite=1#summary",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.repo, "GetSmallAI/SmallHarness");
+        assert_eq!(parsed.number, 42);
+        assert_eq!(
+            parsed.url,
+            "https://github.com/GetSmallAI/SmallHarness/pull/42"
+        );
+        assert!(parse_github_pr_url("https://example.com/a/b/pull/1").is_none());
+    }
+
+    #[test]
+    fn parses_github_pr_view_json_into_remote_verification() {
+        let local = match github_pr_event(12, "remote status") {
+            ScorecardEvent::Pr(pr) => pr,
+            _ => unreachable!(),
+        };
+        let json = r#"{
+            "number": 42,
+            "url": "https://github.com/GetSmallAI/SmallHarness/pull/42",
+            "title": "remote status",
+            "state": "OPEN",
+            "isDraft": false,
+            "mergedAt": null,
+            "headRefName": "feature",
+            "baseRefName": "main",
+            "reviewDecision": "APPROVED",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "clippy + fmt",
+                    "workflowName": "CI",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "detailsUrl": "https://example.com/success"
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "required",
+                    "state": "SUCCESS",
+                    "targetUrl": "https://example.com/status"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "optional",
+                    "workflowName": "CI",
+                    "status": "COMPLETED",
+                    "conclusion": "SKIPPED",
+                    "detailsUrl": "https://example.com/skipped"
+                }
+            ]
+        }"#;
+
+        let verification = parse_github_pr_view_json(
+            &local,
+            json,
+            DateTime::parse_from_rfc3339("2026-06-20T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap();
+
+        assert_eq!(verification.outcome, "verified");
+        assert_eq!(verification.checks.success, 2);
+        assert_eq!(verification.checks.skipped, 1);
+        assert_eq!(verification.review_decision.as_deref(), Some("APPROVED"));
+    }
+
+    #[test]
+    fn verify_recent_pr_appends_verification_without_mutating_pr_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ScorecardEvent::Pr(pr) = github_pr_event(12, "append remote") else {
+            unreachable!();
+        };
+        append_event(&path, &ScorecardEvent::Pr(pr.clone())).unwrap();
+
+        let summary = verify_recent_pr_at_path(&path, 1, |pr| Ok(verification_for(pr, "verified")))
+            .unwrap()
+            .unwrap();
+        let events = read_events(&path).unwrap();
+        let prs = closed_prs_with_verifications(&events);
+        let stored_pr_events = events
+            .iter()
+            .filter(|event| matches!(event, ScorecardEvent::Pr(_)))
+            .count();
+        let verification_events = events
+            .iter()
+            .filter(|event| matches!(event, ScorecardEvent::Verification(_)))
+            .count();
+
+        assert_eq!(summary.index, 1);
+        assert_eq!(stored_pr_events, 1);
+        assert_eq!(verification_events, 1);
+        assert_eq!(
+            prs[0].remote.as_ref().map(|remote| remote.outcome.as_str()),
+            Some("verified")
+        );
+        assert!(render_pr_detail(&prs[0], 1).contains("remote"));
+        assert!(render_pr_detail(&prs[0], 1).contains("cargo test"));
+    }
+
+    #[test]
     fn quality_assessment_requires_tests_and_pr_creation() {
         let warnings = vec!["tests were not run for this PR".to_string()];
         let quality = assess_pr_quality(
@@ -1676,6 +2509,7 @@ mod tests {
             event_count: 1,
             turn_count: 1,
             pr_count: 0,
+            verification_count: 0,
             malformed_count: 1,
             malformed_lines: vec![MalformedScorecardLine {
                 line_number: 2,
@@ -1710,6 +2544,7 @@ mod tests {
             event_count: 1,
             turn_count: 1,
             pr_count: 0,
+            verification_count: 0,
             malformed_count: 1,
             malformed_lines: vec![MalformedScorecardLine {
                 line_number: 2,
@@ -1879,6 +2714,7 @@ mod tests {
                 total_ms: 3200,
                 trace_found: true,
             }],
+            remote: None,
         };
         let rendered = render_pr_detail(&pr, 1);
         assert!(rendered.contains("#1"));
