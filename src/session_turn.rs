@@ -987,11 +987,13 @@ mod cost_tests {
             ),
         );
         let dir = tempfile::tempdir().unwrap();
-        let mut config = AgentConfig::default();
-        config.backend = BackendName::Ollama;
-        config.model_override = Some("mock".into());
-        config.workspace_root = dir.path().display().to_string();
-        config.session_dir = dir.path().join(".sessions").display().to_string();
+        let mut config = AgentConfig {
+            backend: BackendName::Ollama,
+            model_override: Some("mock".into()),
+            workspace_root: dir.path().display().to_string(),
+            session_dir: dir.path().join(".sessions").display().to_string(),
+            ..Default::default()
+        };
         config.tools.clear();
         config.mcp_servers.clear();
         config.display.event_log.enabled = false;
