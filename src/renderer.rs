@@ -816,14 +816,18 @@ mod thinking_model_tests {
     use crate::config::DisplayConfig;
 
     fn renderer_reasoning_off() -> TuiRenderer {
-        let mut cfg = DisplayConfig::default();
-        cfg.reasoning = false;
+        let cfg = DisplayConfig {
+            reasoning: false,
+            ..Default::default()
+        };
         TuiRenderer::new(cfg)
     }
 
     fn renderer_reasoning_on() -> TuiRenderer {
-        let mut cfg = DisplayConfig::default();
-        cfg.reasoning = true;
+        let cfg = DisplayConfig {
+            reasoning: true,
+            ..Default::default()
+        };
         TuiRenderer::new(cfg)
     }
 
