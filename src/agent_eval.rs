@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ pub struct AgentEvalFixture {
     pub prompt: String,
     pub workspace: Option<String>,
     pub checks: Vec<AgentEvalCheck>,
+    #[serde(skip)]
+    pub fixture_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,12 +92,14 @@ pub fn builtin_fixtures() -> Vec<AgentEvalFixture> {
                     needle: "add".into(),
                 },
             ],
+            fixture_root: None,
         },
         AgentEvalFixture {
             id: "fix-failing-test".into(),
             prompt: "The tests are failing. Fix the bug so `cargo test` passes.".into(),
             workspace: Some("fix-failing-test".into()),
             checks: vec![AgentEvalCheck::TestsPass],
+            fixture_root: None,
         },
         AgentEvalFixture {
             id: "small-refactor".into(),
@@ -110,6 +114,7 @@ pub fn builtin_fixtures() -> Vec<AgentEvalFixture> {
                 },
                 AgentEvalCheck::TestsPass,
             ],
+            fixture_root: None,
         },
         AgentEvalFixture {
             id: "add-feature".into(),
@@ -122,6 +127,7 @@ pub fn builtin_fixtures() -> Vec<AgentEvalFixture> {
                 },
                 AgentEvalCheck::TestsPass,
             ],
+            fixture_root: None,
         },
     ]
 }
@@ -132,8 +138,105 @@ pub fn fixture_by_id(id: &str) -> Option<AgentEvalFixture> {
         .find(|fixture| fixture.id == id)
 }
 
+pub fn fixture_by_spec(spec: &str) -> Result<AgentEvalFixture> {
+    if let Some(fixture) = fixture_by_id(spec) {
+        return Ok(fixture);
+    }
+    let path = Path::new(spec);
+    if path.components().count() == 1 && path.extension().is_none() {
+        anyhow::bail!("unknown agent eval fixture: {spec}");
+    }
+    load_external_fixture(path)
+}
+
+fn safe_relative_path(value: &str, label: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        anyhow::bail!("{label} must be relative: {value}");
+    }
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("{label} escapes the fixture root: {value}");
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn validate_external_refs(fixture: &AgentEvalFixture) -> Result<()> {
+    if let Some(workspace) = &fixture.workspace {
+        safe_relative_path(workspace, "fixture workspace")?;
+    }
+    for check in &fixture.checks {
+        if let AgentEvalCheck::FileContains { path, .. } = check {
+            safe_relative_path(path, "fileContains path")?;
+        }
+    }
+    Ok(())
+}
+
+pub fn load_external_fixture(path: &Path) -> Result<AgentEvalFixture> {
+    if !path.exists() {
+        anyhow::bail!("external fixture not found: {}", path.display());
+    }
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize external fixture: {}", path.display()))?;
+    if !path.is_file() {
+        anyhow::bail!("external fixture is not a file: {}", path.display());
+    }
+    let root = path
+        .parent()
+        .ok_or_else(|| anyhow!("external fixture has no parent: {}", path.display()))?
+        .to_path_buf();
+    let mut fixture: AgentEvalFixture = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .with_context(|| format!("read external fixture: {}", path.display()))?,
+    )
+    .with_context(|| format!("parse external fixture JSON: {}", path.display()))?;
+    validate_external_refs(&fixture)?;
+    if let Some(workspace) = &fixture.workspace {
+        let rel = safe_relative_path(workspace, "fixture workspace")?;
+        let src = root.join(rel);
+        if !src.exists() {
+            anyhow::bail!("fixture workspace not found: {}", src.display());
+        }
+        let src = src
+            .canonicalize()
+            .with_context(|| format!("canonicalize fixture workspace: {}", src.display()))?;
+        if !src.starts_with(&root) {
+            anyhow::bail!(
+                "fixture workspace escapes the fixture root: {}",
+                src.display()
+            );
+        }
+    }
+    fixture.fixture_root = Some(root);
+    Ok(fixture)
+}
+
 pub fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("evals/fixtures")
+}
+
+fn fixture_root_for(fixture: &AgentEvalFixture) -> PathBuf {
+    fixture.fixture_root.clone().unwrap_or_else(fixtures_root)
+}
+
+fn fixture_workspace_src(fixture: &AgentEvalFixture) -> Result<Option<PathBuf>> {
+    let Some(rel) = &fixture.workspace else {
+        return Ok(None);
+    };
+    let root = fixture_root_for(fixture);
+    let rel = safe_relative_path(rel, "fixture workspace")?;
+    let src = root.join(rel);
+    if !src.exists() {
+        anyhow::bail!("fixture workspace not found: {}", src.display());
+    }
+    Ok(Some(src))
 }
 
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -142,10 +245,20 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "fixture workspace contains unsupported symlink: {}",
+                entry.path().display()
+            );
+        } else if file_type.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
-        } else {
+        } else if file_type.is_file() {
             fs::copy(entry.path(), target)?;
+        } else {
+            anyhow::bail!(
+                "fixture workspace contains unsupported entry type: {}",
+                entry.path().display()
+            );
         }
     }
     Ok(())
@@ -156,11 +269,7 @@ pub fn prepare_fixture_workspace(
 ) -> Result<(tempfile::TempDir, PathBuf)> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().to_path_buf();
-    if let Some(rel) = &fixture.workspace {
-        let src = fixtures_root().join(rel);
-        if !src.exists() {
-            anyhow::bail!("fixture workspace not found: {}", src.display());
-        }
+    if let Some(src) = fixture_workspace_src(fixture)? {
         copy_dir_all(&src, &workspace)?;
     }
     Ok((temp, workspace))
@@ -176,11 +285,7 @@ pub fn prepare_playground_workspace(
         .join("play")
         .join(format!("{fixture_id}-{stamp}"));
     fs::create_dir_all(&dest)?;
-    if let Some(rel) = &fixture.workspace {
-        let src = fixtures_root().join(rel);
-        if !src.exists() {
-            anyhow::bail!("fixture workspace not found: {}", src.display());
-        }
+    if let Some(src) = fixture_workspace_src(fixture)? {
         copy_dir_all(&src, &dest)?;
     }
     Ok(dest)
@@ -458,7 +563,7 @@ pub async fn run_agent_eval_suite(
 ) -> Result<Vec<AgentEvalRunResult>> {
     let mut out = Vec::new();
     for id in fixture_ids {
-        let fixture = fixture_by_id(id).ok_or_else(|| anyhow!("unknown fixture: {id}"))?;
+        let fixture = fixture_by_spec(id)?;
         out.push(run_agent_eval(config, backend_desc, model, &fixture).await?);
     }
     Ok(out)
@@ -471,8 +576,7 @@ pub async fn run_eval_cli(
     model_override: Option<&str>,
     json_output: bool,
 ) -> anyhow::Result<i32> {
-    let fixture = fixture_by_id(fixture_id)
-        .ok_or_else(|| anyhow!("unknown agent eval fixture: {fixture_id}"))?;
+    let fixture = fixture_by_spec(fixture_id)?;
     let backend_desc = config.backend_descriptor();
     crate::backends::validate(&backend_desc)?;
     let model = model_override.map(str::to_string).unwrap_or_else(|| {
@@ -552,5 +656,155 @@ mod tests {
             &[],
         );
         assert!(checks[0].passed);
+    }
+
+    #[test]
+    fn external_fixture_loads_from_json_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("workspace/basic/src")).unwrap();
+        fs::write(
+            dir.path().join("workspace/basic/Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("workspace/basic/src/lib.rs"),
+            "pub fn add() {}\n",
+        )
+        .unwrap();
+        let fixture_path = dir.path().join("basic.json");
+        fs::write(
+            &fixture_path,
+            r#"{
+              "id": "external-basic",
+              "prompt": "Read the library.",
+              "workspace": "workspace/basic",
+              "checks": [
+                { "type": "fileContains", "path": "src/lib.rs", "needle": "add" }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let fixture = fixture_by_spec(fixture_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(fixture.id, "external-basic");
+        assert_eq!(
+            fixture.fixture_root.as_deref(),
+            Some(
+                fixture_path
+                    .parent()
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        let (_temp, workspace) = prepare_fixture_workspace(&fixture).unwrap();
+        assert!(workspace.join("src/lib.rs").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_workspace_copy_rejects_symlinked_children() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("workspace");
+        let dst = dir.path().join("copied");
+        let outside = dir.path().join("outside-secret.txt");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(&outside, "outside bytes").unwrap();
+        symlink(&outside, src.join("leak.txt")).unwrap();
+
+        let err = copy_dir_all(&src, &dst).unwrap_err().to_string();
+
+        assert!(err.contains("unsupported symlink"));
+        assert!(!dst.join("leak.txt").exists());
+    }
+
+    #[test]
+    fn built_in_fixture_lookup_still_works() {
+        let fixture = fixture_by_spec("fix-failing-test").unwrap();
+        assert_eq!(fixture.id, "fix-failing-test");
+        assert!(fixture.fixture_root.is_none());
+    }
+
+    #[test]
+    fn external_fixture_rejects_workspace_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("escape.json");
+        fs::write(
+            &fixture_path,
+            r#"{
+              "id": "escape",
+              "prompt": "No escape.",
+              "workspace": "../outside",
+              "checks": []
+            }"#,
+        )
+        .unwrap();
+
+        let err = load_external_fixture(&fixture_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("escapes the fixture root"));
+    }
+
+    #[test]
+    fn external_fixture_rejects_file_contains_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("workspace/basic")).unwrap();
+        let fixture_path = dir.path().join("escape-check.json");
+        fs::write(
+            &fixture_path,
+            r#"{
+              "id": "escape-check",
+              "prompt": "No escape.",
+              "workspace": "workspace/basic",
+              "checks": [
+                { "type": "fileContains", "path": "../secret.txt", "needle": "x" }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let err = load_external_fixture(&fixture_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fileContains path escapes"));
+    }
+
+    #[test]
+    fn external_fixture_rejects_missing_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("missing-workspace.json");
+        fs::write(
+            &fixture_path,
+            r#"{
+              "id": "missing-workspace",
+              "prompt": "Workspace is missing.",
+              "workspace": "workspace/missing",
+              "checks": []
+            }"#,
+        )
+        .unwrap();
+
+        let err = load_external_fixture(&fixture_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fixture workspace not found"));
+    }
+
+    #[test]
+    fn external_fixture_rejects_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("bad.json");
+        fs::write(&fixture_path, "{not json").unwrap();
+
+        let err = load_external_fixture(&fixture_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parse external fixture JSON"));
     }
 }
