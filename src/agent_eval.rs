@@ -245,10 +245,20 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            anyhow::bail!(
+                "fixture workspace contains unsupported symlink: {}",
+                entry.path().display()
+            );
+        } else if file_type.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
-        } else {
+        } else if file_type.is_file() {
             fs::copy(entry.path(), target)?;
+        } else {
+            anyhow::bail!(
+                "fixture workspace contains unsupported entry type: {}",
+                entry.path().display()
+            );
         }
     }
     Ok(())
@@ -692,6 +702,25 @@ mod tests {
         );
         let (_temp, workspace) = prepare_fixture_workspace(&fixture).unwrap();
         assert!(workspace.join("src/lib.rs").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_workspace_copy_rejects_symlinked_children() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("workspace");
+        let dst = dir.path().join("copied");
+        let outside = dir.path().join("outside-secret.txt");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(&outside, "outside bytes").unwrap();
+        symlink(&outside, src.join("leak.txt")).unwrap();
+
+        let err = copy_dir_all(&src, &dst).unwrap_err().to_string();
+
+        assert!(err.contains("unsupported symlink"));
+        assert!(!dst.join("leak.txt").exists());
     }
 
     #[test]
