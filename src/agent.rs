@@ -291,7 +291,7 @@ where
                     if was_empty && looks_like_start_of_tool_call(&assistant_text) {
                         buffering_inline = true;
                     }
-                    if !buffering_inline {
+                    if !buffering_inline && !content.is_empty() {
                         on_event(AgentEvent::Text {
                             delta: content.clone(),
                         });

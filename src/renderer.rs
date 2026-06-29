@@ -375,7 +375,9 @@ impl TuiRenderer {
                 ..
             } => self.render_compaction_notice(&name, &summary, depth),
             AgentEvent::Reasoning { delta } => {
-                self.end_answer();
+                if self.display.reasoning {
+                    self.end_answer();
+                }
                 self.render_reasoning(&delta)
             }
             AgentEvent::ContextCompacted { notice, .. } => {
@@ -435,6 +437,9 @@ impl TuiRenderer {
     }
 
     fn render_text(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
         self.flush_minimal();
         // Switching from reasoning to answer text — close the panel cleanly
         // so the answer doesn't appear glued to the dim trace.
@@ -801,5 +806,85 @@ mod verbose_tests {
         r.set_verbose(false);
         assert!(!r.verbose_enabled());
         assert!(matches!(r.display.tool_display, ToolDisplay::Grouped));
+    }
+}
+
+#[cfg(test)]
+mod thinking_model_tests {
+    use super::*;
+    use crate::agent::AgentEvent;
+    use crate::config::DisplayConfig;
+
+    fn renderer_reasoning_off() -> TuiRenderer {
+        let cfg = DisplayConfig {
+            reasoning: false,
+            ..Default::default()
+        };
+        TuiRenderer::new(cfg)
+    }
+
+    fn renderer_reasoning_on() -> TuiRenderer {
+        let cfg = DisplayConfig {
+            reasoning: true,
+            ..Default::default()
+        };
+        TuiRenderer::new(cfg)
+    }
+
+    /// Thinking models (qwen3, deepseek-r1) emit empty `content` strings
+    /// alongside each `reasoning` token. An empty Text event must not open
+    /// a new response block — that was the root cause of the per-word rendering
+    /// bug (#thinking-model-response-headers).
+    #[test]
+    fn empty_text_delta_does_not_open_answer_block() {
+        let mut r = renderer_reasoning_off();
+        assert!(r.answer_wrap.is_none());
+        r.handle(AgentEvent::Text {
+            delta: String::new(),
+        });
+        assert!(
+            r.answer_wrap.is_none(),
+            "empty Text delta must not open an answer_wrap block"
+        );
+    }
+
+    /// When reasoning display is OFF, a Reasoning event must not close the
+    /// current answer block. Before the fix, `end_answer()` was called
+    /// unconditionally, destroying the in-progress response on every
+    /// reasoning token.
+    #[test]
+    fn reasoning_event_preserves_answer_block_when_reasoning_display_off() {
+        let mut r = renderer_reasoning_off();
+        // Open an answer block by sending real text.
+        r.handle(AgentEvent::Text {
+            delta: "hello".to_string(),
+        });
+        assert!(r.answer_wrap.is_some(), "setup: answer_wrap should be open");
+        // Reasoning event should NOT close it when reasoning=false.
+        r.handle(AgentEvent::Reasoning {
+            delta: "thinking...".to_string(),
+        });
+        assert!(
+            r.answer_wrap.is_some(),
+            "answer_wrap must survive a Reasoning event when reasoning display is off"
+        );
+    }
+
+    /// When reasoning display is ON, a Reasoning event closes the answer block
+    /// (to print the reasoning panel). This is the intended behaviour.
+    #[test]
+    fn reasoning_event_closes_answer_block_when_reasoning_display_on() {
+        let mut r = renderer_reasoning_on();
+        r.handle(AgentEvent::Text {
+            delta: "hello".to_string(),
+        });
+        assert!(r.answer_wrap.is_some(), "setup: answer_wrap should be open");
+        r.handle(AgentEvent::Reasoning {
+            delta: "thinking...".to_string(),
+        });
+        assert!(
+            r.answer_wrap.is_none(),
+            "answer_wrap should be closed when reasoning display is on"
+        );
     }
 }
