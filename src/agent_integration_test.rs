@@ -116,6 +116,7 @@ async fn read_and_explain_mock_loop() {
                 needle: "add".into(),
             },
         ],
+        fixture_root: None,
     };
     let checks = evaluate_checks(&fixture_workspace(), &fixture.checks, &run, &tool_calls);
     assert!(checks.iter().all(|c| c.passed), "{checks:?}");

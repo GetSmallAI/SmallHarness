@@ -265,6 +265,24 @@ cargo run --release -- --eval read-and-explain --model qwen2.5-coder:7b
 cargo run --release -- --eval fix-failing-test --json
 ```
 
+You can also point `--eval` at a data-only fixture JSON file. Workspaces are
+resolved relative to that fixture file and may not escape that root:
+
+```json
+{
+  "id": "external-readme-check",
+  "prompt": "Update README.md so it mentions the release version.",
+  "workspace": "workspace/readme-check",
+  "checks": [
+    { "type": "fileContains", "path": "README.md", "needle": "version" }
+  ]
+}
+```
+
+```bash
+cargo run --release -- --eval ./evals/local/external-readme-check.json --json
+```
+
 ## A Good First Session
 
 Here is a simple sequence that exercises the whole product:
