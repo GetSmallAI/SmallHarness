@@ -283,6 +283,12 @@ resolved relative to that fixture file and may not escape that root:
 cargo run --release -- --eval ./evals/local/external-readme-check.json --json
 ```
 
+The interactive agent eval command accepts the same fixture path:
+
+```text
+/eval agent ./evals/local/external-readme-check.json
+```
+
 ## A Good First Session
 
 Here is a simple sequence that exercises the whole product:
