@@ -19,11 +19,11 @@ use crate::session_turn::{run_user_turn, TurnOptions};
 use crate::shipcheck::collect_shipcheck;
 use crate::tools::run_evaluation;
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
 
 /// Upper bound on iterations regardless of config/flags — a runaway guard, since
 /// each round costs a generator turn plus a critic run.

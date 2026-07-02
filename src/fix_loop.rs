@@ -7,11 +7,11 @@ use crate::test_integration::{
     format_test_failure_feedback, run_selected_tests, run_tests, smart_test_selection, TestResult,
 };
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixTestScope {

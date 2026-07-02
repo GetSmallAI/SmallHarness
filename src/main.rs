@@ -77,11 +77,11 @@ use crate::tools::{build_tools_for_names, select_tool_names};
 use crate::turn_checkpoint::CheckpointStack;
 use crate::warmup::warmup;
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const RED: crate::theme::Style = crate::theme::ERROR;
 
 struct CliOneShot {
     prompt: String,
@@ -334,6 +334,7 @@ fn parse_eval_args() -> Option<anyhow::Result<CliEval>> {
 
 async fn run_eval_cli(opts: CliEval) -> anyhow::Result<()> {
     let config = load_config();
+    crate::theme::init(config.display.color, config.display.ascii);
     let code = crate::agent_eval::run_eval_cli(
         &config,
         &opts.fixture_id,
@@ -388,6 +389,7 @@ async fn run_one_shot(opts: CliOneShot) -> anyhow::Result<()> {
         anyhow::bail!("one-shot prompt is empty");
     }
     let config = load_config();
+    crate::theme::init(config.display.color, config.display.ascii);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
     validate(&backend_desc)?;
@@ -686,8 +688,10 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     let setup_base = load_config();
+    crate::theme::init(setup_base.display.color, setup_base.display.ascii);
     let _ = setup::maybe_run_first_run_setup(&setup_base).await?;
     let config = load_config();
+    crate::theme::init(config.display.color, config.display.ascii);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
     let missing_codex_login = matches!(config.backend, BackendName::OpenAiCodex)
@@ -882,7 +886,8 @@ async fn main() -> anyhow::Result<()> {
                         String::new()
                     };
                     println!(
-                        "{GREEN}✓{RESET} {DIM}continuing{RESET} {} {DIM}({} messages{path_note}){RESET}",
+                        "{GREEN}{}{RESET} {DIM}continuing{RESET} {} {DIM}({} messages{path_note}){RESET}",
+                        crate::theme::OK,
                         id,
                         state.messages.len()
                     );
@@ -918,7 +923,13 @@ async fn main() -> anyhow::Result<()> {
         println!();
         println!("{}", crate::theme::fade_header("you"));
         let input = match plain_read_line_with_history_outcome(
-            format!("{}{}❯{} ", crate::theme::PAD, crate::theme::ACCENT, RESET),
+            format!(
+                "{}{}{}{} ",
+                crate::theme::PAD,
+                crate::theme::ACCENT,
+                crate::theme::PROMPT_CHAR,
+                RESET
+            ),
             input_history.entries().to_vec(),
             command_names.clone(),
         )
@@ -945,7 +956,7 @@ async fn main() -> anyhow::Result<()> {
 
         if state.config.slash_commands && trimmed.starts_with('/') {
             if let Err(e) = dispatch(trimmed, &mut state).await {
-                println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+                println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
             }
             continue;
         }
@@ -972,7 +983,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         {
-            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+            println!("  {RED}{}{RESET} {DIM}{e}{RESET}", crate::theme::FAIL);
         }
     }
 }

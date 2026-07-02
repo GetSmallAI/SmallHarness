@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::LoaderStyle;
-
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
+use crate::theme::{ascii_enabled, colors_enabled, MUTED, RESET};
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ASCII_SPINNER_FRAMES: &[&str] = &["-", "\\", "|", "/"];
 const GRADIENT_COLORS: &[&str] = &[
     "\x1b[38;5;240m",
     "\x1b[38;5;245m",
@@ -82,14 +81,26 @@ impl Drop for Loader {
 
 fn draw(frame: usize, text: &str, style: LoaderStyle) {
     let mut out = std::io::stdout();
+    // Gradient builds raw 256-color codes directly (not via `Style`), so it
+    // needs an explicit NO_COLOR fallback: render as the Minimal style instead.
+    let style = if style == LoaderStyle::Gradient && !colors_enabled() {
+        LoaderStyle::Minimal
+    } else {
+        style
+    };
     match style {
         LoaderStyle::Minimal => {
             let dots = ["·", "··", "···"];
-            let _ = write!(out, "\r{DIM}{text}{}{RESET}", dots[frame % 3]);
+            let _ = write!(out, "\r{MUTED}{text}{}{RESET}", dots[frame % 3]);
         }
         LoaderStyle::Spinner => {
-            let ch = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
-            let _ = write!(out, "\r{DIM}{ch} {text}{RESET}");
+            let frames = if ascii_enabled() {
+                ASCII_SPINNER_FRAMES
+            } else {
+                SPINNER_FRAMES
+            };
+            let ch = frames[frame % frames.len()];
+            let _ = write!(out, "\r{MUTED}{ch} {text}{RESET}");
         }
         LoaderStyle::Gradient => {
             let len = GRADIENT_COLORS.len();
@@ -98,7 +109,7 @@ fn draw(frame: usize, text: &str, style: LoaderStyle) {
                 s.push_str(GRADIENT_COLORS[(frame + i) % len]);
                 s.push(ch);
             }
-            s.push_str(RESET);
+            s.push_str(&RESET.to_string());
             let _ = out.write_all(s.as_bytes());
         }
     }

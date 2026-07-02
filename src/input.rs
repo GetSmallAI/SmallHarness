@@ -204,9 +204,7 @@ fn render_input(
     s.push_str(prompt);
     s.push_str(&display);
     if !ghost.is_empty() {
-        s.push_str(MUTED);
-        s.push_str(&ghost);
-        s.push_str(RESET);
+        s.push_str(&format!("{MUTED}{ghost}{RESET}"));
     }
 
     if matches.is_empty() {

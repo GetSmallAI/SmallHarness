@@ -140,6 +140,14 @@ impl OperatorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutsideWorkspace {
     Prompt,
     Deny,
@@ -180,6 +188,10 @@ pub struct DisplayConfig {
     pub show_banner: bool,
     #[serde(rename = "eventLog", default)]
     pub event_log: crate::turn_trace::EventLogConfig,
+    #[serde(default = "default_color_mode")]
+    pub color: ColorMode,
+    #[serde(default)]
+    pub ascii: bool,
 }
 
 fn default_true() -> bool {
@@ -197,6 +209,9 @@ fn default_loader_text() -> String {
 fn default_loader_style() -> LoaderStyle {
     LoaderStyle::Spinner
 }
+fn default_color_mode() -> ColorMode {
+    ColorMode::Auto
+}
 
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -208,6 +223,8 @@ impl Default for DisplayConfig {
             reasoning: false,
             show_banner: true,
             event_log: crate::turn_trace::EventLogConfig::default(),
+            color: default_color_mode(),
+            ascii: false,
         }
     }
 }

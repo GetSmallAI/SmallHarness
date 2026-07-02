@@ -7,12 +7,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RESET: &str = crate::theme::RESET;
-const DIM: &str = crate::theme::MUTED;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const CYAN: &str = "\x1b[36m";
-const BRIGHT_GREEN: &str = "\x1b[92m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const CYAN: crate::theme::Style = crate::theme::ACCENT_DEEP;
+const BRIGHT_GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const STORE_DIR_ENV: &str = "SMALL_HARNESS_SCORECARD_DIR";
 #[cfg(test)]
 const DEFAULT_QUALITY_PR_THRESHOLD: u8 = 80;

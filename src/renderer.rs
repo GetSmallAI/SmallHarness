@@ -7,19 +7,22 @@ use std::time::Instant;
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
 
-use crate::theme::{content_width, fade_header, ACCENT, PAD, TEXT};
+use crate::theme::{
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH, BRANCH_END, CHECK, DOT, FAIL,
+    HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
+};
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
 // means ANSI faint (which was the unreadable culprit) — it's now the theme's
 // readable bright-black, same as `GRAY`.
-const RESET: &str = crate::theme::RESET;
-const BOLD: &str = crate::theme::BOLD;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const RED: &str = crate::theme::ERROR;
-const GRAY: &str = crate::theme::MUTED;
-const DIM: &str = crate::theme::MUTED;
-const MAGENTA: &str = "\x1b[95m";
+const RESET: Style = crate::theme::RESET;
+const BOLD: Style = crate::theme::BOLD;
+const GREEN: Style = crate::theme::SUCCESS;
+const YELLOW: Style = crate::theme::WARN;
+const RED: Style = crate::theme::ERROR;
+const GRAY: Style = crate::theme::MUTED;
+const DIM: Style = crate::theme::MUTED;
+const MAGENTA: Style = crate::theme::MAGENTA;
 
 fn trunc(s: &str, max: usize) -> String {
     if s.chars().count() > max {
@@ -94,7 +97,7 @@ fn label_noun(name: &str) -> &'static str {
     }
 }
 
-fn tool_color(name: &str) -> &'static str {
+fn tool_color(name: &str) -> Style {
     match name {
         "shell" => RED,
         "file_write" | "file_edit" => YELLOW,
@@ -504,7 +507,7 @@ impl TuiRenderer {
             let arg_str = formatter_for(name, &args);
             let indent = "  ".repeat(depth as usize);
             println!(
-                "{PAD}{indent}{DIM}↳ {name}{RESET} {GRAY}{}{RESET}",
+                "{PAD}{indent}{DIM}{SUB} {name}{RESET} {GRAY}{}{RESET}",
                 if arg_str.is_empty() {
                     String::new()
                 } else {
@@ -519,7 +522,7 @@ impl TuiRenderer {
                 let color = tool_color(name);
                 let arg_str = formatter_for(name, &args);
                 let sep = if arg_str.is_empty() { "" } else { " " };
-                println!("  {color}⚡{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
+                println!("  {color}{BOLT}{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
             }
             ToolDisplay::Grouped => {
                 let category = label_past(name).to_string();
@@ -574,16 +577,25 @@ impl TuiRenderer {
             .filter(|s| s.get("status").and_then(Value::as_str) == Some("done"))
             .count();
         println!(
-            "{PAD}{ACCENT}●{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
+            "{PAD}{ACCENT}{DOT}{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
             steps.len()
         );
         for s in steps {
             let text = s.get("step").and_then(Value::as_str).unwrap_or("");
             let status = s.get("status").and_then(Value::as_str).unwrap_or("pending");
             let (mark, body) = match status {
-                "done" => (format!("{GREEN}✔{RESET}"), format!("{GRAY}{text}{RESET}")),
-                "in_progress" => (format!("{YELLOW}▸{RESET}"), format!("{BOLD}{text}{RESET}")),
-                _ => (format!("{GRAY}○{RESET}"), format!("{GRAY}{text}{RESET}")),
+                "done" => (
+                    format!("{GREEN}{CHECK}{RESET}"),
+                    format!("{GRAY}{text}{RESET}"),
+                ),
+                "in_progress" => (
+                    format!("{YELLOW}{POINT}{RESET}"),
+                    format!("{BOLD}{text}{RESET}"),
+                ),
+                _ => (
+                    format!("{GRAY}{PENDING}{RESET}"),
+                    format!("{GRAY}{text}{RESET}"),
+                ),
             };
             println!("{PAD}  {mark} {body}");
         }
@@ -613,7 +625,7 @@ impl TuiRenderer {
             let indent = "  ".repeat(depth as usize);
             let summary = summarize_output(output);
             println!(
-                "{PAD}{indent}{DIM}↳ {name} {dur}{RESET} {GRAY}{}{RESET}",
+                "{PAD}{indent}{DIM}{SUB} {name} {dur}{RESET} {GRAY}{}{RESET}",
                 if summary.is_empty() {
                     String::new()
                 } else {
@@ -625,7 +637,7 @@ impl TuiRenderer {
 
         match self.display.tool_display {
             ToolDisplay::Emoji => {
-                println!("  {GREEN}✓{RESET} {DIM}{name} {dur}{RESET}");
+                println!("  {GREEN}{OK}{RESET} {DIM}{name} {dur}{RESET}");
             }
             ToolDisplay::Grouped => {
                 if let Some(p) = self
@@ -655,18 +667,18 @@ impl TuiRenderer {
         } else {
             String::new()
         };
-        println!("{PAD}{indent}{DIM}↳ {name} output compacted: {summary}{RESET}");
+        println!("{PAD}{indent}{DIM}{SUB} {name} output compacted: {summary}{RESET}");
     }
 
     fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
         use crate::hooks::HookNoticeLevel;
 
         let (mark, label, color) = match notice.level {
-            HookNoticeLevel::Warning => ("!", "hook warning", YELLOW),
-            HookNoticeLevel::Blocked => ("✗", "hook blocked", RED),
-            HookNoticeLevel::Denied => ("✗", "hook denied", RED),
-            HookNoticeLevel::Stopped => ("■", "hook stopped", YELLOW),
-            HookNoticeLevel::Feedback => ("↳", "hook", DIM),
+            HookNoticeLevel::Warning => (BANG, "hook warning", YELLOW),
+            HookNoticeLevel::Blocked => (FAIL, "hook blocked", RED),
+            HookNoticeLevel::Denied => (FAIL, "hook denied", RED),
+            HookNoticeLevel::Stopped => (HOOK_STOP, "hook stopped", YELLOW),
+            HookNoticeLevel::Feedback => (SUB, "hook", DIM),
         };
         println!(
             "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
@@ -685,19 +697,19 @@ impl TuiRenderer {
 
         if pending.len() == 1 {
             let arg_str = formatter_for(&first.name, &first.args);
-            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
+            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
             if let Some(out) = &first.output {
                 let summary = summarize_output(out);
                 if !summary.is_empty() {
-                    println!("{PAD}  {GRAY}└ {summary}{RESET}");
+                    println!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}");
                 }
             }
         } else {
-            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}");
+            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}");
             let n = pending.len();
             for (i, p) in pending.iter().enumerate() {
                 let is_last = i == n - 1;
-                let branch = if is_last { "└" } else { "├" };
+                let branch = if is_last { BRANCH_END } else { BRANCH };
                 let arg_str = formatter_for(&p.name, &p.args);
                 let summary = p
                     .output

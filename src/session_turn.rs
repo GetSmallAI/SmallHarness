@@ -36,12 +36,12 @@ use crate::turn_checkpoint::{active_tools_need_checkpoints, should_push_checkpoi
 use crate::turn_trace::{ApprovalDecision, TracePayload, TurnMetrics};
 use crate::warmup::warmup;
 
-const RESET: &str = crate::theme::RESET;
-const DIM: &str = crate::theme::MUTED;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const RED: &str = crate::theme::ERROR;
-const GRAY: &str = crate::theme::MUTED;
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const GRAY: crate::theme::Style = crate::theme::MUTED;
 
 pub struct TurnOptions {
     pub user_prompt: String,
