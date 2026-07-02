@@ -253,6 +253,7 @@ async fn cmd_eval_agent(parts: &[&str], state: &AppState) -> Result<()> {
         };
         (vec![fixture], models)
     };
+    let fixtures = resolve_eval_agent_fixtures(&fixture_ids)?;
 
     let eval_dir = Path::new(&state.session_dir).join("evals");
     fs::create_dir_all(&eval_dir)?;
@@ -262,16 +263,14 @@ async fn cmd_eval_agent(parts: &[&str], state: &AppState) -> Result<()> {
     for spec in model_specs {
         let (backend_desc, model) = parse_eval_model(&spec, state);
         validate(&backend_desc)?;
-        for fixture_id in &fixture_ids {
-            let fixture = crate::agent_eval::fixture_by_id(fixture_id)
-                .ok_or_else(|| anyhow!("unknown agent eval fixture: {fixture_id}"))?;
+        for fixture in &fixtures {
             println!(
                 "  {DIM}agent eval {} · {} · {}{RESET}",
-                fixture_id,
+                fixture.id,
                 backend_desc.name.as_str(),
                 model
             );
-            let result = run_agent_eval(&state.config, &backend_desc, &model, &fixture).await?;
+            let result = run_agent_eval(&state.config, &backend_desc, &model, fixture).await?;
             println!(
                 "  {} {}{RESET}",
                 if result.passed {
@@ -295,6 +294,15 @@ async fn cmd_eval_agent(parts: &[&str], state: &AppState) -> Result<()> {
         md_path.display()
     );
     Ok(())
+}
+
+fn resolve_eval_agent_fixtures(
+    fixture_specs: &[String],
+) -> Result<Vec<crate::agent_eval::AgentEvalFixture>> {
+    fixture_specs
+        .iter()
+        .map(|spec| crate::agent_eval::fixture_by_spec(spec))
+        .collect()
 }
 
 pub(super) fn cmd_batch(args: &str, state: &AppState) -> Result<()> {
@@ -868,5 +876,46 @@ fn truncate_string(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eval_agent_resolves_external_fixture_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("workspace/basic/src")).unwrap();
+        fs::write(
+            dir.path().join("workspace/basic/Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("workspace/basic/src/lib.rs"),
+            "pub fn add() {}\n",
+        )
+        .unwrap();
+        let fixture_path = dir.path().join("external.json");
+        fs::write(
+            &fixture_path,
+            r#"{
+              "id": "external-basic",
+              "prompt": "Read the library.",
+              "workspace": "workspace/basic",
+              "checks": [
+                { "type": "fileContains", "path": "src/lib.rs", "needle": "add" }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let spec = fixture_path.to_str().unwrap();
+
+        let fixtures = resolve_eval_agent_fixtures(&[spec.to_string()]).unwrap();
+
+        assert_eq!(fixtures.len(), 1);
+        assert_eq!(fixtures[0].id, "external-basic");
+        assert!(fixtures[0].fixture_root.is_some());
     }
 }

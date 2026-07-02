@@ -989,10 +989,12 @@ runtime.
 - **One-shot mode** — `small-harness --print "summarize this repo"` or
   `printf '…\n' | small-harness` for scripts and CI. Approval-gated tools
   are denied by default; pass `--allow-tools` to allow them.
-- **Agent eval CLI** — `small-harness --eval fix-failing-test [--model M] [--json]`
+- **Agent eval** — `small-harness --eval fix-failing-test [--model M] [--json]`
   runs a bundled eval fixture and exits 0/1 (for CI scripts). `--eval` can
   also point at a data-only fixture JSON file; its workspace is resolved
-  relative to that file and rejected if it escapes the fixture root.
+  relative to that file and rejected if it escapes the fixture root. In the
+  interactive TUI, `/eval agent <fixture.json>` accepts the same external
+  fixture path.
 - **Warmup.** Small Harness sends a 1-token request with the full system
   prompt + tools at startup so llama.cpp-derived engines have a hot
   prompt-eval cache before your first prompt. Disable with `WARMUP=false`.
