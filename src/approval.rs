@@ -84,12 +84,7 @@ impl ApprovalProvider for ApprovalCache {
             }
             if let Some(diff) = &preview.diff {
                 println!();
-                for line in diff.lines().take(80) {
-                    println!("    {DIM}{line}{RESET}");
-                }
-                if diff.lines().count() > 80 {
-                    println!("    {DIM}…diff truncated for display{RESET}");
-                }
+                crate::diff_view::print_diff(diff, 80);
                 println!();
             }
         }

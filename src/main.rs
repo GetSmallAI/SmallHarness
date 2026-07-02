@@ -20,6 +20,7 @@ mod config;
 mod context_guard;
 mod continuation;
 mod crash_log;
+mod diff_view;
 mod fix_loop;
 mod handoff;
 mod hardware;
