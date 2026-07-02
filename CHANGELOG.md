@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-02
+
 ### Added
 
 - **Hooks.** `agent.config.json` can define trusted command hooks for session,
@@ -28,6 +30,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `task` uses the dedicated subagent hook events without generic `PostToolUse`,
   hook subprocesses use process-group cleanup on timeout, and hook-provided
   model context is bounded and redacted before injection.
+- **External eval fixtures.** `--eval` can now point at a data-only fixture
+  JSON file in addition to the built-in fixture IDs. Fixture workspaces
+  resolve relative to the fixture file, and workspace or `fileContains.path`
+  refs that use absolute paths or parent traversal are rejected.
+
+### Changed
+
+- **Default Ollama model is now `qwen2.5:7b`** (was `qwen2.5-coder:7b`). The
+  coder variant emits tool invocations as raw JSON text instead of using
+  Ollama's structured `tool_calls` API, so sessions silently stalled on the
+  first tool call. Users who want the coder fine-tune can still set
+  `modelOverride` in `agent.config.json`.
+
+### Fixed
+
+- **Thinking-model rendering.** Streaming reasoning models (qwen3,
+  deepseek-r1) no longer print a new `response` header for every reasoning
+  token. Empty content deltas no longer open answer panels, and reasoning
+  events no longer close the in-progress answer when reasoning display is
+  off.
 
 ## [1.0.4] - 2026-06-20
 
