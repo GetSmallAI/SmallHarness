@@ -1553,7 +1553,7 @@ pub fn format_scorecard_suffix(
         return Ok(String::new());
     }
     Ok(format!(
-        " · {} turn(s) tracked · /ship pr closes scorecard",
+        "{} turn(s) tracked · /ship pr closes scorecard",
         summary.turn_count
     ))
 }

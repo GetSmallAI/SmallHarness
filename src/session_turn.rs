@@ -110,6 +110,11 @@ impl ApprovalProvider for TracingApproval<'_> {
     }
 }
 
+/// Turn cost above which the cost part of the footer is highlighted in
+/// WARN instead of the footer's usual muted gray. Deliberately not
+/// configurable — it's a visual nudge, not a budget control.
+const TURN_COST_WARN_USD: f64 = 0.50;
+
 fn format_tokens(n: u32) -> String {
     if n >= 1000 {
         format!("{:.1}k", n as f32 / 1000.0)
@@ -123,7 +128,7 @@ fn format_path_suffix(state: &AppState) -> String {
         return String::new();
     }
     format!(
-        " · path: {} · {} paths",
+        "path: {} · {} paths",
         state.path_store.active_id(),
         state.path_store.path_count()
     )
@@ -144,10 +149,15 @@ fn format_cost_suffix(
         None => "$?".into(),
     };
     let session_prefix = if has_unknown { "≥" } else { "" };
-    format!(
-        " · {turn_part} this turn · {session_prefix}{} session",
+    let text = format!(
+        "{turn_part} this turn · {session_prefix}{} session",
         format_usd(session_usd)
-    )
+    );
+    if turn_cost.is_some_and(|c| c > TURN_COST_WARN_USD) {
+        format!("{YELLOW}{text}{GRAY}")
+    } else {
+        text
+    }
 }
 
 fn format_timing_suffix(metrics: &TurnMetrics) -> String {
@@ -156,8 +166,54 @@ fn format_timing_suffix(metrics: &TurnMetrics) -> String {
 
 fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
     effort
-        .map(|effort| format!(" · effort {}", effort.as_str()))
+        .map(|effort| format!("effort {}", effort.as_str()))
         .unwrap_or_default()
+}
+
+/// Join the non-empty footer parts with a single `" · "` separator, so
+/// individual suffix builders don't each bake in their own leading
+/// separator (which used to make empty-part handling error-prone).
+#[allow(clippy::too_many_arguments)]
+fn format_footer(
+    input_tokens: u32,
+    output_tokens: u32,
+    turn_cost: Option<f64>,
+    backend_is_local: bool,
+    session_usd: f64,
+    session_cost_has_unknown: bool,
+    effort: Option<EffortLevel>,
+    metrics: &TurnMetrics,
+    path_suffix: &str,
+    scorecard_suffix: &str,
+) -> String {
+    let mut parts = vec![
+        format!("{} in", format_tokens(input_tokens)),
+        format!("{} out", format_tokens(output_tokens)),
+    ];
+    let cost = format_cost_suffix(
+        turn_cost,
+        backend_is_local,
+        session_usd,
+        session_cost_has_unknown,
+    );
+    if !cost.is_empty() {
+        parts.push(cost);
+    }
+    let effort_part = format_effort_suffix(effort);
+    if !effort_part.is_empty() {
+        parts.push(effort_part);
+    }
+    let timing = format_timing_suffix(metrics);
+    if !timing.is_empty() {
+        parts.push(timing);
+    }
+    if !path_suffix.is_empty() {
+        parts.push(path_suffix.to_string());
+    }
+    if !scorecard_suffix.is_empty() {
+        parts.push(scorecard_suffix.to_string());
+    }
+    format!("{GRAY}  {}{RESET}", parts.join(" · "))
 }
 
 fn prompt_fingerprint(
@@ -843,19 +899,19 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     .unwrap_or_default();
 
     println!(
-        "{GRAY}  {} in · {} out{}{}{}{}{}{RESET}",
-        format_tokens(res.input_tokens),
-        format_tokens(res.output_tokens),
-        format_cost_suffix(
+        "{}",
+        format_footer(
+            res.input_tokens,
+            res.output_tokens,
             turn_cost,
             state.config.backend.is_local(),
             state.session_usd,
-            state.session_cost_has_unknown
-        ),
-        format_effort_suffix(state.active_effort),
-        format_timing_suffix(&metrics),
-        format_path_suffix(state),
-        scorecard_suffix,
+            state.session_cost_has_unknown,
+            state.active_effort,
+            &metrics,
+            &format_path_suffix(state),
+            &scorecard_suffix,
+        )
     );
 
     Ok(TurnOutcome {
@@ -1067,10 +1123,67 @@ mod cost_tests {
     #[test]
     fn effort_suffix_renders_when_set() {
         assert_eq!(format_effort_suffix(None), "");
-        assert_eq!(
-            format_effort_suffix(Some(EffortLevel::High)),
-            " · effort high"
+        assert_eq!(format_effort_suffix(Some(EffortLevel::High)), "effort high");
+    }
+
+    #[test]
+    fn cost_above_warn_threshold_is_highlighted() {
+        let s = format_cost_suffix(Some(0.75), false, 0.75, false);
+        assert!(s.contains(&YELLOW.to_string()));
+    }
+
+    #[test]
+    fn cost_below_warn_threshold_is_not_highlighted() {
+        let s = format_cost_suffix(Some(0.10), false, 0.10, false);
+        assert!(!s.contains(&YELLOW.to_string()));
+    }
+
+    #[test]
+    fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
+        let metrics = TurnMetrics::default();
+        let footer = format_footer(1200, 87, None, true, 0.0, false, None, &metrics, "", "");
+        // Only the two always-present parts (tokens in/out) should appear,
+        // joined by exactly one " · ", with no trailing/leading separator.
+        assert!(footer.contains("1.2k in · 87 out"));
+        assert!(!footer.contains("· ·"));
+        assert!(!footer
+            .trim_start_matches(&GRAY.to_string())
+            .starts_with(" · "));
+    }
+
+    #[test]
+    fn footer_joins_all_present_parts_with_single_separator() {
+        let metrics = TurnMetrics {
+            steps: 2,
+            ttft_ms: None,
+            model_ms: 0,
+            tool_ms: 0,
+            approval_ms: 0,
+            total_ms: 1000,
+            hit_step_limit: false,
+        };
+        let footer = format_footer(
+            500,
+            120,
+            Some(0.01),
+            false,
+            0.01,
+            false,
+            Some(EffortLevel::High),
+            &metrics,
+            "path: main · 2 paths",
+            "3 turn(s) tracked · /ship pr closes scorecard",
         );
+        assert!(footer.contains("500 in · 120 out · $0.01 this turn · $0.01 session · effort high"));
+        assert!(footer.contains("path: main · 2 paths"));
+        assert!(footer.contains("3 turn(s) tracked"));
+    }
+
+    #[test]
+    fn local_backend_footer_has_no_cost_part() {
+        let metrics = TurnMetrics::default();
+        let footer = format_footer(100, 50, None, true, 0.0, false, None, &metrics, "", "");
+        assert!(!footer.contains('$'));
     }
 
     #[test]
