@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-02
+
+### Added
+
+- **Interactive external eval fixtures.** `/eval agent <fixture.json>` accepts
+  the same external fixture JSON paths as the `--eval` CLI flag, reusing the
+  same path-safety resolver.
+
 ## [1.1.0] - 2026-07-02
 
 ### Added

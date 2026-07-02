@@ -1,6 +1,6 @@
 [package]
 name = "small-harness"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Terminal-based agent harness for running small LLMs on your Mac"
 license = "MIT"
