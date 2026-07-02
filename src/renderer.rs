@@ -384,6 +384,10 @@ impl TuiRenderer {
                 self.end_answer();
                 println!("{notice}");
             }
+            AgentEvent::HookNotice(notice) => {
+                self.end_answer();
+                self.render_hook_notice(&notice);
+            }
             AgentEvent::StepLimitReached { max_steps } => {
                 self.end_answer();
                 self.end_streaming();
@@ -654,6 +658,23 @@ impl TuiRenderer {
         println!("{PAD}{indent}{DIM}↳ {name} output compacted: {summary}{RESET}");
     }
 
+    fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
+        use crate::hooks::HookNoticeLevel;
+
+        let (mark, label, color) = match notice.level {
+            HookNoticeLevel::Warning => ("!", "hook warning", YELLOW),
+            HookNoticeLevel::Blocked => ("✗", "hook blocked", RED),
+            HookNoticeLevel::Denied => ("✗", "hook denied", RED),
+            HookNoticeLevel::Stopped => ("■", "hook stopped", YELLOW),
+            HookNoticeLevel::Feedback => ("↳", "hook", DIM),
+        };
+        println!(
+            "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
+            notice.event.as_str(),
+            notice.message
+        );
+    }
+
     fn flush_grouped(&mut self) {
         if self.grouped_pending.is_empty() {
             return;
@@ -796,6 +817,24 @@ mod tests {
 mod verbose_tests {
     use super::*;
     use crate::config::{DisplayConfig, ToolDisplay};
+
+    #[test]
+    fn hidden_reasoning_does_not_close_streaming_answer() {
+        let mut r = TuiRenderer::new(DisplayConfig::default());
+        assert!(!r.reasoning_enabled());
+
+        r.handle(crate::agent::AgentEvent::Text {
+            delta: "Hel".into(),
+        });
+        assert!(r.answer_wrap.is_some());
+
+        r.handle(crate::agent::AgentEvent::Reasoning {
+            delta: "thinking".into(),
+        });
+
+        assert!(r.answer_wrap.is_some());
+        r.end_turn();
+    }
 
     #[test]
     fn verbose_toggle_restores_configured_display() {

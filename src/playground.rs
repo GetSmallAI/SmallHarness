@@ -162,6 +162,7 @@ pub async fn run_play_fixture(state: &mut AppState, fixture_id: &str, yolo: bool
             user_prompt: fixture.prompt.clone(),
             auto_verify_tests: true,
             yolo_approve: yolo,
+            source: "play",
         },
     )
     .await?;
@@ -301,6 +302,9 @@ mod tests {
             last_play_scorecard: None,
             approval_cache: ApprovalCache::new(),
             renderer: TuiRenderer::new(config.display.clone()),
+            hooks: crate::hooks::HookRegistry::default(),
+            session_hook_contexts: Vec::new(),
+            pending_hook_contexts: Vec::new(),
             warmed_fingerprint: None,
             tests_ran_this_session: false,
             pending_image_attachments: Vec::new(),

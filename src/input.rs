@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -18,6 +18,13 @@ pub struct InputHistory {
     max_entries: usize,
     entries: Vec<String>,
     enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadLineOutcome {
+    Line(String),
+    Eof,
+    Interrupted,
 }
 
 impl InputHistory {
@@ -95,7 +102,19 @@ pub async fn plain_read_line_with_history(
     history: Vec<String>,
     commands: Vec<(String, String)>,
 ) -> Result<String> {
-    tokio::task::spawn_blocking(move || read_plain(&prompt, &history, &commands)).await?
+    match plain_read_line_with_history_outcome(prompt, history, commands).await? {
+        ReadLineOutcome::Line(line) => Ok(line),
+        ReadLineOutcome::Eof => Err(anyhow!("input closed")),
+        ReadLineOutcome::Interrupted => std::process::exit(0),
+    }
+}
+
+pub async fn plain_read_line_with_history_outcome(
+    prompt: String,
+    history: Vec<String>,
+    commands: Vec<(String, String)>,
+) -> Result<ReadLineOutcome> {
+    tokio::task::spawn_blocking(move || read_plain_outcome(&prompt, &history, &commands)).await?
 }
 
 fn render_value(value: &str) -> String {
@@ -282,7 +301,11 @@ fn next_word(chars: &[char], mut cursor: usize) -> usize {
     cursor
 }
 
-fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -> Result<String> {
+fn read_plain_outcome(
+    prompt: &str,
+    history: &[String],
+    commands: &[(String, String)],
+) -> Result<ReadLineOutcome> {
     let mut out = std::io::stdout();
     write!(out, "{prompt}")?;
     out.flush()?;
@@ -292,7 +315,7 @@ fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -
         .map(|(c, _)| c as usize)
         .unwrap_or(80);
 
-    let result = (|| -> Result<String> {
+    let result = (|| -> Result<ReadLineOutcome> {
         let mut chars: Vec<char> = Vec::new();
         let mut cursor = 0usize;
         let mut history_idx = history.len();
@@ -349,13 +372,19 @@ fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -
                 if kind == KeyEventKind::Release {
                     continue;
                 }
+                if let Some(outcome) = control_key_outcome(code, modifiers) {
+                    redraw(&mut out, &chars, cursor, sel, true)?;
+                    writeln!(out)?;
+                    out.flush()?;
+                    return Ok(outcome);
+                }
                 match code {
                     KeyCode::Enter => {
                         // Clear any open menu, then drop to the next line.
                         redraw(&mut out, &chars, cursor, sel, true)?;
                         writeln!(out)?;
                         out.flush()?;
-                        return Ok(chars.iter().collect());
+                        return Ok(ReadLineOutcome::Line(chars.iter().collect()));
                     }
                     KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
                         chars.insert(cursor, '\n');
@@ -363,13 +392,6 @@ fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -
                         sel = 0;
                         dismissed = false;
                         redraw(&mut out, &chars, cursor, sel, dismissed)?;
-                    }
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        redraw(&mut out, &chars, cursor, sel, true)?;
-                        writeln!(out)?;
-                        out.flush()?;
-                        crossterm::terminal::disable_raw_mode().ok();
-                        std::process::exit(0);
                     }
                     KeyCode::Esc => {
                         dismissed = true;
@@ -464,6 +486,17 @@ fn read_plain(prompt: &str, history: &[String], commands: &[(String, String)]) -
     })();
     crossterm::terminal::disable_raw_mode()?;
     result
+}
+
+fn control_key_outcome(code: KeyCode, modifiers: KeyModifiers) -> Option<ReadLineOutcome> {
+    if !modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match code {
+        KeyCode::Char('d') => Some(ReadLineOutcome::Eof),
+        KeyCode::Char('c') => Some(ReadLineOutcome::Interrupted),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -573,5 +606,21 @@ mod tests {
         let chars: Vec<char> = "one two".chars().collect();
         assert_eq!(prev_word(&chars, chars.len()), 4);
         assert_eq!(next_word(&chars, 0), 4);
+    }
+
+    #[test]
+    fn control_keys_map_to_interactive_read_outcomes() {
+        assert_eq!(
+            control_key_outcome(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Some(ReadLineOutcome::Eof)
+        );
+        assert_eq!(
+            control_key_outcome(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(ReadLineOutcome::Interrupted)
+        );
+        assert_eq!(
+            control_key_outcome(KeyCode::Char('d'), KeyModifiers::NONE),
+            None
+        );
     }
 }

@@ -83,6 +83,7 @@ use crate::warmup::warmup;
 mod config_cmds;
 mod context_cmds;
 mod doctor;
+mod hooks_cmds;
 mod memory;
 mod route;
 mod scorecard;
@@ -172,6 +173,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/trace",
         "Show nested subagent/critic tool activity (on, off, status)",
+    ),
+    (
+        "/hooks",
+        "List, trust, enable, or disable configured hooks",
     ),
     (
         "/backend",
@@ -276,6 +281,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/reasoning" => config_cmds::cmd_reasoning(&args, state),
         "/verbose" => config_cmds::cmd_verbose(&args, state),
         "/trace" => config_cmds::cmd_trace(&args, state),
+        "/hooks" => hooks_cmds::cmd_hooks(&args, state)?,
         "/backend" => config_cmds::cmd_backend(&args, state).await?,
         "/model" => config_cmds::cmd_model(&args, state).await?,
         "/tools" => config_cmds::cmd_tools(&args, state),
@@ -936,6 +942,9 @@ mod tests {
             last_play_scorecard: None,
             approval_cache: crate::approval::ApprovalCache::new(),
             renderer: crate::renderer::TuiRenderer::new(config.display.clone()),
+            hooks: crate::hooks::HookRegistry::default(),
+            session_hook_contexts: Vec::new(),
+            pending_hook_contexts: Vec::new(),
             warmed_fingerprint: None,
             tests_ran_this_session: false,
             pending_image_attachments: Vec::new(),

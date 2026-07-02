@@ -356,6 +356,7 @@ this exact call`. The session cache resets on `/new`.
 /reasoning on|off      toggle the streaming reasoning panel
 /verbose on|off        show every tool call with its full args + result
 /trace on|off          show nested subagent/critic tool calls (indented)
+/hooks                 list, trust, enable, or disable configured hooks
 /compare [model]       re-send the last prompt against OpenRouter for A/B
 /fusion on|tool|off    use OpenRouter Fusion alias or attach Fusion to a model
 /route select|apply    select or apply a configured multi-model stack route
@@ -592,6 +593,151 @@ Small Harness spawns each server at startup, lists its tools, and exposes
 them through the same approval-gated tool layer with names like
 `mcp__fs__read_file`. JSON-RPC over stdio; no extra dependencies.
 
+### Hooks
+
+Hooks let trusted local commands observe or influence harness events. They are
+useful for terminal integrations, status tracking, policy checks, and progress
+bridges for launchers, terminal orchestrators, and agent status dashboards.
+
+Project hooks live in `agent.config.json`:
+
+```json
+{
+  "hooks": {
+    "PlanUpdated": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$HOME/bin/agent-plan-hook" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "shell|file_write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/bin/check-tool-policy",
+            "timeoutSec": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Command hooks receive a JSON payload on stdin and may print JSON on stdout:
+
+```json
+{ "decision": "block", "reason": "shell command not allowed" }
+```
+
+Supported decisions are `allow`, `deny`, `block`, and `stop`. Hooks can also
+return `additionalContext`, `updatedInput`, or `feedback`. For `PreToolUse`,
+`updatedInput` is honored only with `{"decision":"allow"}` and is discarded if
+any hook blocks, denies, or stops. Exit code `2` maps to a blocking decision using
+stderr as the reason. For `PreToolUse` and `PermissionRequest`, hook runner
+failures such as timeouts, spawn/pipe failures, and shell infrastructure exits
+`126`/`127` fail closed and block gated execution; ordinary nonzero exits still
+warn unless the hook explicitly blocks. A pre-execution `stop` prevents other
+pending tool calls in the same assistant step from running; a `PostToolUse` stop
+applies after that tool has already run and stops the next model step.
+
+Hook events include `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`,
+`PlanUpdated`, `SubagentStart`, `SubagentStop`, `Stop`, and `SessionEnd`.
+Payloads include common fields such as `hook_event_name`, `session_id`,
+`turn_id`, `cwd`, `workspace_root`, `transcript_path`, `events_path`, `backend`,
+`model`, `approval_policy`, and `source`, plus event-specific fields like
+`tool_name`, `tool_input`, `tool_response`, and `progress`. `source` is
+`interactive`, `one-shot`, `auto`, `fix`, `iterate`, or `play` depending on
+what started the turn.
+
+Hook payload stdin is raw and unredacted so trusted hooks can make decisions on
+the actual prompt/tool data; do not log it unless your hook performs its own
+redaction. Hook child processes start with a cleared environment and receive the
+minimal inherited shell environment (`PATH`, `HOME` or Windows home/system vars),
+explicit parent process variables listed in `envVars`, literal values from
+`env`, plus `SMALL_HARNESS_HOOK_EVENT`, `SMALL_HARNESS_SESSION_ID`,
+`SMALL_HARNESS_TURN_ID`, `SMALL_HARNESS_TRANSCRIPT_PATH`, and
+`SMALL_HARNESS_EVENTS_PATH`. Parent LLM provider credentials are not passed
+through unless a hook explicitly names them in `envVars`.
+
+Matchers are Codex-style: absent, empty, or `*` matches all; exact `|`
+alternation matches tool/event names; other matchers are treated as full-match
+regexes. Use `.*` when partial regex matching is intended. Invalid matcher
+regexes are shown by `/hooks` and skipped. `UserPromptSubmit`, `PlanUpdated`,
+`Stop`, and `SessionEnd` ignore matchers. The default hook timeout is 600
+seconds for Codex parity; status/progress hooks should set a shorter
+`timeoutSec` if a slow hook would make the turn feel stuck.
+
+The `task` tool uses `SubagentStart` and `SubagentStop`; it does not also run
+generic `PostToolUse` hooks. `Stop` hook `additionalContext` and `feedback` are
+bounded, redacted, and added as context for the next turn.
+
+`PermissionRequest` runs only when the harness would otherwise ask for approval.
+Use `PreToolUse` for blanket policy gates that must also cover auto-approved or
+read-only tools.
+
+Project hooks are skipped until their current hash is trusted in user-owned
+state. Project-controlled `hooks.state` entries are ignored for execution
+safety. Manage trust with:
+
+```text
+/hooks                         list hooks and trust state
+/hooks trust <key>             trust one hook hash in user state
+/hooks trust-all               trust all new/modified hooks
+/hooks disable <key>           disable one hook
+/hooks enable <key>            enable one hook
+```
+
+Trust is stored in `$XDG_CONFIG_HOME/small-harness/hooks-state.json`, falling
+back to `~/.config/small-harness/hooks-state.json`. Trusted hook successes are
+quiet in the normal TUI; warnings, blocks, denies, stops, and feedback are
+shown. The event log records hook start/end/decision records with redacted,
+bounded stdout/stderr previews.
+
+Launchers can inject ephemeral managed launch hooks without changing user
+config:
+
+```bash
+SMALL_HARNESS_MANAGED_HOOKS_FILE="$TMPDIR/agent-status-hooks.json" small-harness
+```
+
+`SMALL_HARNESS_MANAGED_HOOKS_JSON` accepts the same document inline for small
+launchers. Managed launch hooks are not cryptographic signatures or Codex
+enterprise-managed hooks; they are process-local launcher-trusted commands for
+wrappers that own the process invocation. Small Harness intentionally reads
+these only from the real process environment, not repo `.env` files. This lets
+integrations observe status without mutating the user's config.
+
+Use `envVars` when a managed hook command needs launcher state:
+
+```json
+{
+  "source": "terminal-orchestrator",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "zentty ipc agent-event",
+            "envVars": [
+              "ZENTTY_INSTANCE_SOCKET",
+              "ZENTTY_WORKLANE_ID",
+              "ZENTTY_PANE_ID",
+              "ZENTTY_PANE_TOKEN"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ### Image input
 
 `/image <path>` attaches an image to your next prompt. Small Harness encodes
@@ -703,6 +849,8 @@ AGENT_TOOL_SELECTION=auto                               # auto | fixed
 WARMUP=true                                             # pre-warm prompt cache at startup
 SMALL_HARNESS_NO_WIZARD=false                           # skip first-run setup
 SMALL_HARNESS_NO_UPDATE_CHECK=false                     # skip the GitHub release check
+SMALL_HARNESS_MANAGED_HOOKS_JSON='{"source":"terminal-orchestrator","hooks":{...}}'
+SMALL_HARNESS_MANAGED_HOOKS_FILE=/tmp/agent-status-hooks.json
 ```
 
 Full list with comments in [`.env.example`](.env.example).
@@ -795,6 +943,11 @@ root. Common shape:
   },
   "mcpServers": {
     "fs": { "command": "/usr/local/bin/some-mcp-server", "args": [] }
+  },
+  "hooks": {
+    "PlanUpdated": [
+      { "hooks": [{ "type": "command", "command": "$HOME/bin/plan-hook" }] }
+    ]
   }
 }
 ```

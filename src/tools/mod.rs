@@ -51,6 +51,7 @@ pub struct ToolRuntimeContext {
     pub trace: SharedTurnTrace,
     pub trace_enabled: bool,
     pub agent_events: Option<tokio::sync::mpsc::UnboundedSender<crate::agent::AgentEvent>>,
+    pub hooks: Option<crate::agent::AgentHooks>,
 }
 
 /// Base64-encode raw bytes for use in a data URL (e.g. `data:image/png;base64,...`).

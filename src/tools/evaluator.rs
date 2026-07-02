@@ -160,6 +160,7 @@ pub async fn run_evaluation(
     let trace = runtime.as_ref().map(|r| r.trace.clone());
     let trace_enabled = runtime.as_ref().map(|r| r.trace_enabled).unwrap_or(false);
     let event_tx = runtime.as_ref().and_then(|r| r.agent_events.clone());
+    let hooks = runtime.as_ref().and_then(|r| r.hooks.clone());
 
     let result = run_agent(
         http,
@@ -182,6 +183,7 @@ pub async fn run_evaluation(
         None,
         trace,
         1,
+        hooks,
     )
     .await;
 
