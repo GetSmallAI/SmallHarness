@@ -124,24 +124,6 @@ fn render_value(value: &str) -> String {
 /// Maximum number of command rows shown in the completion menu at once.
 const MENU_MAX_ROWS: usize = 8;
 
-/// Visible width of a string, ignoring ANSI escape sequences (`ESC [ … m`).
-fn visible_width(s: &str) -> usize {
-    let mut n = 0;
-    let mut in_esc = false;
-    for ch in s.chars() {
-        if in_esc {
-            if ch == 'm' {
-                in_esc = false;
-            }
-        } else if ch == '\x1b' {
-            in_esc = true;
-        } else {
-            n += 1;
-        }
-    }
-    n
-}
-
 /// Slash-commands the current line is a prefix of, for the completion menu.
 /// Empty when: not a `/`-line, the cursor isn't at the end, completion was
 /// dismissed, or the only match is exactly what's already typed.
@@ -308,7 +290,7 @@ fn read_plain_outcome(
     write!(out, "{prompt}")?;
     out.flush()?;
     crossterm::terminal::enable_raw_mode()?;
-    let prompt_cols = visible_width(prompt);
+    let prompt_cols = crate::theme::visible_len(prompt);
     let term_cols = crossterm::terminal::size()
         .map(|(c, _)| c as usize)
         .unwrap_or(80);
@@ -595,8 +577,8 @@ mod tests {
 
     #[test]
     fn visible_width_ignores_ansi() {
-        assert_eq!(visible_width("  \x1b[96m❯\x1b[0m "), 4);
-        assert_eq!(visible_width("abc"), 3);
+        assert_eq!(crate::theme::visible_len("  \x1b[96m❯\x1b[0m "), 4);
+        assert_eq!(crate::theme::visible_len("abc"), 3);
     }
 
     #[test]

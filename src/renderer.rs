@@ -161,6 +161,12 @@ fn summarize_output(output: &str) -> String {
 /// the panel. `feed` returns the exact text to write for a streamed chunk;
 /// `finish` flushes the trailing buffered word. State persists across chunks,
 /// so it wraps correctly even when words arrive split across deltas.
+///
+/// ANSI-blind: escape sequences (`ESC [ … m`) travel with the word they
+/// belong to but count as zero visible width, so injected color/bold codes
+/// never skew the wrap column. In verbatim mode (used for fenced code blocks)
+/// text passes through untouched except that hard newlines re-emit the gutter
+/// — long code lines wrap at the terminal edge, preserving copy-paste fidelity.
 struct StreamWrap {
     inner: usize,
     gutter: String,
@@ -169,6 +175,8 @@ struct StreamWrap {
     word: String,
     at_line_start: bool,
     need_space: bool,
+    in_escape: bool,
+    verbatim: bool,
 }
 
 impl StreamWrap {
@@ -181,7 +189,25 @@ impl StreamWrap {
             word: String::new(),
             at_line_start: true,
             need_space: false,
+            in_escape: false,
+            verbatim: false,
         }
+    }
+
+    /// Toggle verbatim (no-wrap) mode. Flushes any pending word first and
+    /// resets line state, returning the flushed remainder so nothing is lost.
+    // Wired up by the streamed-markdown code-fence handler (visual-polish step 6).
+    #[allow(dead_code)]
+    fn set_verbatim(&mut self, on: bool) -> String {
+        let mut out = String::new();
+        self.flush_word(&mut out);
+        self.verbatim = on;
+        self.col = 0;
+        self.indent = 0;
+        self.at_line_start = true;
+        self.need_space = false;
+        self.in_escape = false;
+        out
     }
 
     fn line_break(&mut self, out: &mut String, hard: bool) {
@@ -200,15 +226,29 @@ impl StreamWrap {
             return;
         }
         let word = std::mem::take(&mut self.word);
-        let wlen = word.chars().count();
+        let wlen = crate::theme::visible_len(&word);
 
         // A single token longer than the line (e.g. a URL): hard-break it.
+        // Escape sequences are emitted verbatim and never counted or split.
         if wlen > self.inner {
             if self.need_space && self.col > self.indent && self.col < self.inner {
                 out.push(' ');
                 self.col += 1;
             }
+            let mut in_esc = false;
             for ch in word.chars() {
+                if in_esc {
+                    out.push(ch);
+                    if ch == 'm' {
+                        in_esc = false;
+                    }
+                    continue;
+                }
+                if ch == '\x1b' {
+                    in_esc = true;
+                    out.push(ch);
+                    continue;
+                }
                 if self.col >= self.inner {
                     self.line_break(out, false);
                     for _ in 0..self.indent {
@@ -241,8 +281,34 @@ impl StreamWrap {
 
     fn feed(&mut self, s: &str) -> String {
         let mut out = String::new();
+        if self.verbatim {
+            // No wrapping, no word buffering: emit as-is, but re-indent each
+            // physical line with the gutter so code stays under the panel.
+            for ch in s.chars() {
+                out.push(ch);
+                if ch == '\n' {
+                    out.push_str(&self.gutter);
+                }
+            }
+            return out;
+        }
         for ch in s.chars() {
+            // An in-flight escape sequence: buffer every char with the current
+            // word (zero visible width) until the terminating `m`.
+            if self.in_escape {
+                self.word.push(ch);
+                if ch == 'm' {
+                    self.in_escape = false;
+                }
+                continue;
+            }
             match ch {
+                '\x1b' => {
+                    // Start of a zero-width escape. Buffer it with the word but
+                    // don't let it flip `at_line_start` or count as content.
+                    self.in_escape = true;
+                    self.word.push(ch);
+                }
                 '\n' => {
                     self.flush_word(&mut out);
                     self.line_break(&mut out, true);
@@ -822,6 +888,78 @@ mod tests {
         out.push_str(&w.feed("ta gamma delta"));
         out.push_str(&w.finish());
         assert_eq!(out, "alpha beta\ngamma delta");
+    }
+
+    #[test]
+    fn ansi_codes_do_not_count_toward_width() {
+        // A bold-wrapped word plus enough plain words to force a wrap; the
+        // escapes must not push any visible line past `inner`.
+        let text = "\x1b[1mbold\x1b[0m word wraps around here";
+        let lines = wrapped_lines(text, 10);
+        for line in &lines {
+            assert!(
+                crate::theme::visible_len(line) <= 10,
+                "visible width of {:?} exceeds 10",
+                line
+            );
+        }
+        // The escape codes survived intact in the output.
+        let joined = lines.join("\n");
+        assert!(joined.contains("\x1b[1m"));
+        assert!(joined.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn escape_split_across_feeds_stays_zero_width() {
+        // The escape's `\x1b[` and `1mword` arrive in separate chunks.
+        let mut w = StreamWrap::new(11, "");
+        let mut out = String::new();
+        out.push_str(&w.feed("\x1b["));
+        out.push_str(&w.feed("1mword\x1b[0m plus more"));
+        out.push_str(&w.finish());
+        for line in out.split('\n') {
+            assert!(crate::theme::visible_len(line) <= 11, "line {:?}", line);
+        }
+        assert!(out.contains("\x1b[1mword"));
+    }
+
+    #[test]
+    fn overlong_token_with_ansi_never_splits_an_escape() {
+        // A styled token longer than the line must hard-break, but never in
+        // the middle of the `\x1b[…m` sequence.
+        let mut w = StreamWrap::new(8, "");
+        let mut out = String::new();
+        out.push_str(&w.feed("\x1b[92maaaaaaaaaaaaaaaa\x1b[0m"));
+        out.push_str(&w.finish());
+        // Walk each physical line: once we see ESC we must reach its `m`
+        // before the line ends, i.e. no escape is left dangling by a break.
+        for line in out.split('\n') {
+            let mut in_esc = false;
+            for ch in line.chars() {
+                if in_esc {
+                    if ch == 'm' {
+                        in_esc = false;
+                    }
+                } else if ch == '\x1b' {
+                    in_esc = true;
+                }
+            }
+            assert!(!in_esc, "escape split across a line break: {:?}", line);
+        }
+        assert!(out.contains("\x1b[92m"));
+        assert!(out.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn verbatim_mode_passes_through_with_gutter() {
+        let mut w = StreamWrap::new(10, ">>");
+        let mut out = String::new();
+        let _ = w.set_verbatim(true);
+        // A code line far longer than `inner` is NOT wrapped; newlines re-emit
+        // the gutter.
+        out.push_str(&w.feed("let x = a_very_long_identifier_here;\nnext"));
+        out.push_str(&w.finish());
+        assert_eq!(out, "let x = a_very_long_identifier_here;\n>>next");
     }
 }
 

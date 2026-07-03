@@ -145,6 +145,26 @@ pub fn content_width() -> usize {
     cols().saturating_sub(PAD.len() + 1).max(20)
 }
 
+/// Visible width of a string, ignoring ANSI escape sequences (`ESC [ … m`).
+/// Used anywhere layout must count columns of already-styled text — the
+/// input prompt and the streamed-answer word-wrapper both rely on it.
+pub fn visible_len(s: &str) -> usize {
+    let mut n = 0;
+    let mut in_esc = false;
+    for ch in s.chars() {
+        if in_esc {
+            if ch == 'm' {
+                in_esc = false;
+            }
+        } else if ch == '\x1b' {
+            in_esc = true;
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// A muted full-width horizontal rule, indented by `PAD`.
 pub fn rule() -> String {
     let dashes = cols().saturating_sub(PAD.len());
