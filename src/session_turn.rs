@@ -898,6 +898,9 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     )
     .unwrap_or_default();
 
+    // One leading blank separates the quiet stats footer from the turn's
+    // response and any checkpoint/test notices above it.
+    println!();
     println!(
         "{}",
         format_footer(

@@ -682,6 +682,8 @@ impl TuiRenderer {
             .iter()
             .filter(|s| s.get("status").and_then(Value::as_str) == Some("done"))
             .count();
+        // Leading blank: the plan block owns its own gap (no trailing blank).
+        println!();
         println!(
             "{PAD}{ACCENT}{DOT}{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
             steps.len()
@@ -705,7 +707,6 @@ impl TuiRenderer {
             };
             println!("{PAD}  {mark} {body}");
         }
-        println!();
     }
 
     fn render_tool_result(&mut self, name: &str, call_id: &str, output: &str, depth: u32) {
@@ -797,6 +798,10 @@ impl TuiRenderer {
         if self.grouped_pending.is_empty() {
             return;
         }
+        // A block owns exactly one leading blank line and no trailing blank, so
+        // it separates cleanly from whatever came before without stacking a
+        // second blank against the next block's own leading gap.
+        println!();
         let pending = std::mem::take(&mut self.grouped_pending);
         let first = &pending[0];
         let label = label_past(&first.name);
@@ -825,7 +830,6 @@ impl TuiRenderer {
                 println!("{PAD}  {GRAY}{branch}{RESET} {TEXT}{arg_str}{RESET}{summary}");
             }
         }
-        println!();
         self.grouped_category.clear();
     }
 
