@@ -72,8 +72,6 @@ impl std::fmt::Display for Style {
 
 pub const RESET: Style = Style("\x1b[0m");
 pub const BOLD: Style = Style("\x1b[1m");
-// Used by the streamed-markdown state machine (visual-polish step 6).
-#[allow(dead_code)]
 pub const ITALIC: Style = Style("\x1b[3m");
 
 /// Accent — prompts, headers, the active step. Bright cyan.
@@ -107,9 +105,6 @@ pub const CHECK: Sym = Sym("✔", "+");
 pub const PENDING: Sym = Sym("○", "o");
 pub const SUB: Sym = Sym("↳", ">");
 pub const WARN_MARK: Sym = Sym("▲", "!");
-// Used by the streamed-markdown state machine for `- `/`* ` list items
-// (visual-polish step 6).
-#[allow(dead_code)]
 pub const BULLET: Sym = Sym("•", "*");
 pub const PROMPT_CHAR: Sym = Sym("❯", ">");
 pub const BRANCH: Sym = Sym("├", "|");
@@ -169,6 +164,22 @@ pub fn visible_len(s: &str) -> usize {
 pub fn rule() -> String {
     let dashes = cols().saturating_sub(PAD.len());
     format!("{PAD}{MUTED}{}{RESET}", rule_char().repeat(dashes))
+}
+
+/// A dim rule that frames a fenced code block. With a language it reads
+/// `── rust ─────`; the closing rule (empty language) is just dashes. No
+/// leading `PAD` — the renderer positions it directly under the answer gutter.
+pub fn code_fence_rule(lang: &str) -> String {
+    let target = content_width().min(48);
+    let rc = rule_char();
+    let lang = lang.trim();
+    if lang.is_empty() {
+        format!("{MUTED}{}{RESET}", rc.repeat(target))
+    } else {
+        let label = format!("{rc}{rc} {lang} ");
+        let remain = target.saturating_sub(visible_len(&label));
+        format!("{MUTED}{label}{}{RESET}", rc.repeat(remain))
+    }
 }
 
 /// 256-color ramp used by the fading turn headers (and the banner logo):

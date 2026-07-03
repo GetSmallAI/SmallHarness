@@ -28,6 +28,7 @@ mod hooks;
 mod input;
 mod iterate_loop;
 mod loader;
+mod markdown;
 mod mcp;
 mod model_system;
 mod openai;

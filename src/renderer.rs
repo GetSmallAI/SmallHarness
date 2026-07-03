@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
+use crate::markdown::{MarkdownInline, MdEvent};
 
 use crate::theme::{
     content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH, BRANCH_END, CHECK, DOT, FAIL,
@@ -196,8 +197,7 @@ impl StreamWrap {
 
     /// Toggle verbatim (no-wrap) mode. Flushes any pending word first and
     /// resets line state, returning the flushed remainder so nothing is lost.
-    // Wired up by the streamed-markdown code-fence handler (visual-polish step 6).
-    #[allow(dead_code)]
+    /// Used by the streamed-markdown code-fence handler.
     fn set_verbatim(&mut self, on: bool) -> String {
         let mut out = String::new();
         self.flush_word(&mut out);
@@ -364,9 +364,39 @@ pub struct TuiRenderer {
     /// and streaming. Holds the word-wrap state so content stays inside the
     /// panel. Closed when a tool call/reasoning interrupts or the turn ends.
     answer_wrap: Option<StreamWrap>,
+    /// Inline-markdown state for the open answer panel, paired with
+    /// `answer_wrap`. Styles bold/italic/code/headings/bullets and frames
+    /// fenced code blocks as the answer streams.
+    answer_md: Option<MarkdownInline>,
     /// The configured tool display, remembered so `/verbose off` can restore it.
     base_tool_display: ToolDisplay,
     trace_enabled: bool,
+}
+
+/// Route one markdown event to the answer wrapper: styled text flows through
+/// the wrapper; fence signals flip verbatim mode and print framing rules. Kept
+/// free-standing so it can borrow the wrapper without the whole renderer.
+fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
+    match ev {
+        MdEvent::Text(s) => {
+            let chunk = wrap.feed(&s);
+            let _ = write!(out, "{chunk}");
+        }
+        MdEvent::CodeStart { lang } => {
+            // A newline+gutter always precedes a fence, so the rule (which has
+            // no leading PAD) lands correctly under the answer gutter.
+            let flushed = wrap.set_verbatim(true);
+            let _ = write!(out, "{flushed}");
+            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(&lang));
+            let _ = write!(out, "{PAD}");
+        }
+        MdEvent::CodeEnd => {
+            let flushed = wrap.set_verbatim(false);
+            let _ = write!(out, "{flushed}");
+            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(""));
+            let _ = write!(out, "{PAD}{TEXT}");
+        }
+    }
 }
 
 impl TuiRenderer {
@@ -381,6 +411,7 @@ impl TuiRenderer {
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
             answer_wrap: None,
+            answer_md: None,
             base_tool_display,
             trace_enabled: false,
         }
@@ -484,6 +515,13 @@ impl TuiRenderer {
             return;
         };
         let mut out = std::io::stdout();
+        // Drain any buffered markdown (unclosed markers → literal, an open
+        // fence → CodeEnd) before flushing the wrapper's trailing word.
+        if let Some(mut md) = self.answer_md.take() {
+            for ev in md.finish() {
+                write_md_event(&mut out, &mut wrap, ev);
+            }
+        }
         let tail = wrap.finish();
         let _ = write!(out, "{tail}");
         let _ = writeln!(out, "{RESET}");
@@ -528,10 +566,12 @@ impl TuiRenderer {
             // Wrap to the real content width so the answer fills the terminal
             // (like naturally-wrapped text) instead of overflowing.
             self.answer_wrap = Some(StreamWrap::new(content_width(), PAD));
+            self.answer_md = Some(MarkdownInline::new());
         }
-        if let Some(wrap) = self.answer_wrap.as_mut() {
-            let chunk = wrap.feed(delta);
-            let _ = write!(out, "{chunk}");
+        if let (Some(md), Some(wrap)) = (self.answer_md.as_mut(), self.answer_wrap.as_mut()) {
+            for ev in md.feed(delta) {
+                write_md_event(&mut out, wrap, ev);
+            }
         }
         let _ = out.flush();
     }
@@ -948,6 +988,43 @@ mod tests {
         }
         assert!(out.contains("\x1b[92m"));
         assert!(out.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn markdown_then_wrap_respects_width_with_styling() {
+        // Styled markdown streamed through MarkdownInline into StreamWrap must
+        // never produce a visible line wider than `inner`, despite the ANSI
+        // codes injected for bold/italic/code.
+        use crate::markdown::{MarkdownInline, MdEvent};
+        crate::theme::init(crate::config::ColorMode::Always, false);
+        let input =
+            "Here is **bold text** and `inline code` plus _emphasis_ that must wrap cleanly around.";
+        let mut md = MarkdownInline::new();
+        let mut wrap = StreamWrap::new(20, "");
+        let mut out = String::new();
+        for ch in input.chars() {
+            for ev in md.feed(&ch.to_string()) {
+                if let MdEvent::Text(s) = ev {
+                    out.push_str(&wrap.feed(&s));
+                }
+            }
+        }
+        for ev in md.finish() {
+            if let MdEvent::Text(s) = ev {
+                out.push_str(&wrap.feed(&s));
+            }
+        }
+        out.push_str(&wrap.finish());
+        for line in out.split('\n') {
+            assert!(
+                crate::theme::visible_len(line) <= 20,
+                "styled line {:?} exceeds width 20 (visible {})",
+                line,
+                crate::theme::visible_len(line)
+            );
+        }
+        // Styling actually happened.
+        assert!(out.contains("\x1b[1m"));
     }
 
     #[test]
