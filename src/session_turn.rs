@@ -185,6 +185,7 @@ fn format_footer(
     metrics: &TurnMetrics,
     path_suffix: &str,
     scorecard_suffix: &str,
+    fable_suffix: &str,
 ) -> String {
     let mut parts = vec![
         format!("{} in", format_tokens(input_tokens)),
@@ -212,6 +213,9 @@ fn format_footer(
     }
     if !scorecard_suffix.is_empty() {
         parts.push(scorecard_suffix.to_string());
+    }
+    if !fable_suffix.is_empty() {
+        parts.push(fable_suffix.to_string());
     }
     format!("{GRAY}  {}{RESET}", parts.join(" · "))
 }
@@ -897,6 +901,18 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         state.config.scorecard.nudge_min_turns,
     )
     .unwrap_or_default();
+    let fable_suffix = if state.config.fable.enabled
+        && crate::fable_usage::is_fable_model(&state.config.fable, &state.model)
+    {
+        if state.config.scorecard.enabled {
+            crate::fable_usage::format_footer_suffix(&state.config.fable, &state.model)
+                .unwrap_or_default()
+        } else {
+            "Fable tracker off (scorecard.disabled)".to_string()
+        }
+    } else {
+        String::new()
+    };
 
     // One leading blank separates the quiet stats footer from the turn's
     // response and any checkpoint/test notices above it.
@@ -914,6 +930,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &metrics,
             &format_path_suffix(state),
             &scorecard_suffix,
+            &fable_suffix,
         )
     );
 
@@ -1144,7 +1161,7 @@ mod cost_tests {
     #[test]
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(1200, 87, None, true, 0.0, false, None, &metrics, "", "");
+        let footer = format_footer(1200, 87, None, true, 0.0, false, None, &metrics, "", "", "");
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
         assert!(footer.contains("1.2k in · 87 out"));
@@ -1176,16 +1193,18 @@ mod cost_tests {
             &metrics,
             "path: main · 2 paths",
             "3 turn(s) tracked · /ship pr closes scorecard",
+            "Fable 25.0k / 50.0k wk (50%)",
         );
         assert!(footer.contains("500 in · 120 out · $0.01 this turn · $0.01 session · effort high"));
         assert!(footer.contains("path: main · 2 paths"));
         assert!(footer.contains("3 turn(s) tracked"));
+        assert!(footer.contains("Fable 25.0k / 50.0k wk (50%)"));
     }
 
     #[test]
     fn local_backend_footer_has_no_cost_part() {
         let metrics = TurnMetrics::default();
-        let footer = format_footer(100, 50, None, true, 0.0, false, None, &metrics, "", "");
+        let footer = format_footer(100, 50, None, true, 0.0, false, None, &metrics, "", "", "");
         assert!(!footer.contains('$'));
     }
 

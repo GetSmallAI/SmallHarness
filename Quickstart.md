@@ -147,6 +147,7 @@ Useful commands:
 /scorecard close "OAuth login PR" --url https://github.com/org/repo/pull/42
 /scorecard doctor   inspect the local scorecard ledger
 /scorecard export   copy the raw scorecard JSONL before repair or sharing
+/fable       show Claude Fable weekly usage and cap headroom
 /handoff      draft commit, changelog, testing, and X-ready release copy
 /fusion on    switch to OpenRouter Fusion for deliberative coding questions
 /fusion tool  attach Fusion deliberation to an OpenRouter coding model

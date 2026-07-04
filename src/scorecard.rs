@@ -256,6 +256,13 @@ struct ScorecardRead {
     diagnostics: ScorecardStoreDiagnostics,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScorecardTurnRead {
+    pub path: Option<PathBuf>,
+    pub turns: Vec<ScorecardTurn>,
+    pub diagnostics: Option<ScorecardStoreDiagnostics>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScorecardResetSummary {
     pub path: PathBuf,
@@ -366,6 +373,29 @@ pub fn load_report(workspace_root: &str) -> Result<ScorecardReport> {
         Utc::now().date_naive(),
         diagnostics,
     ))
+}
+
+pub fn load_turn_records() -> Result<ScorecardTurnRead> {
+    let path = scorecard_path();
+    let (events, diagnostics) = match &path {
+        Some(path) => {
+            let read = read_events_with_diagnostics(path)?;
+            (read.events, Some(read.diagnostics))
+        }
+        None => (Vec::new(), None),
+    };
+    let turns = events
+        .into_iter()
+        .filter_map(|event| match event {
+            ScorecardEvent::Turn(turn) => Some(turn),
+            _ => None,
+        })
+        .collect();
+    Ok(ScorecardTurnRead {
+        path,
+        turns,
+        diagnostics,
+    })
 }
 
 pub fn recent_prs(limit: usize) -> Result<Vec<ScorecardPr>> {

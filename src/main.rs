@@ -21,6 +21,7 @@ mod context_guard;
 mod continuation;
 mod crash_log;
 mod diff_view;
+mod fable_usage;
 mod fix_loop;
 mod handoff;
 mod hardware;

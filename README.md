@@ -335,6 +335,7 @@ this exact call`. The session cache resets on `/new`.
 /scorecard close <label> [--url <url>] [--tests]  close branch with shipcheck quality score
 /scorecard doctor                inspect the local scorecard ledger for malformed JSONL
 /scorecard export [path]          copy the raw scorecard ledger before repair or sharing
+/fable                           show Claude Fable weekly usage and cap headroom
 /handoff                         draft commit, changelog, release copy
 /test discover|run|smart         discover or run tests
 /fix                             fix-until-green loop
@@ -429,6 +430,30 @@ The `/model` picker shows the same data while you choose:
    2) gpt-4o                 128k ctx · $2.50/$10.00 per Mtoken
    3) o1-mini                128k ctx · $3.00/$12.00 per Mtoken
 ```
+
+### Claude Fable tracker
+
+`/fable` rolls up the local turn ledger into a weekly Claude Fable tracker:
+Fable tokens, Fable turns, Fable's share of tracked Claude-family usage, and
+remaining allowance when you configure a weekly plan budget. Fable turns also
+append a compact weekly tracker to the status footer.
+
+By default, Fable models are detected by model IDs containing `fable`, and the
+cap share is `0.5` (50%). Add this to `agent.config.json` when you know the
+weekly Claude-plan token budget you want Small Harness to monitor:
+
+```json
+{
+  "fable": {
+    "weeklyTokenBudget": 200000,
+    "capShare": 0.5,
+    "weekStartsOn": "monday"
+  }
+}
+```
+
+The tracker only sees Small Harness turns recorded in the local ledger. It
+cannot see usage from the Claude app or other clients.
 
 ### Quality PR scorecard
 
@@ -876,6 +901,12 @@ root. Common shape:
     "enabled": true,
     "qualityThreshold": 80,
     "nudgeMinTurns": 3
+  },
+  "fable": {
+    "enabled": true,
+    "weeklyTokenBudget": null,
+    "capShare": 0.5,
+    "weekStartsOn": "monday"
   },
   "workspaceRoot": "/path/to/project",
   "outsideWorkspace": "prompt",

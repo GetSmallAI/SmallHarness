@@ -83,6 +83,7 @@ use crate::warmup::warmup;
 mod config_cmds;
 mod context_cmds;
 mod doctor;
+mod fable;
 mod hooks_cmds;
 mod memory;
 mod route;
@@ -145,6 +146,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/scorecard",
         "Show global quality PRs shipped and close PR units",
+    ),
+    (
+        "/fable",
+        "Track Claude Fable weekly usage and cap headroom",
     ),
     ("/sessions", "List saved sessions"),
     ("/resume", "Resume latest or named session"),
@@ -271,6 +276,7 @@ pub async fn dispatch(input: &str, state: &mut AppState) -> Result<()> {
         "/plan" => cmd_plan(&args, state).await?,
         "/session" => session::cmd_session(&args, state)?,
         "/scorecard" => scorecard::cmd_scorecard(&args, state)?,
+        "/fable" => fable::cmd_fable(&args, state)?,
         "/sessions" => session::cmd_sessions(&args, state)?,
         "/resume" => session::cmd_resume(&args, state)?,
         "/export" => session::cmd_export(&args, state)?,

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Fable usage tracker.** `/fable` now shows weekly Small
+  Harness-tracked Fable tokens, turns, share of tracked Claude-family usage,
+  and optional remaining allowance for plans where Fable is capped to a share
+  of weekly usage. Fable turns also append a compact weekly tracker to the
+  footer.
+
 ## [1.1.1] - 2026-07-02
 
 ### Added
