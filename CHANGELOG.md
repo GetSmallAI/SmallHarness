@@ -6,13 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-08
+
 ### Added
 
+- **Complexity-aware plan routing.** `/plan route <intent>` can now ask a
+  configured planning model to break a larger request into low-, medium-, and
+  high-complexity tasks, persist the plan to `.small-harness/plan.json`, and
+  route each ready task through the configured execution tier. `/plan status`
+  shows task progress, and `/plan execute` runs ready tasks sequentially while
+  switching models for each task.
+- **Model-system planner tier.** `agent.config.json` can now define
+  `modelSystem.planner` alongside selector and execution models, making it
+  possible to plan with a subscription-backed or API-backed frontier model and
+  execute subtasks across cheaper, local, or specialized models.
 - **Claude Fable usage tracker.** `/fable` now shows weekly Small
   Harness-tracked Fable tokens, turns, share of tracked Claude-family usage,
   and optional remaining allowance for plans where Fable is capped to a share
   of weekly usage. Fable turns also append a compact weekly tracker to the
   footer.
+- **Terminal visual polish.** The interactive UI now has streamed markdown
+  styling, code-block framing, colored diffs, theme handling, a gradient
+  banner, and `NO_COLOR`-aware output for cleaner long-running sessions.
+
+### Fixed
+
+- **Dependency audit.** Updated `quinn-proto` and `crossbeam-epoch` to versions
+  that clear the current RustSec audit failures while preserving the existing
+  allowed `anyhow` warning policy.
 
 ## [1.1.1] - 2026-07-02
 
