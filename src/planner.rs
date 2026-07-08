@@ -11,8 +11,15 @@
 //! the system prompt forbids prescribing files, APIs, or code, because premature
 //! technical detail in a spec cascades into downstream implementation errors.
 
+use anyhow::{anyhow, Result};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::model_system::{EffortLevel, ModelRef, ModelSystemConfig, TaskComplexity};
 
 /// Top-level sections every spec must contain, in order.
 const SPEC_SECTIONS: &[&str] = &[
@@ -30,6 +37,113 @@ pub fn default_spec_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root)
         .join(".small-harness")
         .join("spec.md")
+}
+
+/// Where routed plans are stored: `<workspace>/.small-harness/plan.json`.
+pub fn default_routed_plan_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root)
+        .join(".small-harness")
+        .join("plan.json")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanTaskStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Skipped,
+}
+
+impl PlanTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+fn default_plan_version() -> u8 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutedPlan {
+    #[serde(default = "default_plan_version")]
+    pub version: u8,
+    pub goal: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub planner: Option<ModelRef>,
+    pub tasks: Vec<RoutedPlanTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutedPlanTask {
+    pub id: String,
+    pub title: String,
+    pub prompt: String,
+    #[serde(default = "default_task_role")]
+    pub role: String,
+    pub complexity: TaskComplexity,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub assigned_model: Option<ModelRef>,
+    #[serde(default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(default = "default_task_status")]
+    pub status: PlanTaskStatus,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+fn default_task_role() -> String {
+    "code".into()
+}
+
+fn default_task_status() -> PlanTaskStatus {
+    PlanTaskStatus::Pending
+}
+
+pub fn save_routed_plan(path: &Path, plan: &RoutedPlan) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let body = serde_json::to_string_pretty(plan)?;
+    fs::write(path, format!("{body}\n"))?;
+    Ok(())
+}
+
+pub fn load_routed_plan(path: &Path) -> Result<RoutedPlan> {
+    let body = fs::read_to_string(path).with_context_path("reading routed plan", path)?;
+    serde_json::from_str(&body).with_context_path("parsing routed plan JSON", path)
+}
+
+trait PathContext<T> {
+    fn with_context_path(self, action: &str, path: &Path) -> Result<T>;
+}
+
+impl<T, E> PathContext<T> for std::result::Result<T, E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn with_context_path(self, action: &str, path: &Path) -> Result<T> {
+        self.map_err(|e| anyhow!("{action} {}: {e}", path.display()))
+    }
 }
 
 /// System prompt: fixes the section contract and forbids premature technical
@@ -68,6 +182,341 @@ pub fn render_planner_prompt(intent: &str) -> String {
     out.push_str("Intent:\n");
     out.push_str(intent.trim());
     out
+}
+
+pub fn routed_planner_system_prompt() -> String {
+    [
+        "You are the planning agent for a complexity-aware Small Harness execution layer.",
+        "Break one software goal into a small, ordered task graph for coding agents.",
+        "Return ONLY JSON, with no markdown, prose, or code fence.",
+        "Use this exact top-level shape:",
+        "{\"goal\":\"...\",\"tasks\":[{\"id\":\"short-kebab-id\",\"title\":\"...\",\"prompt\":\"...\",\"role\":\"investigate|code|review|verify|docs\",\"complexity\":\"low|medium|high\",\"dependsOn\":[\"id\"],\"acceptance\":[\"observable criterion\"],\"effort\":\"none|minimal|low|medium|high|xhigh|max|null\"}]}",
+        "Low complexity means isolated edits, simple docs, straightforward tests, or narrow investigation.",
+        "Medium complexity means multi-file implementation, moderate ambiguity, or tests plus code changes.",
+        "High complexity means architecture, auth/security, broad refactors, migrations, concurrency, reliability-sensitive work, or tasks where mistakes are expensive.",
+        "Make dependencies explicit. Do not create circular dependencies. Keep task ids stable and short.",
+        "Each prompt must be self-contained enough for an executor, but should not force exact files or APIs unless the user's request already named them.",
+        "Prefer 3-8 tasks. Use high complexity sparingly.",
+    ]
+    .join("\n")
+}
+
+pub fn render_routed_planner_prompt(
+    intent: &str,
+    stack: &ModelSystemConfig,
+    planner: Option<&ModelRef>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("Create a routed execution plan for this goal.\n\nGoal:\n");
+    out.push_str(intent.trim());
+    out.push_str("\n\nConfigured execution layer:\n");
+    append_model_line(&mut out, "planner", planner);
+    append_model_line(&mut out, "selector", stack.selector.as_ref());
+    append_model_line(
+        &mut out,
+        "orchestrator.low",
+        stack.orchestrators.low.as_ref(),
+    );
+    append_model_line(
+        &mut out,
+        "orchestrator.medium",
+        stack.orchestrators.medium.as_ref(),
+    );
+    append_model_line(
+        &mut out,
+        "orchestrator.high",
+        stack.orchestrators.high.as_ref(),
+    );
+    append_model_line(&mut out, "coder.low", stack.coders.low.as_ref());
+    append_model_line(&mut out, "coder.medium", stack.coders.medium.as_ref());
+    append_model_line(&mut out, "coder.high", stack.coders.high.as_ref());
+    append_model_line(&mut out, "review.play", stack.reviewers.play.as_ref());
+    append_model_line(
+        &mut out,
+        "review.production",
+        stack.reviewers.production.as_ref(),
+    );
+    append_model_line(&mut out, "security", stack.security_reviewer.as_ref());
+    out.push_str("\nAssign each task a complexity based on the configured coder tiers. Do not include tasks that cannot be executed by the configured stack unless they are unavoidable.\n");
+    out
+}
+
+fn append_model_line(out: &mut String, label: &str, model: Option<&ModelRef>) {
+    out.push_str("- ");
+    out.push_str(label);
+    out.push_str(": ");
+    match model {
+        Some(model) => out.push_str(&model.detail()),
+        None => out.push_str("not configured"),
+    }
+    out.push('\n');
+}
+
+pub fn parse_routed_plan(
+    text: &str,
+    fallback_goal: &str,
+    planner: Option<ModelRef>,
+    stack: &ModelSystemConfig,
+) -> Result<RoutedPlan> {
+    let value = if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
+        value
+    } else {
+        let Some(json) = extract_first_json_object(text) else {
+            return Err(anyhow!("planner did not return a JSON routed plan"));
+        };
+        serde_json::from_str::<Value>(json)
+            .map_err(|e| anyhow!("planner returned invalid routed-plan JSON: {e}"))?
+    };
+    routed_plan_from_value(&value, fallback_goal, planner, stack)
+}
+
+fn routed_plan_from_value(
+    value: &Value,
+    fallback_goal: &str,
+    planner: Option<ModelRef>,
+    stack: &ModelSystemConfig,
+) -> Result<RoutedPlan> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| anyhow!("routed plan must be a JSON object"))?;
+    let goal = obj
+        .get("goal")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_goal.trim())
+        .to_string();
+    if goal.is_empty() {
+        return Err(anyhow!("routed plan goal is empty"));
+    }
+    let raw_tasks = obj
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("routed plan must include a tasks array"))?;
+    if raw_tasks.is_empty() {
+        return Err(anyhow!("routed plan must include at least one task"));
+    }
+
+    let mut tasks = Vec::new();
+    let mut ids = HashSet::new();
+    for (index, value) in raw_tasks.iter().enumerate() {
+        let task = routed_task_from_value(value, index, stack)?;
+        if !ids.insert(task.id.clone()) {
+            return Err(anyhow!("duplicate routed plan task id: {}", task.id));
+        }
+        tasks.push(task);
+    }
+
+    let known_ids: HashSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
+    for task in &tasks {
+        for dep in &task.depends_on {
+            if !known_ids.contains(dep) {
+                return Err(anyhow!(
+                    "task {} depends on unknown task id {}",
+                    task.id,
+                    dep
+                ));
+            }
+            if dep == &task.id {
+                return Err(anyhow!("task {} cannot depend on itself", task.id));
+            }
+        }
+    }
+    if tasks.iter().all(|task| !task.depends_on.is_empty()) {
+        return Err(anyhow!(
+            "routed plan must include at least one task without dependencies"
+        ));
+    }
+    if let Some(id) = first_dependency_cycle(&tasks) {
+        return Err(anyhow!(
+            "routed plan has a circular dependency involving {id}"
+        ));
+    }
+
+    Ok(RoutedPlan {
+        version: 1,
+        goal,
+        created_at: Utc::now().to_rfc3339(),
+        planner,
+        tasks,
+    })
+}
+
+fn first_dependency_cycle(tasks: &[RoutedPlanTask]) -> Option<String> {
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for task in tasks {
+        if visit_task_for_cycle(&task.id, tasks, &mut visiting, &mut visited) {
+            return Some(task.id.clone());
+        }
+    }
+    None
+}
+
+fn visit_task_for_cycle(
+    id: &str,
+    tasks: &[RoutedPlanTask],
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    if visited.contains(id) {
+        return false;
+    }
+    if !visiting.insert(id.to_string()) {
+        return true;
+    }
+    let has_cycle = tasks
+        .iter()
+        .find(|task| task.id == id)
+        .map(|task| {
+            task.depends_on
+                .iter()
+                .any(|dep| visit_task_for_cycle(dep, tasks, visiting, visited))
+        })
+        .unwrap_or(false);
+    visiting.remove(id);
+    visited.insert(id.to_string());
+    has_cycle
+}
+
+fn routed_task_from_value(
+    value: &Value,
+    index: usize,
+    stack: &ModelSystemConfig,
+) -> Result<RoutedPlanTask> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| anyhow!("task {} must be a JSON object", index + 1))?;
+    let fallback_id = format!("task-{}", index + 1);
+    let raw_id = string_field(obj, &["id", "key"])
+        .or_else(|| string_field(obj, &["title", "name"]).map(|s| sanitize_task_id(&s)))
+        .unwrap_or(fallback_id);
+    let id = sanitize_task_id(&raw_id);
+    if id.is_empty() {
+        return Err(anyhow!("task {} has an empty id", index + 1));
+    }
+    let title = string_field(obj, &["title", "name"])
+        .unwrap_or_else(|| id.replace('-', " "))
+        .trim()
+        .to_string();
+    let prompt = string_field(obj, &["prompt", "instructions", "description"])
+        .unwrap_or_else(|| title.clone())
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return Err(anyhow!("task {id} has an empty prompt"));
+    }
+    let role = string_field(obj, &["role", "type"])
+        .unwrap_or_else(default_task_role)
+        .trim()
+        .to_ascii_lowercase();
+    let complexity = string_field(obj, &["complexity", "difficulty"])
+        .and_then(|s| TaskComplexity::parse(&s.trim().to_ascii_lowercase()))
+        .unwrap_or(TaskComplexity::Medium);
+    let depends_on = array_strings(obj, &["dependsOn", "depends_on", "dependencies"])
+        .into_iter()
+        .map(|dep| sanitize_task_id(&dep))
+        .filter(|dep| !dep.is_empty())
+        .collect();
+    let acceptance = array_strings(
+        obj,
+        &[
+            "acceptance",
+            "acceptanceCriteria",
+            "acceptance_criteria",
+            "doneCriteria",
+            "done_criteria",
+        ],
+    );
+    let effort = string_field(obj, &["effort", "coderEffort", "coder_effort"])
+        .and_then(|s| EffortLevel::parse(&s));
+    Ok(RoutedPlanTask {
+        id,
+        title,
+        prompt,
+        role,
+        complexity,
+        depends_on,
+        acceptance,
+        assigned_model: stack.coder(complexity).cloned(),
+        effort,
+        status: PlanTaskStatus::Pending,
+        result: None,
+        last_error: None,
+    })
+}
+
+fn string_field(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn array_strings(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    let Some(value) = keys.iter().find_map(|key| obj.get(*key)) else {
+        return Vec::new();
+    };
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Value::String(text) if !text.trim().is_empty() => vec![text.trim().to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn sanitize_task_id(value: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in value.trim().chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            out.push(lower);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn extract_first_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Some(&text[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Normalize a model draft so every required section is present. Missing
@@ -190,5 +639,67 @@ mod tests {
         let prompt = render_planner_prompt("  build a dashboard  ");
         assert!(prompt.contains("build a dashboard"));
         assert!(prompt.contains("not implementation"));
+    }
+
+    #[test]
+    fn default_routed_plan_path_is_under_small_harness() {
+        let path = default_routed_plan_path("/tmp/project");
+        assert!(path.ends_with(".small-harness/plan.json"));
+        assert!(path.starts_with("/tmp/project"));
+    }
+
+    #[test]
+    fn parses_wrapped_routed_plan_and_assigns_coder_tiers() {
+        let stack = ModelSystemConfig {
+            coders: crate::model_system::ModelTierSet {
+                low: ModelRef::parse_spec("ollama:qwen2.5:7b"),
+                high: ModelRef::parse_spec("openrouter:anthropic/claude-sonnet-4.5"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = parse_routed_plan(
+            "```json\n{\"goal\":\"ship auth\",\"tasks\":[{\"id\":\"audit\",\"title\":\"Audit auth\",\"prompt\":\"Inspect auth flow\",\"complexity\":\"low\"},{\"id\":\"implement-refresh\",\"title\":\"Implement refresh\",\"prompt\":\"Add refresh handling\",\"complexity\":\"High\",\"dependsOn\":[\"audit\"],\"acceptance\":[\"expired tokens refresh\"],\"effort\":\"high\"}]}\n```",
+            "fallback",
+            ModelRef::parse_spec("openrouter:openrouter/fusion"),
+            &stack,
+        )
+        .unwrap();
+        assert_eq!(plan.goal, "ship auth");
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(
+            plan.tasks[0].assigned_model.as_ref().unwrap().backend,
+            crate::backends::BackendName::Ollama
+        );
+        assert_eq!(
+            plan.tasks[1].assigned_model.as_ref().unwrap().model,
+            "anthropic/claude-sonnet-4.5"
+        );
+        assert_eq!(plan.tasks[1].effort, Some(EffortLevel::High));
+        assert_eq!(plan.tasks[1].depends_on, vec!["audit"]);
+    }
+
+    #[test]
+    fn routed_plan_rejects_unknown_dependencies() {
+        let err = parse_routed_plan(
+            r#"{"goal":"x","tasks":[{"id":"b","prompt":"do b","dependsOn":["missing"]}]}"#,
+            "fallback",
+            None,
+            &ModelSystemConfig::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown task id"));
+    }
+
+    #[test]
+    fn routed_plan_rejects_cycles_even_with_a_root_task() {
+        let err = parse_routed_plan(
+            r#"{"goal":"x","tasks":[{"id":"a","prompt":"do a"},{"id":"b","prompt":"do b","dependsOn":["c"]},{"id":"c","prompt":"do c","dependsOn":["b"]}]}"#,
+            "fallback",
+            None,
+            &ModelSystemConfig::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("circular dependency"));
     }
 }

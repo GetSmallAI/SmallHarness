@@ -40,12 +40,15 @@ use crate::handoff::{
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
 use crate::input::plain_read_line;
 use crate::iterate_loop::{collect_diff_context, parse_iterate_args, run_iterate_loop};
+use crate::model_system::{EffortLevel, ModelRef, TaskComplexity};
 use crate::openai::{
     list_models, stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef, ToolDefFunction,
 };
 use crate::planner::{
-    default_spec_path, ensure_spec_sections, planner_system_prompt, render_fallback_spec,
-    render_planner_prompt,
+    default_routed_plan_path, default_spec_path, ensure_spec_sections, load_routed_plan,
+    parse_routed_plan, planner_system_prompt, render_fallback_spec, render_planner_prompt,
+    render_routed_planner_prompt, routed_planner_system_prompt, save_routed_plan, PlanTaskStatus,
+    RoutedPlan, RoutedPlanTask,
 };
 use crate::playground::{
     print_play_list, print_scorecard, restore_play_session, run_play_battle, run_play_fixture,
@@ -68,6 +71,7 @@ use crate::session::{
     set_session_title, SessionEntry,
 };
 use crate::session_paths::{apply_path_session_state, PathStore, DEFAULT_PATH_ID};
+use crate::session_turn::{run_user_turn, TurnOptions};
 use crate::shipcheck::{
     collect_shipcheck, collect_shipcheck_with_tests, default_export_path, file_status_label,
     render_markdown as render_shipcheck_markdown, ShipcheckSnapshot,
@@ -140,7 +144,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/plan",
-        "Expand a short intent into a product spec; /plan validate checks its Done Criteria against the diff",
+        "Expand a spec, create routed task graphs, execute routed plans, or validate Done Criteria",
     ),
     ("/session", "Show session info and token usage"),
     (
@@ -583,10 +587,32 @@ async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
 enum PlanInvocation {
     Show,
     Validate,
+    Status,
+    Route {
+        intent: String,
+        export_path: Option<PathBuf>,
+        planner: Option<PlannerChoice>,
+    },
+    Execute(PlanExecuteArgs),
     Draft {
         intent: String,
         export_path: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlannerChoice {
+    Configured,
+    Selector,
+    Tier(TaskComplexity),
+    Active,
+    Explicit(ModelRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanExecuteArgs {
+    yolo: bool,
+    max_tasks: Option<usize>,
 }
 
 /// Parse `/plan` arguments. Returns `None` to print usage.
@@ -594,6 +620,9 @@ enum PlanInvocation {
 ///   `/plan <intent> --export <path>` → draft to `<path>` instead
 ///   `/plan show`                     → print the saved spec
 ///   `/plan validate`                 → check the spec's Done Criteria vs the diff
+///   `/plan route <intent>`           → draft `.small-harness/plan.json`
+///   `/plan status`                   → show routed plan status
+///   `/plan execute`                  → execute ready routed-plan tasks
 fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
@@ -604,6 +633,24 @@ fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
     }
     if trimmed == "validate" {
         return Some(PlanInvocation::Validate);
+    }
+    if matches!(trimmed, "status" | "route status" | "routed status") {
+        return Some(PlanInvocation::Status);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("route ")
+        .or_else(|| trimmed.strip_prefix("routed "))
+    {
+        return parse_plan_route_args(rest.trim());
+    }
+    if matches!(trimmed, "route" | "routed") {
+        return None;
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("execute")
+        .or_else(|| trimmed.strip_prefix("run"))
+    {
+        return parse_plan_execute_args(rest.trim()).map(PlanInvocation::Execute);
     }
 
     let mut export_path: Option<PathBuf> = None;
@@ -632,15 +679,89 @@ fn parse_plan_args(args: &str) -> Option<PlanInvocation> {
     })
 }
 
-async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
+fn parse_plan_route_args(rest: &str) -> Option<PlanInvocation> {
+    if rest.is_empty() {
+        return None;
+    }
+    let mut export_path: Option<PathBuf> = None;
+    let mut planner: Option<PlannerChoice> = None;
+    let mut intent_parts: Vec<&str> = Vec::new();
+    let mut parts = rest.split_whitespace();
+    while let Some(part) = parts.next() {
+        if part == "--export" {
+            export_path = Some(PathBuf::from(parts.next()?));
+        } else if let Some(value) = part.strip_prefix("--export=") {
+            if value.is_empty() {
+                return None;
+            }
+            export_path = Some(PathBuf::from(value));
+        } else if part == "--planner" {
+            planner = Some(parse_planner_choice(parts.next()?)?);
+        } else if let Some(value) = part.strip_prefix("--planner=") {
+            if value.is_empty() {
+                return None;
+            }
+            planner = Some(parse_planner_choice(value)?);
+        } else if part.starts_with("--") {
+            return None;
+        } else {
+            intent_parts.push(part);
+        }
+    }
+    let intent = intent_parts.join(" ");
+    if intent.trim().is_empty() {
+        return None;
+    }
+    Some(PlanInvocation::Route {
+        intent,
+        export_path,
+        planner,
+    })
+}
+
+fn parse_planner_choice(value: &str) -> Option<PlannerChoice> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "configured" | "default" | "planner" => Some(PlannerChoice::Configured),
+        "selector" => Some(PlannerChoice::Selector),
+        "active" | "current" => Some(PlannerChoice::Active),
+        "low" | "medium" | "med" | "high" => {
+            TaskComplexity::parse(&normalized).map(PlannerChoice::Tier)
+        }
+        _ => ModelRef::parse_spec(value).map(PlannerChoice::Explicit),
+    }
+}
+
+fn parse_plan_execute_args(rest: &str) -> Option<PlanExecuteArgs> {
+    let mut yolo = false;
+    let mut max_tasks = None;
+    let mut parts = rest.split_whitespace();
+    while let Some(part) = parts.next() {
+        match part {
+            "--yolo" => yolo = true,
+            "--max" => {
+                max_tasks = Some(parts.next()?.parse().ok()?);
+            }
+            _ if part.starts_with("--max=") => {
+                max_tasks = Some(part.trim_start_matches("--max=").parse().ok()?);
+            }
+            "" => {}
+            _ => return None,
+        }
+    }
+    Some(PlanExecuteArgs { yolo, max_tasks })
+}
+
+async fn cmd_plan(args: &str, state: &mut AppState) -> Result<()> {
     let Some(invocation) = parse_plan_args(args) else {
         println!(
-            "  {DIM}Usage: /plan <intent>  ·  /plan <intent> --export <path>  ·  /plan show  ·  /plan validate{RESET}"
+            "  {DIM}Usage: /plan <intent> · /plan route [--planner high|selector|backend:model] <intent> · /plan status · /plan execute [--yolo] [--max N] · /plan show · /plan validate{RESET}"
         );
         return Ok(());
     };
 
     let default_path = default_spec_path(&state.config.workspace_root);
+    let routed_path = default_routed_plan_path(&state.config.workspace_root);
 
     let (intent, export_path) = match invocation {
         PlanInvocation::Show => {
@@ -657,6 +778,20 @@ async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
             return Ok(());
         }
         PlanInvocation::Validate => return cmd_plan_validate(state, &default_path).await,
+        PlanInvocation::Status => {
+            print_routed_plan_status(&routed_path)?;
+            return Ok(());
+        }
+        PlanInvocation::Route {
+            intent,
+            export_path,
+            planner,
+        } => {
+            return cmd_plan_route(state, &intent, export_path, planner, &routed_path).await;
+        }
+        PlanInvocation::Execute(args) => {
+            return cmd_plan_execute(state, &routed_path, args).await;
+        }
         PlanInvocation::Draft {
             intent,
             export_path,
@@ -720,6 +855,440 @@ async fn cmd_plan(args: &str, state: &AppState) -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn cmd_plan_route(
+    state: &AppState,
+    intent: &str,
+    export_path: Option<PathBuf>,
+    planner_choice: Option<PlannerChoice>,
+    default_path: &Path,
+) -> Result<()> {
+    let planner = match resolve_planner_model(state, planner_choice) {
+        Ok(planner) => planner,
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+            return Ok(());
+        }
+    };
+    let backend_desc = state.config.backend_descriptor_for(planner.backend);
+    if let Err(e) = validate(&backend_desc) {
+        println!("  {RED}✗{RESET} {DIM}planner backend is not ready: {e}{RESET}");
+        return Ok(());
+    }
+
+    println!(
+        "  {DIM}routing plan with{RESET} {}",
+        planner.detail_with_effort(planner.effort)
+    );
+    let messages = vec![
+        ChatMessage::System {
+            content: routed_planner_system_prompt(),
+        },
+        ChatMessage::User {
+            content: render_routed_planner_prompt(
+                intent,
+                &state.config.model_system,
+                Some(&planner),
+            )
+            .into(),
+        },
+    ];
+    let req = ChatRequest {
+        model: &planner.model,
+        messages: &messages,
+        tools: None,
+        stream: true,
+        stream_options: Some(StreamOptions {
+            include_usage: true,
+        }),
+        max_tokens: Some(2400),
+        effort: planner.effort,
+    };
+    let mut draft = String::new();
+    let mut reported_cost = None;
+    let result = stream_chat(&state.http, &backend_desc, &req, None, |chunk| {
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(content) = &choice.delta.content {
+                draft.push_str(content);
+            }
+        }
+        if let Some(usage) = &chunk.usage {
+            if let Some(cost) = usage.cost {
+                reported_cost = Some(cost);
+            }
+        }
+    })
+    .await;
+
+    if let Some(cost) = reported_cost {
+        println!(
+            "  {DIM}planner cost{RESET}     {}",
+            catalog::format_usd(cost)
+        );
+    }
+
+    let plan = match result {
+        Ok(_) if !draft.trim().is_empty() => parse_routed_plan(
+            &draft,
+            intent,
+            Some(planner.clone()),
+            &state.config.model_system,
+        ),
+        Ok(_) => Err(anyhow!("planner returned an empty routed plan")),
+        Err(e) => Err(anyhow!("planner request failed: {e}")),
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+            return Ok(());
+        }
+    };
+
+    print_routed_plan_summary(&plan);
+    let out_path = export_path.unwrap_or_else(|| default_path.to_path_buf());
+    save_routed_plan(&out_path, &plan)?;
+    println!(
+        "  {GREEN}✓{RESET} {DIM}routed plan saved →{RESET} {}",
+        out_path.display()
+    );
+    Ok(())
+}
+
+fn resolve_planner_model(state: &AppState, choice: Option<PlannerChoice>) -> Result<ModelRef> {
+    let stack = &state.config.model_system;
+    let active = || ModelRef {
+        backend: state.config.backend,
+        model: state.model.clone(),
+        effort: state.active_effort,
+        thinking_depth: None,
+        notes: Some("Current active model.".into()),
+    };
+    match choice.unwrap_or(PlannerChoice::Configured) {
+        PlannerChoice::Configured => Ok(stack
+            .planner
+            .clone()
+            .or_else(|| stack.selector.clone())
+            .or_else(|| stack.orchestrator(TaskComplexity::High).cloned())
+            .or_else(|| stack.orchestrator(TaskComplexity::Medium).cloned())
+            .or_else(|| stack.orchestrator(TaskComplexity::Low).cloned())
+            .unwrap_or_else(active)),
+        PlannerChoice::Selector => stack
+            .selector
+            .clone()
+            .ok_or_else(|| anyhow!("modelSystem.selector is not configured")),
+        PlannerChoice::Tier(complexity) => stack
+            .orchestrator(complexity)
+            .or_else(|| stack.coder(complexity))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "no planner/orchestrator/coder is configured for {}",
+                    complexity.as_str()
+                )
+            }),
+        PlannerChoice::Active => Ok(active()),
+        PlannerChoice::Explicit(model) => Ok(model),
+    }
+}
+
+fn print_routed_plan_status(path: &Path) -> Result<()> {
+    let plan = match load_routed_plan(path) {
+        Ok(plan) => plan,
+        Err(_) if !path.exists() => {
+            println!(
+                "  {DIM}No routed plan yet at {} — run /plan route <intent>.{RESET}",
+                path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+            return Ok(());
+        }
+    };
+    print_routed_plan_summary(&plan);
+    println!("  {DIM}plan path{RESET}        {}", path.display());
+    Ok(())
+}
+
+fn print_routed_plan_summary(plan: &RoutedPlan) {
+    let pending = plan
+        .tasks
+        .iter()
+        .filter(|task| task.status == PlanTaskStatus::Pending)
+        .count();
+    let running = plan
+        .tasks
+        .iter()
+        .filter(|task| task.status == PlanTaskStatus::Running)
+        .count();
+    let done = plan
+        .tasks
+        .iter()
+        .filter(|task| task.status == PlanTaskStatus::Done)
+        .count();
+    let failed = plan
+        .tasks
+        .iter()
+        .filter(|task| task.status == PlanTaskStatus::Failed)
+        .count();
+    println!("  {DIM}routed plan{RESET}      {}", plan.goal);
+    println!(
+        "  {DIM}tasks{RESET}            {} total · {} done · {} running · {} pending · {} failed",
+        plan.tasks.len(),
+        done,
+        running,
+        pending,
+        failed
+    );
+    for task in &plan.tasks {
+        println!(
+            "  {DIM}- {:<10}{RESET} {:<7} {:<7} {}{}",
+            task.id,
+            task.status.as_str(),
+            task.complexity.as_str(),
+            task.title,
+            format_task_model_suffix(task)
+        );
+    }
+}
+
+fn format_task_model_suffix(task: &RoutedPlanTask) -> String {
+    match &task.assigned_model {
+        Some(model) => {
+            let effort = task.effort.or(model.effort);
+            format!(" {DIM}→{RESET} {}", model.detail_with_effort(effort))
+        }
+        None => " {DIM}→ no configured coder{RESET}".into(),
+    }
+}
+
+async fn cmd_plan_execute(state: &mut AppState, path: &Path, args: PlanExecuteArgs) -> Result<()> {
+    let mut plan = match load_routed_plan(path) {
+        Ok(plan) => plan,
+        Err(_) if !path.exists() => {
+            println!(
+                "  {DIM}No routed plan yet at {} — run /plan route <intent>.{RESET}",
+                path.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            println!("  {RED}✗{RESET} {DIM}{e}{RESET}");
+            return Ok(());
+        }
+    };
+    let original = ActiveModelSnapshot::capture(state);
+    let mut ran = 0usize;
+    let mut stopped_on_error = false;
+
+    while args.max_tasks.map(|max| ran < max).unwrap_or(true) {
+        let Some(index) = next_ready_task_index(&plan) else {
+            break;
+        };
+        let task = plan.tasks[index].clone();
+        let Some(model) = task
+            .assigned_model
+            .clone()
+            .or_else(|| state.config.model_system.coder(task.complexity).cloned())
+        else {
+            plan.tasks[index].status = PlanTaskStatus::Failed;
+            plan.tasks[index].last_error = Some(format!(
+                "modelSystem.coders.{} is not configured",
+                task.complexity.as_str()
+            ));
+            save_routed_plan(path, &plan)?;
+            stopped_on_error = true;
+            break;
+        };
+
+        plan.tasks[index].status = PlanTaskStatus::Running;
+        plan.tasks[index].assigned_model = Some(model.clone());
+        plan.tasks[index].last_error = None;
+        save_routed_plan(path, &plan)?;
+
+        println!(
+            "  {DIM}plan task{RESET}        {} · {} · {}",
+            task.id,
+            task.complexity.as_str(),
+            model.detail_with_effort(task.effort.or(model.effort))
+        );
+        if let Err(e) = route::apply_model_ref(state, &model, task.effort) {
+            plan.tasks[index].status = PlanTaskStatus::Failed;
+            plan.tasks[index].last_error = Some(format!("could not apply routed model: {e}"));
+            save_routed_plan(path, &plan)?;
+            stopped_on_error = true;
+            break;
+        }
+
+        let prompt = render_routed_task_prompt(&plan, &task);
+        match run_user_turn(
+            state,
+            TurnOptions {
+                user_prompt: prompt,
+                auto_verify_tests: false,
+                yolo_approve: args.yolo,
+                source: "plan-execute",
+            },
+        )
+        .await
+        {
+            Ok(outcome) => {
+                plan.tasks[index].status = PlanTaskStatus::Done;
+                plan.tasks[index].result = last_assistant_text(&outcome.run_result.messages)
+                    .map(|s| truncate_summary(&s, 2000));
+                plan.tasks[index].last_error = None;
+                save_routed_plan(path, &plan)?;
+                ran += 1;
+            }
+            Err(e) => {
+                plan.tasks[index].status = PlanTaskStatus::Failed;
+                plan.tasks[index].last_error = Some(e.to_string());
+                save_routed_plan(path, &plan)?;
+                stopped_on_error = true;
+                break;
+            }
+        }
+    }
+
+    if let Err(e) = original.restore(state) {
+        println!("  {YELLOW}!{RESET} {DIM}could not restore original active model: {e}{RESET}");
+    }
+
+    if ran == 0 && !stopped_on_error {
+        if plan
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Done)
+        {
+            println!("  {GREEN}✓{RESET} {DIM}routed plan already complete{RESET}");
+        } else {
+            println!(
+                "  {DIM}No ready tasks. Check failed or unmet dependencies with /plan status.{RESET}"
+            );
+        }
+    } else if stopped_on_error {
+        println!(
+            "  {RED}✗{RESET} {DIM}routed execution stopped after {} completed task(s); inspect /plan status.{RESET}",
+            ran
+        );
+    } else {
+        println!(
+            "  {GREEN}✓{RESET} {DIM}routed execution ran {} task(s); status saved →{RESET} {}",
+            ran,
+            path.display()
+        );
+    }
+    print_routed_plan_summary(&plan);
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ActiveModelSnapshot {
+    backend: BackendName,
+    model_override: Option<String>,
+    backend_desc: BackendDescriptor,
+    model: String,
+    active_effort: Option<EffortLevel>,
+    warmed_fingerprint: Option<u64>,
+}
+
+impl ActiveModelSnapshot {
+    fn capture(state: &AppState) -> Self {
+        Self {
+            backend: state.config.backend,
+            model_override: state.config.model_override.clone(),
+            backend_desc: state.backend.clone(),
+            model: state.model.clone(),
+            active_effort: state.active_effort,
+            warmed_fingerprint: state.warmed_fingerprint,
+        }
+    }
+
+    fn restore(self, state: &mut AppState) -> Result<()> {
+        state.config.backend = self.backend;
+        state.config.model_override = self.model_override;
+        state.backend = self.backend_desc;
+        state.model = self.model;
+        state.active_effort = self.active_effort;
+        state.warmed_fingerprint = self.warmed_fingerprint;
+        state.rebuild_client()
+    }
+}
+
+fn next_ready_task_index(plan: &RoutedPlan) -> Option<usize> {
+    plan.tasks.iter().position(|task| {
+        matches!(
+            task.status,
+            PlanTaskStatus::Pending | PlanTaskStatus::Running
+        ) && task.depends_on.iter().all(|dep| {
+            plan.tasks
+                .iter()
+                .any(|candidate| candidate.id == *dep && candidate.status == PlanTaskStatus::Done)
+        })
+    })
+}
+
+fn render_routed_task_prompt(plan: &RoutedPlan, task: &RoutedPlanTask) -> String {
+    let mut out = String::new();
+    out.push_str("Execute one task from a Small Harness routed plan.\n\n");
+    out.push_str("Overall goal:\n");
+    out.push_str(&plan.goal);
+    out.push_str("\n\nTask:\n");
+    out.push_str(&format!("- id: {}\n", task.id));
+    out.push_str(&format!("- title: {}\n", task.title));
+    out.push_str(&format!("- role: {}\n", task.role));
+    out.push_str(&format!("- complexity: {}\n", task.complexity.as_str()));
+    if !task.depends_on.is_empty() {
+        out.push_str("- completed dependencies:\n");
+        for dep in &task.depends_on {
+            if let Some(prev) = plan.tasks.iter().find(|candidate| candidate.id == *dep) {
+                out.push_str(&format!("  - {}: {}\n", prev.id, prev.title));
+                if let Some(result) = prev.result.as_deref().filter(|s| !s.trim().is_empty()) {
+                    out.push_str("    result: ");
+                    out.push_str(&truncate_summary(result, 400));
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out.push_str("\nInstructions:\n");
+    out.push_str(&task.prompt);
+    out.push_str("\n\nAcceptance criteria:\n");
+    if task.acceptance.is_empty() {
+        out.push_str("- Complete the task without expanding into unrelated plan tasks.\n");
+    } else {
+        for item in &task.acceptance {
+            out.push_str("- ");
+            out.push_str(item);
+            out.push('\n');
+        }
+    }
+    out.push_str("\nWork only on this task. Do not perform later tasks unless they are strictly required to make this task coherent. When finished, summarize what changed and any verification you ran.");
+    out
+}
+
+fn last_assistant_text(messages: &[ChatMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        ChatMessage::Assistant {
+            content: Some(content),
+            ..
+        } if !content.trim().is_empty() => Some(content.trim().to_string()),
+        _ => None,
+    })
+}
+
+fn truncate_summary(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.trim().chars().take(max_chars) {
+        out.push(ch);
+    }
+    if text.trim().chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 /// `/plan validate`: read the saved spec's Done Criteria and check each one
@@ -1054,6 +1623,24 @@ mod tests {
             parse_plan_args("validate the csv export"),
             Some(PlanInvocation::Draft { .. })
         ));
+        assert!(matches!(
+            parse_plan_args("status"),
+            Some(PlanInvocation::Status)
+        ));
+        assert!(matches!(
+            parse_plan_args("route --planner high build oauth"),
+            Some(PlanInvocation::Route {
+                planner: Some(PlannerChoice::Tier(TaskComplexity::High)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_plan_args("execute --yolo --max 2"),
+            Some(PlanInvocation::Execute(PlanExecuteArgs {
+                yolo: true,
+                max_tasks: Some(2)
+            }))
+        ));
 
         let Some(PlanInvocation::Draft {
             intent,
@@ -1114,7 +1701,9 @@ mod tests {
             openrouter: crate::backends::OpenRouterConfig::default(),
         };
 
-        cmd_plan("add a CSV export command", &state).await.unwrap();
+        cmd_plan("add a CSV export command", &mut state)
+            .await
+            .unwrap();
 
         let body = fs::read_to_string(dir.path().join(".small-harness/spec.md")).unwrap();
         for section in [
@@ -1146,7 +1735,7 @@ mod tests {
 
         cmd_plan(
             &format!("build a dashboard --export {}", out_path.display()),
-            &state,
+            &mut state,
         )
         .await
         .unwrap();
@@ -1161,8 +1750,8 @@ mod tests {
     #[tokio::test]
     async fn plan_show_without_spec_is_noop() {
         let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
-        cmd_plan("show", &state).await.unwrap();
+        let mut state = test_state(dir.path());
+        cmd_plan("show", &mut state).await.unwrap();
         assert!(!dir.path().join(".small-harness/spec.md").exists());
     }
 }

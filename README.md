@@ -47,6 +47,10 @@ few that aren't usual:
 - **Multi-model routing.** `/route select <task>` asks a configured selector
   model to pick low/medium/high orchestrator and coder tiers, plus play vs
   production review and security review, then switches the active coding model.
+- **Routed plans.** `/plan route <goal>` asks a configured planner model to
+  break work into a low/medium/high task graph, saves it to
+  `.small-harness/plan.json`, and `/plan execute` runs ready tasks through the
+  configured coder tiers.
 - **Real undo.** `/undo` reverts the last agent turn's file mutations,
   including files the agent created or files that weren't tracked when the
   turn started.
@@ -320,6 +324,9 @@ this exact call`. The session cache resets on `/new`.
 ```
 /mode explore|edit|ship|review   switch operator preset
 /plan <intent>                   expand a short intent into a spec (.small-harness/spec.md)
+/plan route <intent>             create a low/medium/high routed execution plan
+/plan status                     show .small-harness/plan.json task status
+/plan execute [--yolo] [--max N] run ready routed-plan tasks
 /plan validate                   check the spec's Done Criteria against the working diff
 /shipcheck                       summarize git + test readiness
 /ship [--tests]                  preview last-mile ship readiness and commit message
@@ -511,6 +518,30 @@ global quality PR scorecard.
 `.small-harness/spec.md`. It deliberately stays at the level of *what* and
 *why*, not implementation, so an early spec doesn't lock in the wrong details.
 `/plan show` prints the saved spec; `--export <path>` writes elsewhere.
+
+`/plan route <intent>` is the complexity-aware execution-layer path. It uses
+`modelSystem.planner` when configured (falling back to selector, high/medium/low
+orchestrator, then the active model), asks for a JSON task graph, assigns each
+node to `modelSystem.coders.low|medium|high`, and writes
+`.small-harness/plan.json`. Use `--planner high`, `--planner selector`, or
+`--planner backend:model-id` to override the planner for one route:
+
+```text
+/plan route --planner high add OAuth login with refresh and tests
+/plan status
+/plan execute --max 2
+```
+
+`/plan execute` runs ready tasks sequentially, switching the active backend/model
+per task and saving status after each node. `--yolo` auto-approves tools for
+unattended local execution.
+
+To mix subscription and API usage, put subscription-backed models on tiers where
+Small Harness has a real login backend, such as `openai-codex` after
+`/login openai-codex`, and keep usage-billed automation on `openai`,
+`openrouter`, or local backends. For Claude/Fable subscriptions, track usage
+with `/fable`; direct unattended execution should stay on an API-compatible
+backend unless you add an explicit Claude CLI adapter.
 
 `/plan validate` closes the loop: it reads the spec's **Done Criteria** and
 checks each one against the current working-tree diff (the same done-check
@@ -844,6 +875,10 @@ active session effort, appears in `/session` and the turn footer, and is sent to
 OpenRouter as `reasoning.effort`; local backends ignore unsupported request
 fields while still showing the selected effort.
 
+For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
+or a planner override to create `.small-harness/plan.json`; `/plan execute`
+then runs each ready node with the configured low/medium/high coder model.
+
 ---
 
 ## Configuration
@@ -942,6 +977,12 @@ root. Common shape:
   },
   "modelSystem": {
     "enabled": true,
+    "planner": {
+      "backend": "openrouter",
+      "model": "anthropic/claude-opus-4.8",
+      "effort": "high",
+      "thinkingDepth": "deep"
+    },
     "selector": {
       "backend": "openrouter",
       "model": "openrouter/fusion",
