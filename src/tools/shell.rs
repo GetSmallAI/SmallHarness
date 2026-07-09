@@ -1,9 +1,7 @@
 use async_trait::async_trait;
-use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
@@ -24,12 +22,97 @@ struct Args {
     timeout: Option<u64>,
 }
 
-fn dangerous_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\brm\b|\bsudo\b|\bchmod\b|\bchown\b|\bdd\b|\bmkfs\b|>\s*/dev|--force\b|-rf?\b")
-            .expect("dangerous regex")
-    })
+/// Return true only for commands that are straightforward to classify as
+/// non-destructive. Shell syntax is deliberately treated as unsafe: trying to
+/// enumerate every dangerous command or interpreter escape leaves trivial
+/// bypasses such as `git reset --hard`, `sed -i`, or `python -c`.
+fn is_obviously_non_destructive(command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty()
+        || command.contains(['\n', '\r', ';', '|', '&', '>', '<', '`'])
+        || command.contains("$(")
+    {
+        return false;
+    }
+
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    let Some(program) = parts.first().copied() else {
+        return false;
+    };
+    // A path can point at an arbitrary executable that merely borrows an
+    // allowlisted filename. Require the normal command name and let custom
+    // executable paths go through approval.
+    if program.contains('/') || program.contains('\\') {
+        return false;
+    }
+    let args = &parts[1..];
+
+    match program {
+        "pwd" | "ls" | "tree" | "stat" | "wc" | "head" | "tail" | "cat" | "grep" | "fd" | "du"
+        | "df" | "file" | "which" | "whereis" | "uname" | "whoami" | "date" | "printenv"
+        | "realpath" | "readlink" | "jq" | "echo" | "printf" | "true" | "false" => true,
+        "rg" => !args
+            .iter()
+            .any(|arg| *arg == "--pre" || arg.starts_with("--pre=")),
+        "find" => !args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "-delete"
+                    | "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            )
+        }),
+        "git" => git_command_is_read_only(args),
+        "cargo" => cargo_command_is_non_destructive(args),
+        "rustc" => args == ["--version"] || args == ["-V"] || args == ["-vV"],
+        _ => false,
+    }
+}
+
+fn git_command_is_read_only(args: &[&str]) -> bool {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return false;
+    };
+    if rest.iter().any(|arg| {
+        matches!(*arg, "--output" | "--ext-diff" | "--textconv") || arg.starts_with("--output=")
+    }) {
+        return false;
+    }
+    match *subcommand {
+        "status" | "diff" | "log" | "show" | "rev-parse" | "ls-files" | "ls-tree" | "grep"
+        | "blame" | "describe" | "shortlog" | "reflog" | "name-rev" => true,
+        "branch" => rest.iter().all(|arg| {
+            matches!(
+                *arg,
+                "--list" | "--show-current" | "--contains" | "--no-contains"
+            )
+        }),
+        "tag" => rest.is_empty() || rest.iter().all(|arg| matches!(*arg, "--list" | "-l")),
+        "remote" => {
+            rest.is_empty()
+                || rest == ["-v"]
+                || matches!(rest.first(), Some(&"get-url") | Some(&"show"))
+        }
+        _ => false,
+    }
+}
+
+fn cargo_command_is_non_destructive(args: &[&str]) -> bool {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return false;
+    };
+    match *subcommand {
+        "test" | "check" | "clippy" | "metadata" | "tree" => true,
+        "fmt" => rest.contains(&"--check"),
+        "--version" | "-V" => rest.is_empty(),
+        _ => false,
+    }
 }
 
 #[async_trait]
@@ -56,7 +139,7 @@ impl Tool for ShellTool {
             ApprovalPolicy::Never => false,
             ApprovalPolicy::DangerousOnly => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                dangerous_re().is_match(cmd) || self.path_policy.require_prompt_for_cwd()
+                !is_obviously_non_destructive(cmd) || self.path_policy.require_prompt_for_cwd()
             }
         }
     }
@@ -193,27 +276,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dangerous_flags_destructive_commands() {
-        let re = dangerous_re();
-        assert!(re.is_match("rm -rf /"));
-        assert!(re.is_match("rm foo"));
-        assert!(re.is_match("sudo apt install something"));
-        assert!(re.is_match("chmod +x foo"));
-        assert!(re.is_match("chown user:group file"));
-        assert!(re.is_match("dd if=/dev/zero of=/dev/sda"));
-        assert!(re.is_match("mkfs.ext4 /dev/sda1"));
-        assert!(re.is_match("mv -rf src dest"));
-        assert!(re.is_match("cargo install --force foo"));
+    fn recognizes_common_non_destructive_commands() {
+        for command in [
+            "ls -la",
+            "cat Cargo.toml",
+            "rg TODO src",
+            "git status --short",
+            "git diff --check",
+            "git branch --show-current",
+            "cargo test",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo fmt --all -- --check",
+            "rustc --version",
+        ] {
+            assert!(
+                is_obviously_non_destructive(command),
+                "expected non-destructive command: {command}"
+            );
+        }
     }
 
     #[test]
-    fn dangerous_misses_safe_commands() {
-        let re = dangerous_re();
-        assert!(!re.is_match("ls -la"));
-        assert!(!re.is_match("echo hello world"));
-        assert!(!re.is_match("cat foo.txt"));
-        assert!(!re.is_match("git status"));
-        assert!(!re.is_match("cargo build --release"));
-        assert!(!re.is_match("npm run dev"));
+    fn uncertain_or_destructive_commands_require_approval() {
+        for command in [
+            "rm -rf target",
+            "git reset --hard HEAD~1",
+            "git clean -fd",
+            "git checkout -- src/main.rs",
+            "git restore Cargo.toml",
+            "mv src/main.rs /tmp/main.rs",
+            "sed -i '' 's/a/b/' file",
+            "echo changed > file",
+            "python -c 'open(\"file\", \"w\").write(\"x\")'",
+            "git status && rm file",
+            "git diff --output=review.patch",
+            "rg --pre ./transform pattern",
+            "./git status",
+            "cargo fmt",
+            "npm run build",
+        ] {
+            assert!(
+                !is_obviously_non_destructive(command),
+                "expected approval for command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangerous_only_uses_conservative_classifier() {
+        let tool = ShellTool {
+            policy: ApprovalPolicy::DangerousOnly,
+            path_policy: PathPolicy::default(),
+        };
+        assert!(!tool.require_approval(&json!({ "command": "git status --short" })));
+        assert!(tool.require_approval(&json!({ "command": "git reset --hard" })));
     }
 }

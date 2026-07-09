@@ -176,6 +176,9 @@ Good habits:
 - Ask for one focused change at a time.
 - Prefer exact files, functions, or tests when you know them.
 - Keep `approvalPolicy` at `dangerous-only` or `always` until you trust a model.
+  `dangerous-only` allows clearly non-destructive inspection and test commands
+  without a prompt, while uncertain shell syntax and mutating commands still
+  require approval.
 - Use `git diff` as the source of truth before committing.
 
 ## 3. Tune The Best Local Model
