@@ -13,13 +13,13 @@ use crate::backends::{backend, validate, BackendDescriptor, BackendName};
 use crate::config::OperatorMode;
 use crate::session_turn::{run_user_turn, TurnOptions};
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const BOLD: &str = "\x1b[1m";
-const CYAN: &str = "\x1b[36m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const BOLD: crate::theme::Style = crate::theme::BOLD;
+const CYAN: crate::theme::Style = crate::theme::ACCENT;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
 
 pub fn list_play_fixtures() -> Vec<&'static str> {
     vec![

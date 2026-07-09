@@ -6,20 +6,24 @@ use std::time::Instant;
 
 use crate::agent::AgentEvent;
 use crate::config::{DisplayConfig, ToolDisplay};
+use crate::markdown::{MarkdownInline, MdEvent};
 
-use crate::theme::{content_width, fade_header, ACCENT, PAD, TEXT};
+use crate::theme::{
+    content_width, fade_header, Style, ACCENT, BANG, BOLT, BRANCH, BRANCH_END, CHECK, DOT, FAIL,
+    HOOK_STOP, OK, PAD, PENDING, POINT, SUB, TEXT,
+};
 
 // Map the renderer's palette onto the shared theme. Notably `DIM` no longer
 // means ANSI faint (which was the unreadable culprit) — it's now the theme's
 // readable bright-black, same as `GRAY`.
-const RESET: &str = crate::theme::RESET;
-const BOLD: &str = crate::theme::BOLD;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const RED: &str = crate::theme::ERROR;
-const GRAY: &str = crate::theme::MUTED;
-const DIM: &str = crate::theme::MUTED;
-const MAGENTA: &str = "\x1b[95m";
+const RESET: Style = crate::theme::RESET;
+const BOLD: Style = crate::theme::BOLD;
+const GREEN: Style = crate::theme::SUCCESS;
+const YELLOW: Style = crate::theme::WARN;
+const RED: Style = crate::theme::ERROR;
+const GRAY: Style = crate::theme::MUTED;
+const DIM: Style = crate::theme::MUTED;
+const MAGENTA: Style = crate::theme::MAGENTA;
 
 fn trunc(s: &str, max: usize) -> String {
     if s.chars().count() > max {
@@ -94,7 +98,7 @@ fn label_noun(name: &str) -> &'static str {
     }
 }
 
-fn tool_color(name: &str) -> &'static str {
+fn tool_color(name: &str) -> Style {
     match name {
         "shell" => RED,
         "file_write" | "file_edit" => YELLOW,
@@ -158,6 +162,12 @@ fn summarize_output(output: &str) -> String {
 /// the panel. `feed` returns the exact text to write for a streamed chunk;
 /// `finish` flushes the trailing buffered word. State persists across chunks,
 /// so it wraps correctly even when words arrive split across deltas.
+///
+/// ANSI-blind: escape sequences (`ESC [ … m`) travel with the word they
+/// belong to but count as zero visible width, so injected color/bold codes
+/// never skew the wrap column. In verbatim mode (used for fenced code blocks)
+/// text passes through untouched except that hard newlines re-emit the gutter
+/// — long code lines wrap at the terminal edge, preserving copy-paste fidelity.
 struct StreamWrap {
     inner: usize,
     gutter: String,
@@ -166,6 +176,8 @@ struct StreamWrap {
     word: String,
     at_line_start: bool,
     need_space: bool,
+    in_escape: bool,
+    verbatim: bool,
 }
 
 impl StreamWrap {
@@ -178,7 +190,24 @@ impl StreamWrap {
             word: String::new(),
             at_line_start: true,
             need_space: false,
+            in_escape: false,
+            verbatim: false,
         }
+    }
+
+    /// Toggle verbatim (no-wrap) mode. Flushes any pending word first and
+    /// resets line state, returning the flushed remainder so nothing is lost.
+    /// Used by the streamed-markdown code-fence handler.
+    fn set_verbatim(&mut self, on: bool) -> String {
+        let mut out = String::new();
+        self.flush_word(&mut out);
+        self.verbatim = on;
+        self.col = 0;
+        self.indent = 0;
+        self.at_line_start = true;
+        self.need_space = false;
+        self.in_escape = false;
+        out
     }
 
     fn line_break(&mut self, out: &mut String, hard: bool) {
@@ -197,15 +226,29 @@ impl StreamWrap {
             return;
         }
         let word = std::mem::take(&mut self.word);
-        let wlen = word.chars().count();
+        let wlen = crate::theme::visible_len(&word);
 
         // A single token longer than the line (e.g. a URL): hard-break it.
+        // Escape sequences are emitted verbatim and never counted or split.
         if wlen > self.inner {
             if self.need_space && self.col > self.indent && self.col < self.inner {
                 out.push(' ');
                 self.col += 1;
             }
+            let mut in_esc = false;
             for ch in word.chars() {
+                if in_esc {
+                    out.push(ch);
+                    if ch == 'm' {
+                        in_esc = false;
+                    }
+                    continue;
+                }
+                if ch == '\x1b' {
+                    in_esc = true;
+                    out.push(ch);
+                    continue;
+                }
                 if self.col >= self.inner {
                     self.line_break(out, false);
                     for _ in 0..self.indent {
@@ -238,8 +281,34 @@ impl StreamWrap {
 
     fn feed(&mut self, s: &str) -> String {
         let mut out = String::new();
+        if self.verbatim {
+            // No wrapping, no word buffering: emit as-is, but re-indent each
+            // physical line with the gutter so code stays under the panel.
+            for ch in s.chars() {
+                out.push(ch);
+                if ch == '\n' {
+                    out.push_str(&self.gutter);
+                }
+            }
+            return out;
+        }
         for ch in s.chars() {
+            // An in-flight escape sequence: buffer every char with the current
+            // word (zero visible width) until the terminating `m`.
+            if self.in_escape {
+                self.word.push(ch);
+                if ch == 'm' {
+                    self.in_escape = false;
+                }
+                continue;
+            }
             match ch {
+                '\x1b' => {
+                    // Start of a zero-width escape. Buffer it with the word but
+                    // don't let it flip `at_line_start` or count as content.
+                    self.in_escape = true;
+                    self.word.push(ch);
+                }
                 '\n' => {
                     self.flush_word(&mut out);
                     self.line_break(&mut out, true);
@@ -295,9 +364,39 @@ pub struct TuiRenderer {
     /// and streaming. Holds the word-wrap state so content stays inside the
     /// panel. Closed when a tool call/reasoning interrupts or the turn ends.
     answer_wrap: Option<StreamWrap>,
+    /// Inline-markdown state for the open answer panel, paired with
+    /// `answer_wrap`. Styles bold/italic/code/headings/bullets and frames
+    /// fenced code blocks as the answer streams.
+    answer_md: Option<MarkdownInline>,
     /// The configured tool display, remembered so `/verbose off` can restore it.
     base_tool_display: ToolDisplay,
     trace_enabled: bool,
+}
+
+/// Route one markdown event to the answer wrapper: styled text flows through
+/// the wrapper; fence signals flip verbatim mode and print framing rules. Kept
+/// free-standing so it can borrow the wrapper without the whole renderer.
+fn write_md_event(out: &mut impl Write, wrap: &mut StreamWrap, ev: MdEvent) {
+    match ev {
+        MdEvent::Text(s) => {
+            let chunk = wrap.feed(&s);
+            let _ = write!(out, "{chunk}");
+        }
+        MdEvent::CodeStart { lang } => {
+            // A newline+gutter always precedes a fence, so the rule (which has
+            // no leading PAD) lands correctly under the answer gutter.
+            let flushed = wrap.set_verbatim(true);
+            let _ = write!(out, "{flushed}");
+            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(&lang));
+            let _ = write!(out, "{PAD}");
+        }
+        MdEvent::CodeEnd => {
+            let flushed = wrap.set_verbatim(false);
+            let _ = write!(out, "{flushed}");
+            let _ = writeln!(out, "{}", crate::theme::code_fence_rule(""));
+            let _ = write!(out, "{PAD}{TEXT}");
+        }
+    }
 }
 
 impl TuiRenderer {
@@ -312,6 +411,7 @@ impl TuiRenderer {
             minimal_batch: BTreeMap::new(),
             reasoning_header_shown: false,
             answer_wrap: None,
+            answer_md: None,
             base_tool_display,
             trace_enabled: false,
         }
@@ -415,6 +515,13 @@ impl TuiRenderer {
             return;
         };
         let mut out = std::io::stdout();
+        // Drain any buffered markdown (unclosed markers → literal, an open
+        // fence → CodeEnd) before flushing the wrapper's trailing word.
+        if let Some(mut md) = self.answer_md.take() {
+            for ev in md.finish() {
+                write_md_event(&mut out, &mut wrap, ev);
+            }
+        }
         let tail = wrap.finish();
         let _ = write!(out, "{tail}");
         let _ = writeln!(out, "{RESET}");
@@ -459,10 +566,12 @@ impl TuiRenderer {
             // Wrap to the real content width so the answer fills the terminal
             // (like naturally-wrapped text) instead of overflowing.
             self.answer_wrap = Some(StreamWrap::new(content_width(), PAD));
+            self.answer_md = Some(MarkdownInline::new());
         }
-        if let Some(wrap) = self.answer_wrap.as_mut() {
-            let chunk = wrap.feed(delta);
-            let _ = write!(out, "{chunk}");
+        if let (Some(md), Some(wrap)) = (self.answer_md.as_mut(), self.answer_wrap.as_mut()) {
+            for ev in md.feed(delta) {
+                write_md_event(&mut out, wrap, ev);
+            }
         }
         let _ = out.flush();
     }
@@ -504,7 +613,7 @@ impl TuiRenderer {
             let arg_str = formatter_for(name, &args);
             let indent = "  ".repeat(depth as usize);
             println!(
-                "{PAD}{indent}{DIM}↳ {name}{RESET} {GRAY}{}{RESET}",
+                "{PAD}{indent}{DIM}{SUB} {name}{RESET} {GRAY}{}{RESET}",
                 if arg_str.is_empty() {
                     String::new()
                 } else {
@@ -519,7 +628,7 @@ impl TuiRenderer {
                 let color = tool_color(name);
                 let arg_str = formatter_for(name, &args);
                 let sep = if arg_str.is_empty() { "" } else { " " };
-                println!("  {color}⚡{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
+                println!("  {color}{BOLT}{RESET} {DIM}{name}{sep}{arg_str}{RESET}");
             }
             ToolDisplay::Grouped => {
                 let category = label_past(name).to_string();
@@ -573,21 +682,31 @@ impl TuiRenderer {
             .iter()
             .filter(|s| s.get("status").and_then(Value::as_str) == Some("done"))
             .count();
+        // Leading blank: the plan block owns its own gap (no trailing blank).
+        println!();
         println!(
-            "{PAD}{ACCENT}●{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
+            "{PAD}{ACCENT}{DOT}{RESET} {BOLD}Plan{RESET}  {GRAY}{done}/{} done{RESET}",
             steps.len()
         );
         for s in steps {
             let text = s.get("step").and_then(Value::as_str).unwrap_or("");
             let status = s.get("status").and_then(Value::as_str).unwrap_or("pending");
             let (mark, body) = match status {
-                "done" => (format!("{GREEN}✔{RESET}"), format!("{GRAY}{text}{RESET}")),
-                "in_progress" => (format!("{YELLOW}▸{RESET}"), format!("{BOLD}{text}{RESET}")),
-                _ => (format!("{GRAY}○{RESET}"), format!("{GRAY}{text}{RESET}")),
+                "done" => (
+                    format!("{GREEN}{CHECK}{RESET}"),
+                    format!("{GRAY}{text}{RESET}"),
+                ),
+                "in_progress" => (
+                    format!("{YELLOW}{POINT}{RESET}"),
+                    format!("{BOLD}{text}{RESET}"),
+                ),
+                _ => (
+                    format!("{GRAY}{PENDING}{RESET}"),
+                    format!("{GRAY}{text}{RESET}"),
+                ),
             };
             println!("{PAD}  {mark} {body}");
         }
-        println!();
     }
 
     fn render_tool_result(&mut self, name: &str, call_id: &str, output: &str, depth: u32) {
@@ -613,7 +732,7 @@ impl TuiRenderer {
             let indent = "  ".repeat(depth as usize);
             let summary = summarize_output(output);
             println!(
-                "{PAD}{indent}{DIM}↳ {name} {dur}{RESET} {GRAY}{}{RESET}",
+                "{PAD}{indent}{DIM}{SUB} {name} {dur}{RESET} {GRAY}{}{RESET}",
                 if summary.is_empty() {
                     String::new()
                 } else {
@@ -625,7 +744,7 @@ impl TuiRenderer {
 
         match self.display.tool_display {
             ToolDisplay::Emoji => {
-                println!("  {GREEN}✓{RESET} {DIM}{name} {dur}{RESET}");
+                println!("  {GREEN}{OK}{RESET} {DIM}{name} {dur}{RESET}");
             }
             ToolDisplay::Grouped => {
                 if let Some(p) = self
@@ -655,18 +774,18 @@ impl TuiRenderer {
         } else {
             String::new()
         };
-        println!("{PAD}{indent}{DIM}↳ {name} output compacted: {summary}{RESET}");
+        println!("{PAD}{indent}{DIM}{SUB} {name} output compacted: {summary}{RESET}");
     }
 
     fn render_hook_notice(&mut self, notice: &crate::hooks::HookNotice) {
         use crate::hooks::HookNoticeLevel;
 
         let (mark, label, color) = match notice.level {
-            HookNoticeLevel::Warning => ("!", "hook warning", YELLOW),
-            HookNoticeLevel::Blocked => ("✗", "hook blocked", RED),
-            HookNoticeLevel::Denied => ("✗", "hook denied", RED),
-            HookNoticeLevel::Stopped => ("■", "hook stopped", YELLOW),
-            HookNoticeLevel::Feedback => ("↳", "hook", DIM),
+            HookNoticeLevel::Warning => (BANG, "hook warning", YELLOW),
+            HookNoticeLevel::Blocked => (FAIL, "hook blocked", RED),
+            HookNoticeLevel::Denied => (FAIL, "hook denied", RED),
+            HookNoticeLevel::Stopped => (HOOK_STOP, "hook stopped", YELLOW),
+            HookNoticeLevel::Feedback => (SUB, "hook", DIM),
         };
         println!(
             "{PAD}{color}{mark}{RESET} {DIM}{label} {}:{RESET} {}",
@@ -679,25 +798,29 @@ impl TuiRenderer {
         if self.grouped_pending.is_empty() {
             return;
         }
+        // A block owns exactly one leading blank line and no trailing blank, so
+        // it separates cleanly from whatever came before without stacking a
+        // second blank against the next block's own leading gap.
+        println!();
         let pending = std::mem::take(&mut self.grouped_pending);
         let first = &pending[0];
         let label = label_past(&first.name);
 
         if pending.len() == 1 {
             let arg_str = formatter_for(&first.name, &first.args);
-            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
+            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}  {TEXT}{arg_str}{RESET}");
             if let Some(out) = &first.output {
                 let summary = summarize_output(out);
                 if !summary.is_empty() {
-                    println!("{PAD}  {GRAY}└ {summary}{RESET}");
+                    println!("{PAD}  {GRAY}{BRANCH_END} {summary}{RESET}");
                 }
             }
         } else {
-            println!("{PAD}{ACCENT}●{RESET} {BOLD}{label}{RESET}");
+            println!("{PAD}{ACCENT}{DOT}{RESET} {BOLD}{label}{RESET}");
             let n = pending.len();
             for (i, p) in pending.iter().enumerate() {
                 let is_last = i == n - 1;
-                let branch = if is_last { "└" } else { "├" };
+                let branch = if is_last { BRANCH_END } else { BRANCH };
                 let arg_str = formatter_for(&p.name, &p.args);
                 let summary = p
                     .output
@@ -707,7 +830,6 @@ impl TuiRenderer {
                 println!("{PAD}  {GRAY}{branch}{RESET} {TEXT}{arg_str}{RESET}{summary}");
             }
         }
-        println!();
         self.grouped_category.clear();
     }
 
@@ -810,6 +932,115 @@ mod tests {
         out.push_str(&w.feed("ta gamma delta"));
         out.push_str(&w.finish());
         assert_eq!(out, "alpha beta\ngamma delta");
+    }
+
+    #[test]
+    fn ansi_codes_do_not_count_toward_width() {
+        // A bold-wrapped word plus enough plain words to force a wrap; the
+        // escapes must not push any visible line past `inner`.
+        let text = "\x1b[1mbold\x1b[0m word wraps around here";
+        let lines = wrapped_lines(text, 10);
+        for line in &lines {
+            assert!(
+                crate::theme::visible_len(line) <= 10,
+                "visible width of {:?} exceeds 10",
+                line
+            );
+        }
+        // The escape codes survived intact in the output.
+        let joined = lines.join("\n");
+        assert!(joined.contains("\x1b[1m"));
+        assert!(joined.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn escape_split_across_feeds_stays_zero_width() {
+        // The escape's `\x1b[` and `1mword` arrive in separate chunks.
+        let mut w = StreamWrap::new(11, "");
+        let mut out = String::new();
+        out.push_str(&w.feed("\x1b["));
+        out.push_str(&w.feed("1mword\x1b[0m plus more"));
+        out.push_str(&w.finish());
+        for line in out.split('\n') {
+            assert!(crate::theme::visible_len(line) <= 11, "line {:?}", line);
+        }
+        assert!(out.contains("\x1b[1mword"));
+    }
+
+    #[test]
+    fn overlong_token_with_ansi_never_splits_an_escape() {
+        // A styled token longer than the line must hard-break, but never in
+        // the middle of the `\x1b[…m` sequence.
+        let mut w = StreamWrap::new(8, "");
+        let mut out = String::new();
+        out.push_str(&w.feed("\x1b[92maaaaaaaaaaaaaaaa\x1b[0m"));
+        out.push_str(&w.finish());
+        // Walk each physical line: once we see ESC we must reach its `m`
+        // before the line ends, i.e. no escape is left dangling by a break.
+        for line in out.split('\n') {
+            let mut in_esc = false;
+            for ch in line.chars() {
+                if in_esc {
+                    if ch == 'm' {
+                        in_esc = false;
+                    }
+                } else if ch == '\x1b' {
+                    in_esc = true;
+                }
+            }
+            assert!(!in_esc, "escape split across a line break: {:?}", line);
+        }
+        assert!(out.contains("\x1b[92m"));
+        assert!(out.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn markdown_then_wrap_respects_width_with_styling() {
+        // Styled markdown streamed through MarkdownInline into StreamWrap must
+        // never produce a visible line wider than `inner`, despite the ANSI
+        // codes injected for bold/italic/code.
+        use crate::markdown::{MarkdownInline, MdEvent};
+        crate::theme::init(crate::config::ColorMode::Always, false);
+        let input =
+            "Here is **bold text** and `inline code` plus _emphasis_ that must wrap cleanly around.";
+        let mut md = MarkdownInline::new();
+        let mut wrap = StreamWrap::new(20, "");
+        let mut out = String::new();
+        for ch in input.chars() {
+            for ev in md.feed(&ch.to_string()) {
+                if let MdEvent::Text(s) = ev {
+                    out.push_str(&wrap.feed(&s));
+                }
+            }
+        }
+        for ev in md.finish() {
+            if let MdEvent::Text(s) = ev {
+                out.push_str(&wrap.feed(&s));
+            }
+        }
+        out.push_str(&wrap.finish());
+        for line in out.split('\n') {
+            assert!(
+                crate::theme::visible_len(line) <= 20,
+                "styled line {:?} exceeds width 20 (visible {})",
+                line,
+                crate::theme::visible_len(line)
+            );
+        }
+        // Styling actually happened.
+        assert!(out.contains("\x1b[1m"));
+    }
+
+    #[test]
+    fn verbatim_mode_passes_through_with_gutter() {
+        let mut w = StreamWrap::new(10, ">>");
+        let mut out = String::new();
+        let _ = w.set_verbatim(true);
+        // A code line far longer than `inner` is NOT wrapped; newlines re-emit
+        // the gutter.
+        out.push_str(&w.feed("let x = a_very_long_identifier_here;\nnext"));
+        out.push_str(&w.finish());
+        assert_eq!(out, "let x = a_very_long_identifier_here;\n>>next");
     }
 }
 

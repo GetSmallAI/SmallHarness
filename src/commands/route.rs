@@ -169,6 +169,7 @@ fn print_route_status(stack: &ModelSystemConfig) {
         );
         return;
     }
+    print_model_ref("planner", stack.planner.as_ref());
     print_model_ref("selector", stack.selector.as_ref());
     print_tier_set("orchestrator", &stack.orchestrators);
     print_tier_set("coder", &stack.coders);
@@ -200,6 +201,13 @@ fn print_route_template() {
 {{
   "modelSystem": {{
     "enabled": true,
+    "planner": {{
+      "backend": "openrouter",
+      "model": "anthropic/claude-opus-4.8",
+      "effort": "high",
+      "thinkingDepth": "deep",
+      "notes": "Breaks a goal into a routed execution plan."
+    }},
     "selector": {{
       "backend": "openrouter",
       "model": "openrouter/fusion",
@@ -438,6 +446,7 @@ fn render_selector_prompt(stack: &ModelSystemConfig, task: &str) -> String {
     out.push_str("Route this task using only the configured model system.\n\nTask:\n");
     out.push_str(task.trim());
     out.push_str("\n\nConfigured routes:\n");
+    append_model_line(&mut out, "planner", stack.planner.as_ref());
     append_model_line(&mut out, "selector", stack.selector.as_ref());
     append_model_line(
         &mut out,
@@ -620,7 +629,7 @@ fn format_active_effort_suffix(effort: Option<EffortLevel>) -> String {
         .unwrap_or_default()
 }
 
-fn apply_model_ref(
+pub(super) fn apply_model_ref(
     state: &mut AppState,
     model: &ModelRef,
     effort_override: Option<EffortLevel>,

@@ -140,6 +140,14 @@ impl OperatorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OutsideWorkspace {
     Prompt,
     Deny,
@@ -180,6 +188,10 @@ pub struct DisplayConfig {
     pub show_banner: bool,
     #[serde(rename = "eventLog", default)]
     pub event_log: crate::turn_trace::EventLogConfig,
+    #[serde(default = "default_color_mode")]
+    pub color: ColorMode,
+    #[serde(default)]
+    pub ascii: bool,
 }
 
 fn default_true() -> bool {
@@ -197,6 +209,9 @@ fn default_loader_text() -> String {
 fn default_loader_style() -> LoaderStyle {
     LoaderStyle::Spinner
 }
+fn default_color_mode() -> ColorMode {
+    ColorMode::Auto
+}
 
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -208,6 +223,8 @@ impl Default for DisplayConfig {
             reasoning: false,
             show_banner: true,
             event_log: crate::turn_trace::EventLogConfig::default(),
+            color: default_color_mode(),
+            ascii: false,
         }
     }
 }
@@ -237,6 +254,55 @@ impl Default for ScorecardConfig {
             enabled: true,
             quality_threshold: default_quality_threshold(),
             nudge_min_turns: default_nudge_min_turns(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FableUsageConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "weeklyTokenBudget", default)]
+    pub weekly_token_budget: Option<u64>,
+    #[serde(rename = "capShare", default = "default_fable_cap_share")]
+    pub cap_share: f64,
+    #[serde(rename = "weekStartsOn", default = "default_fable_week_starts_on")]
+    pub week_starts_on: String,
+    #[serde(rename = "fableModelMatches", default = "default_fable_model_matches")]
+    pub fable_model_matches: Vec<String>,
+    #[serde(
+        rename = "claudeModelMatches",
+        default = "default_claude_model_matches"
+    )]
+    pub claude_model_matches: Vec<String>,
+}
+
+fn default_fable_cap_share() -> f64 {
+    0.5
+}
+
+fn default_fable_week_starts_on() -> String {
+    "monday".into()
+}
+
+fn default_fable_model_matches() -> Vec<String> {
+    vec!["fable".into()]
+}
+
+fn default_claude_model_matches() -> Vec<String> {
+    vec!["anthropic/".into(), "claude".into(), "fable".into()]
+}
+
+impl Default for FableUsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            weekly_token_budget: None,
+            cap_share: default_fable_cap_share(),
+            week_starts_on: default_fable_week_starts_on(),
+            fable_model_matches: default_fable_model_matches(),
+            claude_model_matches: default_claude_model_matches(),
         }
     }
 }
@@ -578,6 +644,7 @@ pub struct AgentConfig {
     pub tool_selection: ToolSelection,
     pub display: DisplayConfig,
     pub scorecard: ScorecardConfig,
+    pub fable: FableUsageConfig,
     pub slash_commands: bool,
     pub context: ContextConfig,
     pub history: HistoryConfig,
@@ -659,6 +726,7 @@ impl Default for AgentConfig {
             tool_selection: ToolSelection::Auto,
             display: DisplayConfig::default(),
             scorecard: ScorecardConfig::default(),
+            fable: FableUsageConfig::default(),
             slash_commands: true,
             context: ContextConfig::default(),
             history: HistoryConfig::default(),
@@ -700,6 +768,7 @@ struct FileConfig {
     tool_selection: Option<String>,
     display: Option<DisplayConfig>,
     scorecard: Option<ScorecardConfig>,
+    fable: Option<FableUsageConfig>,
     #[serde(rename = "slashCommands")]
     slash_commands: Option<bool>,
     context: Option<ContextConfig>,
@@ -1092,6 +1161,9 @@ pub fn load_config() -> AgentConfig {
                     if let Some(s) = file.scorecard {
                         config.scorecard = s;
                     }
+                    if let Some(f) = file.fable {
+                        config.fable = f;
+                    }
                     if let Some(sc) = file.slash_commands {
                         config.slash_commands = sc;
                     }
@@ -1337,6 +1409,37 @@ mod tests {
         assert_eq!(
             stack.security_reviewer.as_ref().map(|m| m.model.as_str()),
             Some("openrouter/fusion")
+        );
+    }
+
+    #[test]
+    fn parses_fable_usage_config() {
+        let file: FileConfig = serde_json::from_str(
+            r#"{
+              "fable": {
+                "enabled": true,
+                "weeklyTokenBudget": 200000,
+                "capShare": 0.5,
+                "weekStartsOn": "sunday",
+                "fableModelMatches": ["claude-fable", "fable"],
+                "claudeModelMatches": ["anthropic/", "claude"]
+              }
+            }"#,
+        )
+        .unwrap();
+        let fable = file.fable.unwrap();
+
+        assert!(fable.enabled);
+        assert_eq!(fable.weekly_token_budget, Some(200_000));
+        assert_eq!(fable.cap_share, 0.5);
+        assert_eq!(fable.week_starts_on, "sunday");
+        assert_eq!(
+            fable.fable_model_matches,
+            vec!["claude-fable".to_string(), "fable".to_string()]
+        );
+        assert_eq!(
+            fable.claude_model_matches,
+            vec!["anthropic/".to_string(), "claude".to_string()]
         );
     }
 

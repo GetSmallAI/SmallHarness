@@ -11,13 +11,13 @@ use crate::openai::{build_http_client, chat_oneshot, list_models, ChatMessage, C
 
 // Routed through the shared theme so the wizard matches the rest of the TUI
 // and secondary text is readable bright-black instead of ANSI faint.
-const RESET: &str = crate::theme::RESET;
-const DIM: &str = crate::theme::MUTED;
-const BOLD: &str = crate::theme::BOLD;
-const CYAN: &str = crate::theme::ACCENT;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const RED: &str = crate::theme::ERROR;
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const BOLD: crate::theme::Style = crate::theme::BOLD;
+const CYAN: crate::theme::Style = crate::theme::ACCENT;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const RED: crate::theme::Style = crate::theme::ERROR;
 
 const CONFIG_PATH: &str = "agent.config.json";
 const NO_WIZARD_ENV: &str = "SMALL_HARNESS_NO_WIZARD";

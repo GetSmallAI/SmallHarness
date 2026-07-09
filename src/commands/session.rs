@@ -153,12 +153,7 @@ pub(super) async fn cmd_path(args: &str, state: &mut AppState) -> Result<()> {
             if diff.is_empty() {
                 println!("  {DIM}No file differences vs path `{rest}`.{RESET}");
             } else {
-                for line in diff.lines().take(120) {
-                    println!("  {DIM}{line}{RESET}");
-                }
-                if diff.lines().count() > 120 {
-                    println!("  {DIM}…diff truncated for display{RESET}");
-                }
+                crate::diff_view::print_diff(&diff, 120);
             }
         }
         "pick" => {
@@ -191,12 +186,7 @@ pub(super) async fn cmd_path(args: &str, state: &mut AppState) -> Result<()> {
             let diff = state.path_store.diff_with(name, &state.workspace_root())?;
             if !diff.is_empty() {
                 println!();
-                for line in diff.lines().take(80) {
-                    println!("  {DIM}{line}{RESET}");
-                }
-                if diff.lines().count() > 80 {
-                    println!("  {DIM}…diff truncated for display{RESET}");
-                }
+                crate::diff_view::print_diff(&diff, 80);
                 println!();
             }
             println!(

@@ -7,12 +7,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RESET: &str = crate::theme::RESET;
-const DIM: &str = crate::theme::MUTED;
-const GREEN: &str = crate::theme::SUCCESS;
-const YELLOW: &str = crate::theme::WARN;
-const CYAN: &str = "\x1b[36m";
-const BRIGHT_GREEN: &str = "\x1b[92m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const CYAN: crate::theme::Style = crate::theme::ACCENT_DEEP;
+const BRIGHT_GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const STORE_DIR_ENV: &str = "SMALL_HARNESS_SCORECARD_DIR";
 #[cfg(test)]
 const DEFAULT_QUALITY_PR_THRESHOLD: u8 = 80;
@@ -256,6 +256,13 @@ struct ScorecardRead {
     diagnostics: ScorecardStoreDiagnostics,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScorecardTurnRead {
+    pub path: Option<PathBuf>,
+    pub turns: Vec<ScorecardTurn>,
+    pub diagnostics: Option<ScorecardStoreDiagnostics>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScorecardResetSummary {
     pub path: PathBuf,
@@ -366,6 +373,29 @@ pub fn load_report(workspace_root: &str) -> Result<ScorecardReport> {
         Utc::now().date_naive(),
         diagnostics,
     ))
+}
+
+pub fn load_turn_records() -> Result<ScorecardTurnRead> {
+    let path = scorecard_path();
+    let (events, diagnostics) = match &path {
+        Some(path) => {
+            let read = read_events_with_diagnostics(path)?;
+            (read.events, Some(read.diagnostics))
+        }
+        None => (Vec::new(), None),
+    };
+    let turns = events
+        .into_iter()
+        .filter_map(|event| match event {
+            ScorecardEvent::Turn(turn) => Some(turn),
+            _ => None,
+        })
+        .collect();
+    Ok(ScorecardTurnRead {
+        path,
+        turns,
+        diagnostics,
+    })
 }
 
 pub fn recent_prs(limit: usize) -> Result<Vec<ScorecardPr>> {
@@ -1553,7 +1583,7 @@ pub fn format_scorecard_suffix(
         return Ok(String::new());
     }
     Ok(format!(
-        " · {} turn(s) tracked · /ship pr closes scorecard",
+        "{} turn(s) tracked · /ship pr closes scorecard",
         summary.turn_count
     ))
 }

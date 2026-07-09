@@ -113,7 +113,7 @@ impl TurnMetrics {
         if self.total_ms > 0 {
             parts.push(format!("total {:.1}s", self.total_ms as f64 / 1000.0));
         }
-        format!(" · {}", parts.join(" · "))
+        parts.join(" · ")
     }
 }
 

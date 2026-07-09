@@ -6,12 +6,14 @@ use crate::agent::ApprovalProvider;
 use crate::input::plain_read_line;
 use crate::tools::ToolPreview;
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
+use crate::theme::{FAIL, OK, WARN_MARK};
+
+const RESET: crate::theme::Style = crate::theme::RESET;
+const BOLD: crate::theme::Style = crate::theme::BOLD;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 
 pub struct ApprovalCache {
     pub always_allow: HashSet<String>,
@@ -73,7 +75,7 @@ impl ApprovalProvider for ApprovalCache {
             .unwrap_or_else(|| summarize(name, args));
         println!();
         println!(
-            "  {YELLOW}▲{RESET} {BOLD}Approval required{RESET} {DIM}for{RESET} {BOLD}{name}{RESET}"
+            "  {YELLOW}{WARN_MARK}{RESET} {BOLD}Approval required{RESET} {DIM}for{RESET} {BOLD}{name}{RESET}"
         );
         println!("    {DIM}{summary}{RESET}");
         if let Some(preview) = preview {
@@ -82,12 +84,7 @@ impl ApprovalProvider for ApprovalCache {
             }
             if let Some(diff) = &preview.diff {
                 println!();
-                for line in diff.lines().take(80) {
-                    println!("    {DIM}{line}{RESET}");
-                }
-                if diff.lines().count() > 80 {
-                    println!("    {DIM}…diff truncated for display{RESET}");
-                }
+                crate::diff_view::print_diff(diff, 80);
                 println!();
             }
         }
@@ -102,7 +99,7 @@ impl ApprovalProvider for ApprovalCache {
 
         if answer == "a" || answer == "always" {
             self.always_allow.insert(name.to_string());
-            println!("  {GREEN}✓{RESET} {DIM}allowing all {name} calls this session{RESET}");
+            println!("  {GREEN}{OK}{RESET} {DIM}allowing all {name} calls this session{RESET}");
             return true;
         }
         if answer == "s" {
@@ -112,7 +109,7 @@ impl ApprovalProvider for ApprovalCache {
         if answer == "y" || answer == "yes" {
             return true;
         }
-        println!("  {RED}✗{RESET} {DIM}denied{RESET}");
+        println!("  {RED}{FAIL}{RESET} {DIM}denied{RESET}");
         false
     }
 }

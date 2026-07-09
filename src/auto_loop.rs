@@ -38,12 +38,12 @@ use crate::planner::default_spec_path;
 use crate::session_turn::{run_user_turn, TurnOptions};
 use crate::tools::run_evaluation;
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
+const RESET: crate::theme::Style = crate::theme::RESET;
+const DIM: crate::theme::Style = crate::theme::MUTED;
+const GREEN: crate::theme::Style = crate::theme::SUCCESS;
+const RED: crate::theme::Style = crate::theme::ERROR;
+const YELLOW: crate::theme::Style = crate::theme::WARN;
+const CYAN: crate::theme::Style = crate::theme::ACCENT;
 
 /// Hard upper bound on rounds regardless of config/flags — a runaway guard for
 /// an unattended loop. Higher than `/iterate`'s ceiling because overnight runs

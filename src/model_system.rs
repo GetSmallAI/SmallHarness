@@ -143,7 +143,6 @@ pub struct ModelRef {
 }
 
 impl ModelRef {
-    #[cfg(test)]
     pub fn parse_spec(spec: &str) -> Option<Self> {
         let (backend, model) = spec.trim().split_once(':')?;
         let backend = BackendName::parse(backend.trim())?;
@@ -233,6 +232,8 @@ pub struct ModelSystemConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub planner: Option<ModelRef>,
+    #[serde(default)]
     pub selector: Option<ModelRef>,
     #[serde(default)]
     pub orchestrators: ModelTierSet,
@@ -246,7 +247,8 @@ pub struct ModelSystemConfig {
 
 impl ModelSystemConfig {
     pub fn any_configured(&self) -> bool {
-        self.selector.is_some()
+        self.planner.is_some()
+            || self.selector.is_some()
             || self.orchestrators.any_configured()
             || self.coders.any_configured()
             || self.reviewers.any_configured()
