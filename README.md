@@ -853,7 +853,10 @@ token counts, and reported OpenRouter costs stay visible.
 `/route` lets you describe a model stack that blends local and frontier models:
 separate orchestrators for low/medium/high planning, coders for
 low/medium/high implementation, play and production review models, a security
-review model, and one selector model that chooses the route for a task.
+review model, a compaction model that summarizes the transcript when context is
+compacted, and one selector model that chooses the route for a task. `/route
+status` shows the configured stack (including the compaction model) and `/route
+template` prints the JSON shape to paste into `agent.config.json`.
 
 ```text
 /route template
