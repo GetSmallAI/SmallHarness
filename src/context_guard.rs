@@ -56,6 +56,7 @@ pub enum CompactionModel {
     Use {
         backend: BackendDescriptor,
         model: String,
+        label: String,
     },
     /// A model was configured but its backend is not ready (e.g. missing API
     /// key). Compaction inherits the main model and warns.
@@ -73,6 +74,7 @@ pub fn classify_compaction_model(config: &AgentConfig) -> CompactionModel {
         Ok(()) => CompactionModel::Use {
             backend,
             model: model_ref.model.clone(),
+            label: model_ref.label(),
         },
         Err(e) => CompactionModel::Unavailable {
             label: model_ref.label(),
@@ -581,7 +583,7 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
     // ready; otherwise it inherits the main model. Prompt-budget sizing above is
     // always based on the main model, since that is the context we are fitting.
     let (summary_backend, summary_model): (&BackendDescriptor, &str) = match compaction {
-        CompactionModel::Use { backend, model } => (backend, model.as_str()),
+        CompactionModel::Use { backend, model, .. } => (backend, model.as_str()),
         CompactionModel::Inherit | CompactionModel::Unavailable { .. } => (backend, model),
     };
 
@@ -645,7 +647,20 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
             Ok(summary) if !summary.trim().is_empty() => {
                 (CompactMethod::LlmSummary, summary.trim().to_string())
             }
-            Ok(_) | Err(_) => {
+            result => {
+                // The LLM summary was empty or errored, so fall back to a
+                // deterministic trim. If a dedicated compaction model was
+                // explicitly selected, surface why it failed instead of
+                // silently degrading to the trim.
+                if let CompactionModel::Use { label, .. } = compaction {
+                    let detail = match result {
+                        Err(e) => e.to_string(),
+                        _ => "returned an empty summary".to_string(),
+                    };
+                    warning = Some(format!(
+                        "compaction model {label} failed ({detail}); trimmed deterministically"
+                    ));
+                }
                 let addition = deterministic_summary(&older);
                 (
                     CompactMethod::DeterministicTrim,
@@ -1107,6 +1122,62 @@ mod tests {
             CompactionModel::Use { model, .. } => assert_eq!(model, "qwen2.5-coder:7b"),
             other => panic!("expected Use, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_use_model_failure_surfaces_warning() {
+        // A dedicated compaction model whose summarize call fails must not
+        // silently degrade to the deterministic trim; the failure is surfaced.
+        let mut messages = vec![
+            ChatMessage::System {
+                content: "sys".into(),
+            },
+            ChatMessage::User {
+                content: "old request".into(),
+            },
+            ChatMessage::Assistant {
+                content: Some("old answer".into()),
+                tool_calls: vec![],
+            },
+            ChatMessage::User {
+                content: "current request".into(),
+            },
+        ];
+        // Port 9 (discard) refuses the connection, so summarize_transcript errors.
+        let backend = BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            api_key: "test".into(),
+            is_local: true,
+            openrouter: crate::backends::OpenRouterConfig::default(),
+        };
+        let compaction = CompactionModel::Use {
+            backend: backend.clone(),
+            model: "compactor".into(),
+            label: "ollama:compactor".into(),
+        };
+        let http = Client::new();
+        let result = compact_messages_core(CompactRequest {
+            messages: &mut messages,
+            system_prompt: "sys",
+            tool_defs: &[],
+            keep_messages: 1,
+            limit_bytes: 1000,
+            // Large budget keeps this on the LLM-summary path (not tier-2 trim).
+            summarize_budget_bytes: 1_000_000,
+            http: &http,
+            backend: &backend,
+            model: "mock",
+            conversation_summary: None,
+            compaction: &compaction,
+        })
+        .await
+        .expect("compaction runs");
+
+        assert_eq!(result.method, CompactMethod::DeterministicTrim);
+        let warning = result.warning.expect("failure surfaced as warning");
+        assert!(warning.contains("ollama:compactor"), "warning: {warning}");
+        assert!(warning.contains("failed"), "warning: {warning}");
     }
 
     #[test]

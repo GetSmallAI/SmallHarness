@@ -13,7 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   compaction and `/compact`). It defaults to the main conversation model; set it
   to a `"provider:model"` spec to compact with a different (for example cheaper
   or longer-context) model. When the configured backend is not ready, compaction
-  inherits the main model and prints a warning in the compaction notice.
+  inherits the main model and prints a warning in the compaction notice; if the
+  chosen model errors mid-compaction, the compaction notice reports the failure
+  instead of silently degrading. The configured model is shown in `/route status`
+  and `/route template`.
 
 ## [1.2.0] - 2026-07-08
 
