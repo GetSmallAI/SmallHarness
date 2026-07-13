@@ -31,6 +31,9 @@ pub struct CompactResult {
     pub after_ratio: f64,
     pub method: CompactMethod,
     pub conversation_summary: Option<String>,
+    /// Set when a compaction model was configured but could not be used, so the
+    /// main model was used instead. Surfaced in the compaction notice.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +45,42 @@ pub struct ContextGuardConfig {
     pub model_context_tokens: usize,
 }
 
+/// Which model summarizes the transcript during compaction. Compaction inherits
+/// the main conversation model unless `modelSystem.compaction` selects another.
+#[derive(Debug, Clone, Default)]
+pub enum CompactionModel {
+    /// Use the main conversation model (default, and when nothing is configured).
+    #[default]
+    Inherit,
+    /// A configured, ready model dedicated to compaction.
+    Use {
+        backend: BackendDescriptor,
+        model: String,
+    },
+    /// A model was configured but its backend is not ready (e.g. missing API
+    /// key). Compaction inherits the main model and warns.
+    Unavailable { label: String, reason: String },
+}
+
+/// Resolve `modelSystem.compaction` into a [`CompactionModel`]. Pure: it does no
+/// I/O and never warns; the not-ready warning is surfaced when compaction runs.
+pub fn classify_compaction_model(config: &AgentConfig) -> CompactionModel {
+    let Some(model_ref) = config.model_system.compaction() else {
+        return CompactionModel::Inherit;
+    };
+    let backend = config.backend_descriptor_for(model_ref.backend);
+    match crate::backends::validate(&backend) {
+        Ok(()) => CompactionModel::Use {
+            backend,
+            model: model_ref.model.clone(),
+        },
+        Err(e) => CompactionModel::Unavailable {
+            label: model_ref.label(),
+            reason: e.to_string(),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContextGuardParams {
     pub effective_limit_bytes: usize,
@@ -50,6 +89,7 @@ pub struct ContextGuardParams {
     pub keep_messages: usize,
     pub summarize_budget_bytes: usize,
     pub conversation_summary: Option<String>,
+    pub compaction: CompactionModel,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +123,7 @@ struct CompactRequest<'a> {
     backend: &'a BackendDescriptor,
     model: &'a str,
     conversation_summary: Option<&'a str>,
+    compaction: &'a CompactionModel,
 }
 
 pub fn default_model_context_tokens(model: &str, is_local: bool) -> usize {
@@ -150,6 +191,7 @@ pub fn guard_params_from(
         summarize_budget_bytes: (guard.effective_limit_bytes as f64 * SUMMARIZE_BUDGET_FRACTION)
             as usize,
         conversation_summary,
+        compaction: classify_compaction_model(config),
     }
 }
 
@@ -532,7 +574,16 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
         backend,
         model,
         conversation_summary,
+        compaction,
     } = req;
+
+    // Compaction summarizes with a dedicated model when one is configured and
+    // ready; otherwise it inherits the main model. Prompt-budget sizing above is
+    // always based on the main model, since that is the context we are fitting.
+    let (summary_backend, summary_model): (&BackendDescriptor, &str) = match compaction {
+        CompactionModel::Use { backend, model } => (backend, model.as_str()),
+        CompactionModel::Inherit | CompactionModel::Unavailable { .. } => (backend, model),
+    };
 
     let active_system_prompt = merge_system_prompt(system_prompt, conversation_summary);
     let budget_before = measure_prompt_budget(&active_system_prompt, messages, tool_defs);
@@ -548,6 +599,7 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
             after_ratio: before_ratio,
             method: CompactMethod::None,
             conversation_summary: conversation_summary.map(str::to_string),
+            warning: None,
         });
     }
 
@@ -561,10 +613,14 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
             after_ratio: before_ratio,
             method: CompactMethod::None,
             conversation_summary: conversation_summary.map(str::to_string),
+            warning: None,
         });
     };
 
     let use_tier2 = transcript_json_bytes(&older) > summarize_budget_bytes;
+    // Only warn about an unavailable compaction model when we would actually have
+    // called it (the LLM-summary path); the deterministic trim uses no model.
+    let mut warning = None;
     let (method, new_summary) = if use_tier2 {
         let addition = deterministic_summary(&older);
         (
@@ -572,7 +628,20 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
             append_summary(conversation_summary, &addition),
         )
     } else {
-        match summarize_transcript(http, backend, model, conversation_summary, &older).await {
+        if let CompactionModel::Unavailable { label, reason } = compaction {
+            warning = Some(format!(
+                "compaction model {label} unavailable ({reason}); summarized with {model}"
+            ));
+        }
+        match summarize_transcript(
+            http,
+            summary_backend,
+            summary_model,
+            conversation_summary,
+            &older,
+        )
+        .await
+        {
             Ok(summary) if !summary.trim().is_empty() => {
                 (CompactMethod::LlmSummary, summary.trim().to_string())
             }
@@ -601,6 +670,7 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
         after_ratio,
         method,
         conversation_summary: Some(new_summary),
+        warning,
     })
 }
 
@@ -612,6 +682,7 @@ pub async fn compact_messages(
     let keep = keep.unwrap_or(guard.keep_messages);
     let summarize_budget =
         (guard.effective_limit_bytes as f64 * SUMMARIZE_BUDGET_FRACTION) as usize;
+    let compaction = classify_compaction_model(ctx.config);
 
     compact_messages_core(CompactRequest {
         messages: ctx.messages,
@@ -624,6 +695,7 @@ pub async fn compact_messages(
         backend: ctx.backend,
         model: ctx.model,
         conversation_summary: ctx.conversation_summary,
+        compaction: &compaction,
     })
     .await
 }
@@ -687,16 +759,7 @@ pub async fn maybe_auto_compact(
     rewrite_session_transcript(session_dir, session_path, ctx.messages)?;
 
     Ok(Some(CompactNotice {
-        line: format!(
-            "  \x1b[32m✓\x1b[0m \x1b[2m{}\x1b[0m",
-            compact_notice(
-                result.before_messages,
-                result.after_messages,
-                result.before_ratio,
-                result.after_ratio,
-                result.method
-            )
-        ),
+        line: compaction_notice_line(&result),
         conversation_summary: result.conversation_summary.clone(),
         transcript_rewritten: true,
     }))
@@ -737,6 +800,7 @@ pub async fn maybe_compact_messages(
         backend,
         model,
         conversation_summary: guard.conversation_summary.as_deref(),
+        compaction: &guard.compaction,
     })
     .await?;
 
@@ -745,19 +809,29 @@ pub async fn maybe_compact_messages(
     }
 
     Ok(Some(CompactNotice {
-        line: format!(
-            "  \x1b[32m✓\x1b[0m \x1b[2m{}\x1b[0m",
-            compact_notice(
-                result.before_messages,
-                result.after_messages,
-                result.before_ratio,
-                result.after_ratio,
-                result.method
-            )
-        ),
+        line: compaction_notice_line(&result),
         conversation_summary: result.conversation_summary.clone(),
         transcript_rewritten: true,
     }))
+}
+
+/// The one-line compaction notice, with an optional warning line appended when a
+/// configured compaction model could not be used.
+fn compaction_notice_line(result: &CompactResult) -> String {
+    let mut line = format!(
+        "  \x1b[32m✓\x1b[0m \x1b[2m{}\x1b[0m",
+        compact_notice(
+            result.before_messages,
+            result.after_messages,
+            result.before_ratio,
+            result.after_ratio,
+            result.method
+        )
+    );
+    if let Some(warning) = &result.warning {
+        line.push_str(&format!("\n  \x1b[33m!\x1b[0m \x1b[2m{warning}\x1b[0m"));
+    }
+    line
 }
 
 pub fn context_status_lines(
@@ -972,6 +1046,7 @@ mod tests {
             backend: &backend,
             model: "mock",
             conversation_summary: Some(&existing_summary),
+            compaction: &CompactionModel::Inherit,
         })
         .await
         .expect("deterministic compaction");
@@ -1011,5 +1086,48 @@ mod tests {
             32768
         );
         assert_eq!(default_model_context_tokens("gpt-4", false), 128_000);
+    }
+
+    #[test]
+    fn compaction_inherits_main_model_by_default() {
+        let config = AgentConfig::default();
+        assert!(matches!(
+            classify_compaction_model(&config),
+            CompactionModel::Inherit
+        ));
+    }
+
+    #[test]
+    fn compaction_uses_configured_ready_backend() {
+        // Ollama needs no API key, so its backend is always ready.
+        let mut config = AgentConfig::default();
+        config.model_system.compaction =
+            crate::model_system::ModelRef::parse_spec("ollama:qwen2.5-coder:7b");
+        match classify_compaction_model(&config) {
+            CompactionModel::Use { model, .. } => assert_eq!(model, "qwen2.5-coder:7b"),
+            other => panic!("expected Use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compaction_notice_appends_warning_when_present() {
+        let result = CompactResult {
+            compacted: true,
+            before_messages: 10,
+            after_messages: 4,
+            before_ratio: 0.9,
+            after_ratio: 0.3,
+            method: CompactMethod::LlmSummary,
+            conversation_summary: Some("summary".into()),
+            warning: Some("compaction model openrouter:x unavailable".into()),
+        };
+        let line = compaction_notice_line(&result);
+        assert!(line.contains("compaction model openrouter:x unavailable"));
+
+        let no_warning = CompactResult {
+            warning: None,
+            ..result
+        };
+        assert!(!compaction_notice_line(&no_warning).contains("unavailable"));
     }
 }

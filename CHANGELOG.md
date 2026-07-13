@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable compaction model.** `modelSystem.compaction` selects the model
+  used to summarize the conversation during context compaction (both automatic
+  compaction and `/compact`). It defaults to the main conversation model; set it
+  to a `"provider:model"` spec to compact with a different (for example cheaper
+  or longer-context) model. When the configured backend is not ready, compaction
+  inherits the main model and prints a warning in the compaction notice.
+
 ## [1.2.0] - 2026-07-08
 
 ### Added

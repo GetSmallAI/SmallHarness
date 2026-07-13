@@ -235,6 +235,10 @@ pub struct ModelSystemConfig {
     pub planner: Option<ModelRef>,
     #[serde(default)]
     pub selector: Option<ModelRef>,
+    /// Model used to summarize/compact the conversation transcript. When unset,
+    /// compaction inherits the main conversation model.
+    #[serde(default)]
+    pub compaction: Option<ModelRef>,
     #[serde(default)]
     pub orchestrators: ModelTierSet,
     #[serde(default)]
@@ -249,10 +253,15 @@ impl ModelSystemConfig {
     pub fn any_configured(&self) -> bool {
         self.planner.is_some()
             || self.selector.is_some()
+            || self.compaction.is_some()
             || self.orchestrators.any_configured()
             || self.coders.any_configured()
             || self.reviewers.any_configured()
             || self.security_reviewer.is_some()
+    }
+
+    pub fn compaction(&self) -> Option<&ModelRef> {
+        self.compaction.as_ref()
     }
 
     pub fn coder(&self, complexity: TaskComplexity) -> Option<&ModelRef> {
@@ -327,6 +336,32 @@ mod tests {
                 .coder(TaskComplexity::Low)
                 .map(|m| m.model.as_str()),
             Some("qwen2.5-coder:7b")
+        );
+    }
+
+    #[test]
+    fn compaction_model_is_configurable_and_detected() {
+        let empty = ModelSystemConfig::default();
+        assert!(empty.compaction().is_none());
+
+        let configured = ModelSystemConfig {
+            compaction: ModelRef::parse_spec("openrouter:anthropic/claude-3.5-haiku"),
+            ..Default::default()
+        };
+        assert!(configured.any_configured());
+        let compaction = configured.compaction().expect("compaction set");
+        assert_eq!(compaction.backend, BackendName::Openrouter);
+        assert_eq!(compaction.model, "anthropic/claude-3.5-haiku");
+    }
+
+    #[test]
+    fn compaction_model_round_trips_through_json() {
+        let json =
+            r#"{"compaction":{"backend":"openrouter","model":"anthropic/claude-3.5-haiku"}}"#;
+        let cfg: ModelSystemConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            cfg.compaction().map(|m| m.model.as_str()),
+            Some("anthropic/claude-3.5-haiku")
         );
     }
 }

@@ -879,6 +879,24 @@ For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
 or a planner override to create `.small-harness/plan.json`; `/plan execute`
 then runs each ready node with the configured low/medium/high coder model.
 
+Context compaction (summarizing the conversation when the prompt budget fills,
+both automatically and via `/compact`) uses the main conversation model by
+default. Set `modelSystem.compaction` to a `"provider:model"` spec to summarize
+with a different model, for example a cheaper or longer-context one:
+
+```json
+{
+  "modelSystem": {
+    "compaction": { "backend": "openrouter", "model": "anthropic/claude-3.5-haiku" }
+  }
+}
+```
+
+Prompt-budget sizing still tracks the main model (that is the context being
+fit); only the summary call uses the compaction model. If the compaction
+backend is not ready (for example a missing API key), compaction falls back to
+the main model and prints a warning.
+
 ---
 
 ## Configuration
