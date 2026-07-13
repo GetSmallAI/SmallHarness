@@ -22,10 +22,8 @@ pub fn hook_state_file_path() -> Option<PathBuf> {
 pub fn hook_state_file_path_from_env(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     let base = if let Some(xdg) = xdg {
         PathBuf::from(xdg)
-    } else if let Some(home) = home {
-        PathBuf::from(home).join(".config")
     } else {
-        return None;
+        PathBuf::from(home?).join(".config")
     };
     Some(base.join("small-harness").join("hooks-state.json"))
 }
