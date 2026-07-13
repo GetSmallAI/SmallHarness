@@ -308,6 +308,9 @@ pub(super) async fn cmd_compact(args: &str, state: &mut AppState) -> Result<()> 
         "  {GREEN}✓{RESET} {DIM}{}{RESET}",
         state.context_guard_notice.as_deref().unwrap_or("")
     );
+    if let Some(warning) = result.warning {
+        println!("  {YELLOW}!{RESET} {DIM}{warning}{RESET}");
+    }
     println!("  {DIM}session → {}{RESET}", state.session_path.display());
     Ok(())
 }
