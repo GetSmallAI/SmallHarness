@@ -31,8 +31,10 @@ pub struct CompactResult {
     pub after_ratio: f64,
     pub method: CompactMethod,
     pub conversation_summary: Option<String>,
-    /// Set when a compaction model was configured but could not be used, so the
-    /// main model was used instead. Surfaced in the compaction notice.
+    /// Set when a configured compaction model could not be used as-is, so a
+    /// fallback ran: an unavailable backend inherits the main model; a dedicated
+    /// model that errors or returns empty is retried with the main model and, if
+    /// that also fails, the deterministic trim. Surfaced in the compaction notice.
     pub warning: Option<String>,
 }
 
@@ -635,31 +637,50 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
                 "compaction model {label} unavailable ({reason}); summarized with {model}"
             ));
         }
-        match summarize_transcript(
+        let mut result = summarize_transcript(
             http,
             summary_backend,
             summary_model,
             conversation_summary,
             &older,
         )
-        .await
-        {
+        .await;
+
+        // A dedicated compaction model that errors or returns empty retries with
+        // the main conversation model before falling back to the deterministic
+        // trim, so a broken compaction backend never silently loses the summary.
+        let retried_main = if let CompactionModel::Use { label, .. } = compaction {
+            if matches!(&result, Ok(summary) if !summary.trim().is_empty()) {
+                false
+            } else {
+                let detail = match &result {
+                    Err(e) => e.to_string(),
+                    _ => "returned an empty summary".to_string(),
+                };
+                warning = Some(format!(
+                    "compaction model {label} failed ({detail}); summarized with {model} instead"
+                ));
+                result =
+                    summarize_transcript(http, backend, model, conversation_summary, &older).await;
+                true
+            }
+        } else {
+            false
+        };
+
+        match result {
             Ok(summary) if !summary.trim().is_empty() => {
                 (CompactMethod::LlmSummary, summary.trim().to_string())
             }
-            result => {
-                // The LLM summary was empty or errored, so fall back to a
-                // deterministic trim. If a dedicated compaction model was
-                // explicitly selected, surface why it failed instead of
-                // silently degrading to the trim.
-                if let CompactionModel::Use { label, .. } = compaction {
-                    let detail = match result {
-                        Err(e) => e.to_string(),
-                        _ => "returned an empty summary".to_string(),
-                    };
-                    warning = Some(format!(
-                        "compaction model {label} failed ({detail}); trimmed deterministically"
-                    ));
+            _ => {
+                // The summary model — and the main-model retry, if one ran — both
+                // failed, so fall back to the deterministic trim.
+                if retried_main {
+                    if let CompactionModel::Use { label, .. } = compaction {
+                        warning = Some(format!(
+                            "compaction model {label} and main model {model} both failed; trimmed deterministically"
+                        ));
+                    }
                 }
                 let addition = deterministic_summary(&older);
                 (
@@ -1121,6 +1142,32 @@ mod tests {
         match classify_compaction_model(&config) {
             CompactionModel::Use { model, .. } => assert_eq!(model, "qwen2.5-coder:7b"),
             other => panic!("expected Use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compaction_marks_not_ready_backend_unavailable() {
+        // openrouter is not ready without an API key. Force the key empty for
+        // this test regardless of the ambient environment, then restore it.
+        let saved = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "");
+
+        let mut config = AgentConfig::default();
+        config.model_system.compaction =
+            crate::model_system::ModelRef::parse_spec("openrouter:anthropic/claude-3.5-haiku");
+        let classified = classify_compaction_model(&config);
+
+        match saved {
+            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+
+        match classified {
+            CompactionModel::Unavailable { label, reason } => {
+                assert_eq!(label, "openrouter:anthropic/claude-3.5-haiku");
+                assert!(reason.contains("OPENROUTER_API_KEY"), "reason: {reason}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
         }
     }
 

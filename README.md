@@ -884,8 +884,9 @@ then runs each ready node with the configured low/medium/high coder model.
 
 Context compaction (summarizing the conversation when the prompt budget fills,
 both automatically and via `/compact`) uses the main conversation model by
-default. Set `modelSystem.compaction` to a `"provider:model"` spec to summarize
-with a different model, for example a cheaper or longer-context one:
+default. Set `modelSystem.compaction` to a `ModelRef` object (a `{ "backend":
+"...", "model": "..." }` pair, the same shape as `planner`/`selector`) to
+summarize with a different model, for example a cheaper or longer-context one:
 
 ```json
 {
