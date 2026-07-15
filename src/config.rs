@@ -694,14 +694,6 @@ const SYSTEM_PROMPT: &str = concat!(
     "Current working directory: {cwd}",
 );
 
-const GROK_SYSTEM_PROMPT: &str = concat!(
-    "You are Grok, built by xAI, running inside Small Harness (a terminal coding harness).\n",
-    "Do not claim to be Cursor, Auto, Claude, GPT, or any other product.\n",
-    "Available tools: {tools}.\n",
-    "Use a tool only when the request needs filesystem or shell access; otherwise answer directly.\n",
-    "Current working directory: {cwd}",
-);
-
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -872,12 +864,6 @@ impl AgentConfig {
     }
 
     pub fn system_prompt_template(&self) -> &str {
-        if self.system_prompt.is_empty() {
-            return "";
-        }
-        if matches!(self.backend, BackendName::Grok) && self.system_prompt == SYSTEM_PROMPT {
-            return GROK_SYSTEM_PROMPT;
-        }
         self.system_prompt.as_str()
     }
 
@@ -1325,46 +1311,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grok_backend_uses_minimal_stock_system_prompt() {
-        let config = AgentConfig {
-            backend: BackendName::Grok,
-            ..Default::default()
-        };
-        assert_eq!(config.system_prompt_template(), GROK_SYSTEM_PROMPT);
-        let rendered = config.render_system_prompt_for_tools(&["file_read".into()]);
-        assert!(!rendered.contains("small open-weight LLM"));
-        assert!(rendered.contains("You are Grok, built by xAI"));
-        assert!(rendered.contains("Do not claim to be Cursor"));
-        assert!(rendered.contains("file_read"));
-        assert!(rendered.contains("Current working directory:"));
+    fn all_backends_share_the_same_stock_system_prompt() {
+        for backend in [
+            BackendName::Ollama,
+            BackendName::LmStudio,
+            BackendName::Mlx,
+            BackendName::LlamaCpp,
+            BackendName::Openrouter,
+            BackendName::OpenAi,
+            BackendName::OpenAiCodex,
+            BackendName::Grok,
+        ] {
+            let config = AgentConfig {
+                backend,
+                ..Default::default()
+            };
+            assert_eq!(config.system_prompt_template(), SYSTEM_PROMPT);
+            let rendered = config.render_system_prompt_for_tools(&["file_read".into()]);
+            assert!(rendered.contains("small open-weight LLM"));
+            assert!(rendered.contains("file_read"));
+            assert!(rendered.contains("Current working directory:"));
+        }
     }
 
     #[test]
-    fn non_grok_backends_keep_full_stock_system_prompt() {
-        let config = AgentConfig::default();
-        assert_eq!(config.backend, BackendName::Ollama);
-        assert_eq!(config.system_prompt_template(), SYSTEM_PROMPT);
-        let rendered = config.render_system_prompt();
-        assert!(rendered.contains("small open-weight LLM"));
-    }
-
-    #[test]
-    fn custom_system_prompt_wins_on_grok() {
+    fn custom_system_prompt_is_used_as_is() {
         let config = AgentConfig {
-            backend: BackendName::Grok,
-            system_prompt: "You are Grok in test mode.".into(),
+            system_prompt: "You are a custom assistant.".into(),
             ..Default::default()
         };
-        assert_eq!(config.system_prompt_template(), "You are Grok in test mode.");
+        assert_eq!(config.system_prompt_template(), "You are a custom assistant.");
         assert!(config
             .render_system_prompt()
-            .starts_with("You are Grok in test mode."));
+            .starts_with("You are a custom assistant."));
     }
 
     #[test]
-    fn empty_system_prompt_sends_nothing_on_grok() {
+    fn empty_system_prompt_sends_nothing() {
         let config = AgentConfig {
-            backend: BackendName::Grok,
             system_prompt: String::new(),
             ..Default::default()
         };

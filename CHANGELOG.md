@@ -17,10 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `https://api.x.ai/v1` (override with `XAI_BASE_URL` / `GROK_BASE_URL`).
   Default model is `grok-4.5`. `/login grok` can import credentials from the
   official Grok CLI (`~/.grok/auth.json`) when present. Setup wizard, `/backend`,
-  `/doctor`, and `/auth` list the new provider. With the stock system prompt,
-  Grok skips the local “small open-weight LLM” persona and only receives a
-  short tools/cwd line so it answers as Grok; set `systemPrompt: ""` for no
-  system message at all.
+  `/doctor`, and `/auth` list the new provider.
 
 ## [1.2.0] - 2026-07-08
 
