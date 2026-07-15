@@ -20,7 +20,7 @@
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-1.1.1-111827">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
+  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
@@ -146,6 +146,20 @@ This is intentionally separate from `/auth set openai`: `openai` uses an
 refreshable ChatGPT OAuth token in `auth.json` and talks to the Codex Responses
 backend.
 
+### Path A3 — Grok / SuperGrok subscription login
+
+Use a SuperGrok or X Premium+ subscription the same way OpenCode / Hermes do —
+browser or headless device-code OAuth, no `XAI_API_KEY`:
+
+```text
+/login grok
+/backend grok
+```
+
+Pick **1) Browser login** (opens the system browser + local callback) or
+**2) Device-code login** for SSH/headless. Tokens land in `auth.json` under
+`grok` and refresh automatically. Default model is `grok-4.5`.
+
 ### Path B — Local model
 
 *Private, free, offline — runs entirely on your machine.*
@@ -238,12 +252,14 @@ A handful of moves worth knowing right away:
 | `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models and Fusion |
 | `openai` | `https://api.openai.com/v1` | Direct provider access with your own key |
 | `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
+| `grok` | `https://api.x.ai/v1` | SuperGrok / X Premium+ OAuth via `/login grok` (browser or device-code) |
 
 Switch at runtime with `/backend <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
-`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`. API backends require an API key
-(set via [`/auth`](#cost-and-credentials) or env var); `openai-codex` requires
-`/login openai-codex`.
+`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`, `XAI_BASE_URL` / `GROK_BASE_URL`.
+API backends require an API key (set via [`/auth`](#cost-and-credentials) or
+env var); `openai-codex` requires `/login openai-codex`; `grok` requires
+`/login grok`.
 
 ### Default model per backend
 
@@ -260,6 +276,7 @@ or `modelOverride` in your config.
 | `openrouter` | `qwen/qwen-2.5-coder-32b-instruct` |
 | `openai` | `gpt-4o-mini` |
 | `openai-codex` | `gpt-5.5` |
+| `grok` | `grok-4.5` |
 
 ### Recommend the right model for your box
 
@@ -360,6 +377,8 @@ this exact call`. The session cache resets on `/new`.
 /auth                  manage API keys and OAuth credentials
 /login openai-codex    sign in with ChatGPT/Codex subscription OAuth
 /logout openai-codex   clear the stored ChatGPT/Codex login
+/login grok            sign in with SuperGrok / X Premium+ OAuth
+/logout grok           clear the stored Grok login
 /image <path>          attach an image to the next user turn
 /reasoning on|off      toggle the streaming reasoning panel
 /verbose on|off        show every tool call with its full args + result
@@ -407,12 +426,21 @@ no change in behavior.
 /auth clear openai       remove from the file (env stays for this session)
 /login openai-codex      browser/device-code login with ChatGPT/Codex
 /logout openai-codex     remove the stored OAuth credential
+/login grok              browser/device-code login with SuperGrok / X Premium+
+/logout grok             remove the stored Grok OAuth credential
 ```
 
 `openai-codex` is not an `OPENAI_API_KEY` replacement. It uses browser/device
 OAuth, stores `{access, refresh, expires, accountId}` in the same `auth.json`,
 refreshes the access token before use, and sends model traffic to the Codex
 Responses backend.
+
+`grok` is not an `XAI_API_KEY` replacement either. It uses the same OAuth
+shape as the official Grok CLI (browser PKCE on localhost, or RFC 8628
+device-code for SSH/headless), stores tokens under the `grok` key in
+`auth.json`, refreshes automatically, and calls `https://api.x.ai/v1`
+chat completions. If `~/.grok/auth.json` already has a Grok CLI login,
+`/login grok` can import and refresh those credentials.
 
 ### Per-turn and session cost
 
@@ -538,8 +566,8 @@ unattended local execution.
 
 To mix subscription and API usage, put subscription-backed models on tiers where
 Small Harness has a real login backend, such as `openai-codex` after
-`/login openai-codex`, and keep usage-billed automation on `openai`,
-`openrouter`, or local backends. For Claude/Fable subscriptions, track usage
+`/login openai-codex` or `grok` after `/login grok`, and keep usage-billed
+automation on `openai`, `openrouter`, or local backends. For Claude/Fable subscriptions, track usage
 with `/fable`; direct unattended execution should stay on an API-compatible
 backend unless you add an explicit Claude CLI adapter.
 
@@ -894,7 +922,7 @@ Resolution order (later overrides earlier):
 ### Environment variables (the useful ones)
 
 ```bash
-BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai|openai-codex
+BACKEND=ollama                                          # ollama|lm-studio|mlx|llamacpp|openrouter|openai|openai-codex|grok
 AGENT_MODEL=qwen2.5-coder:14b                           # overrides the backend default model
 
 OPENAI_API_KEY=sk-...                                   # required for openai
@@ -1084,6 +1112,7 @@ runtime.
 - **OpenRouter** — set `OPENROUTER_API_KEY` (or use `/auth set openrouter`).
 - **OpenAI** — set `OPENAI_API_KEY` (or use `/auth set openai`). Use `OPENAI_BASE_URL` for a compatible proxy.
 - **OpenAI Codex** — run `/login openai-codex`, then `/backend openai-codex`.
+- **Grok** — run `/login grok` (browser or device-code), then `/backend grok`.
 
 Run `/doctor --deep` for a fuller capability probe (streaming, usage chunks,
 native tool calls, inline JSON fallback). Reports land under `.sessions/doctor/`.

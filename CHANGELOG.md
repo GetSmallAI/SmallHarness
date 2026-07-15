@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`grok` backend — SuperGrok / X Premium+ OAuth.** New cloud backend that
+  authenticates with xAI subscription OAuth (Authorization Code + PKCE browser
+  login, plus RFC 8628 device-code for headless/SSH) via `/login grok`. Access
+  and refresh tokens are stored in the existing `0600` `auth.json` under the
+  `grok` provider, refreshed automatically, and never injected into environment
+  variables. Requests use OpenAI-compatible chat completions at
+  `https://api.x.ai/v1` (override with `XAI_BASE_URL` / `GROK_BASE_URL`).
+  Default model is `grok-4.5`. `/login grok` can import credentials from the
+  official Grok CLI (`~/.grok/auth.json`) when present. Setup wizard, `/backend`,
+  `/doctor`, and `/auth` list the new provider. With the stock system prompt,
+  Grok skips the local “small open-weight LLM” persona and only receives a
+  short tools/cwd line so it answers as Grok; set `systemPrompt: ""` for no
+  system message at all.
+
 ## [1.2.0] - 2026-07-08
 
 ### Added
