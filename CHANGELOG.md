@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-14
+
 ### Added
 
 - **Configurable compaction model.** `modelSystem.compaction` selects the model
