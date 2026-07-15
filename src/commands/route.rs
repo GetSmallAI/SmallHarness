@@ -171,6 +171,7 @@ fn print_route_status(stack: &ModelSystemConfig) {
     }
     print_model_ref("planner", stack.planner.as_ref());
     print_model_ref("selector", stack.selector.as_ref());
+    print_model_ref("compaction", stack.compaction.as_ref());
     print_tier_set("orchestrator", &stack.orchestrators);
     print_tier_set("coder", &stack.coders);
     print_review_set("review", &stack.reviewers);
@@ -214,6 +215,11 @@ fn print_route_template() {
       "effort": "high",
       "thinkingDepth": "deep",
       "notes": "Chooses the model route for a task."
+    }},
+    "compaction": {{
+      "backend": "openrouter",
+      "model": "anthropic/claude-3.5-haiku",
+      "notes": "Summarizes the transcript when context is compacted. Omit to inherit the main model."
     }},
     "orchestrators": {{
       "low": {{ "backend": "ollama", "model": "qwen2.5-coder:7b" }},

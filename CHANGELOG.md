@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable compaction model.** `modelSystem.compaction` selects the model
+  used to summarize the conversation during context compaction (both automatic
+  compaction and `/compact`). It defaults to the main conversation model; set it
+  to a `ModelRef` object (`{ "backend": "...", "model": "..." }`) to compact with
+  a different (for example cheaper or longer-context) model. When the configured backend is not ready, compaction
+  inherits the main model and prints a warning in the compaction notice; if the
+  chosen model errors mid-compaction, it retries with the main model before
+  falling back to the deterministic trim, reporting the failure instead of
+  silently degrading. The configured model is shown in `/route status` and
+  `/route template`.
+
 ## [1.2.0] - 2026-07-08
 
 ### Added
