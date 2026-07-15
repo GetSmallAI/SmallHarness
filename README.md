@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.1-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -881,7 +881,10 @@ token counts, and reported OpenRouter costs stay visible.
 `/route` lets you describe a model stack that blends local and frontier models:
 separate orchestrators for low/medium/high planning, coders for
 low/medium/high implementation, play and production review models, a security
-review model, and one selector model that chooses the route for a task.
+review model, a compaction model that summarizes the transcript when context is
+compacted, and one selector model that chooses the route for a task. `/route
+status` shows the configured stack (including the compaction model) and `/route
+template` prints the JSON shape to paste into `agent.config.json`.
 
 ```text
 /route template
@@ -906,6 +909,25 @@ fields while still showing the selected effort.
 For whole-goal decomposition, `/plan route <goal>` uses `modelSystem.planner`
 or a planner override to create `.small-harness/plan.json`; `/plan execute`
 then runs each ready node with the configured low/medium/high coder model.
+
+Context compaction (summarizing the conversation when the prompt budget fills,
+both automatically and via `/compact`) uses the main conversation model by
+default. Set `modelSystem.compaction` to a `ModelRef` object (a `{ "backend":
+"...", "model": "..." }` pair, the same shape as `planner`/`selector`) to
+summarize with a different model, for example a cheaper or longer-context one:
+
+```json
+{
+  "modelSystem": {
+    "compaction": { "backend": "openrouter", "model": "anthropic/claude-3.5-haiku" }
+  }
+}
+```
+
+Prompt-budget sizing still tracks the main model (that is the context being
+fit); only the summary call uses the compaction model. If the compaction
+backend is not ready (for example a missing API key), compaction falls back to
+the main model and prints a warning.
 
 ---
 
