@@ -164,9 +164,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/login",
-        "Browser/device-code login for subscription providers (openai-codex)",
+        "Browser/device-code login for subscription providers (openai-codex, grok)",
     ),
-    ("/logout", "Clear an OAuth login (openai-codex)"),
+    ("/logout", "Clear an OAuth login (openai-codex, grok)"),
     (
         "/image",
         "Attach an image to the next user prompt (vision-capable models only)",
@@ -189,7 +189,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex)",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex, grok)",
     ),
     (
         "/model",

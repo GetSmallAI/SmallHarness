@@ -205,12 +205,47 @@ pub fn build_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+async fn resolve_bearer(client: &reqwest::Client, backend: &BackendDescriptor) -> Result<String> {
+    if matches!(backend.name, BackendName::Grok) {
+        return crate::xai_oauth::access_token(client).await;
+    }
+    Ok(backend.api_key.clone())
+}
+
 pub async fn list_models(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
 ) -> Result<Vec<String>> {
     if matches!(backend.name, BackendName::OpenAiCodex) {
         return Ok(crate::codex_responses::codex_model_list());
+    }
+    if matches!(backend.name, BackendName::Grok) {
+        let mut ids = crate::xai_oauth::grok_model_list();
+        if let Ok(token) = crate::xai_oauth::access_token(client).await {
+            let url = format!("{}/models", backend.base_url.trim_end_matches('/'));
+            if let Ok(resp) = client.get(url).bearer_auth(&token).send().await {
+                if resp.status().is_success() {
+                    #[derive(Deserialize)]
+                    struct ModelsResp {
+                        data: Vec<Model>,
+                    }
+                    #[derive(Deserialize)]
+                    struct Model {
+                        id: String,
+                    }
+                    if let Ok(parsed) = resp.json::<ModelsResp>().await {
+                        for model in parsed.data {
+                            if !model.id.is_empty() && !ids.iter().any(|id| id == &model.id) {
+                                ids.push(model.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        return Ok(ids);
     }
     let url = format!("{}/models", backend.base_url.trim_end_matches('/'));
     let resp = client.get(url).bearer_auth(&backend.api_key).send().await?;
@@ -243,9 +278,10 @@ pub async fn chat_oneshot(
         backend.base_url.trim_end_matches('/')
     );
     let body = request_body(backend, req)?;
+    let bearer = resolve_bearer(client, backend).await?;
     let resp = client
         .post(url)
-        .bearer_auth(&backend.api_key)
+        .bearer_auth(bearer)
         .json(&body)
         .send()
         .await?;
@@ -343,9 +379,10 @@ where
         backend.base_url.trim_end_matches('/')
     );
     let body = request_body(backend, req)?;
+    let bearer = resolve_bearer(client, backend).await?;
     let resp = client
         .post(url)
-        .bearer_auth(&backend.api_key)
+        .bearer_auth(bearer)
         .json(&body)
         .send()
         .await?;
@@ -413,7 +450,7 @@ fn apply_effort_to_request(
                 serde_json::json!({ "effort": effort.openrouter_reasoning_effort() }),
             );
         }
-        BackendName::OpenAi => {
+        BackendName::OpenAi | BackendName::Grok => {
             if let Some(value) = effort.openai_reasoning_effort() {
                 obj.insert("reasoning_effort".into(), Value::String(value.into()));
             }

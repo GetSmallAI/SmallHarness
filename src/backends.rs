@@ -11,6 +11,7 @@ pub enum BackendName {
     Openrouter,
     OpenAi,
     OpenAiCodex,
+    Grok,
 }
 
 impl BackendName {
@@ -23,6 +24,7 @@ impl BackendName {
             BackendName::Openrouter => "openrouter",
             BackendName::OpenAi => "openai",
             BackendName::OpenAiCodex => "openai-codex",
+            BackendName::Grok => "grok",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -34,6 +36,7 @@ impl BackendName {
             "openrouter" => Some(Self::Openrouter),
             "openai" | "open-ai" => Some(Self::OpenAi),
             "openai-codex" | "open-ai-codex" | "codex" | "chatgpt" => Some(Self::OpenAiCodex),
+            "grok" | "xai" | "xai-oauth" | "x-ai" | "supergrok" | "grok-oauth" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -46,6 +49,7 @@ impl BackendName {
             Self::Openrouter,
             Self::OpenAi,
             Self::OpenAiCodex,
+            Self::Grok,
         ]
     }
     /// True for backends that talk to a process on the user's machine, false
@@ -55,8 +59,12 @@ impl BackendName {
     pub fn is_local(&self) -> bool {
         match self {
             Self::Ollama | Self::LmStudio | Self::Mlx | Self::LlamaCpp => true,
-            Self::Openrouter | Self::OpenAi | Self::OpenAiCodex => false,
+            Self::Openrouter | Self::OpenAi | Self::OpenAiCodex | Self::Grok => false,
         }
+    }
+
+    pub fn is_oauth_login(&self) -> bool {
+        matches!(self, Self::OpenAiCodex | Self::Grok)
     }
 }
 
@@ -151,6 +159,15 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
             is_local: false,
             openrouter: OpenRouterConfig::default(),
         },
+        BackendName::Grok => BackendDescriptor {
+            name,
+            base_url: std::env::var("XAI_BASE_URL")
+                .or_else(|_| std::env::var("GROK_BASE_URL"))
+                .unwrap_or_else(|_| "https://api.x.ai/v1".into()),
+            api_key: String::new(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        },
     }
 }
 
@@ -163,6 +180,11 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         if matches!(b.name, BackendName::OpenAiCodex) {
             return crate::codex_responses::canonical_codex_model(m)
                 .unwrap_or("gpt-5.5")
+                .to_string();
+        }
+        if matches!(b.name, BackendName::Grok) {
+            return crate::xai_oauth::canonical_grok_model(m)
+                .unwrap_or("grok-4.5")
                 .to_string();
         }
         return m.to_string();
@@ -180,6 +202,7 @@ pub fn default_model(b: &BackendDescriptor, override_: Option<&str>) -> String {
         BackendName::Openrouter => "qwen/qwen-2.5-coder-32b-instruct",
         BackendName::OpenAi => "gpt-4o-mini",
         BackendName::OpenAiCodex => "gpt-5.5",
+        BackendName::Grok => "grok-4.5",
     }
     .to_string()
 }
@@ -200,6 +223,15 @@ pub fn validate(b: &BackendDescriptor) -> Result<()> {
     {
         return Err(anyhow!(
             "ChatGPT/Codex login is required when BACKEND=openai-codex. Run `/login openai-codex`."
+        ));
+    }
+    if matches!(b.name, BackendName::Grok)
+        && crate::auth::AuthStore::load()
+            .get_oauth(crate::xai_oauth::PROVIDER)
+            .is_none()
+    {
+        return Err(anyhow!(
+            "Grok login is required when BACKEND=grok. Run `/login grok`."
         ));
     }
     Ok(())
@@ -258,6 +290,28 @@ mod tests {
         assert!(!BackendName::Openrouter.is_local());
         assert!(!BackendName::OpenAi.is_local());
         assert!(!BackendName::OpenAiCodex.is_local());
+        assert!(!BackendName::Grok.is_local());
+        assert!(BackendName::Grok.is_oauth_login());
+    }
+
+    #[test]
+    fn parses_grok_aliases() {
+        assert_eq!(BackendName::parse("grok"), Some(BackendName::Grok));
+        assert_eq!(BackendName::parse("xai"), Some(BackendName::Grok));
+        assert_eq!(BackendName::parse("xai-oauth"), Some(BackendName::Grok));
+        assert_eq!(BackendName::parse("supergrok"), Some(BackendName::Grok));
+        assert_eq!(BackendName::Grok.as_str(), "grok");
+    }
+
+    #[test]
+    fn lists_grok_as_switchable_backend() {
+        assert!(BackendName::all().contains(&BackendName::Grok));
+    }
+
+    #[test]
+    fn defaults_grok_to_grok_4_5() {
+        let model = default_model(&descriptor(BackendName::Grok), None);
+        assert_eq!(model, "grok-4.5");
     }
 
     #[test]

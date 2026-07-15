@@ -53,6 +53,7 @@ mod turn_checkpoint;
 mod turn_trace;
 mod update_check;
 mod warmup;
+mod xai_oauth;
 
 use std::io::{IsTerminal, Read, Write};
 
@@ -653,6 +654,9 @@ async fn probe_backend(
                 crate::backends::BackendName::OpenAiCodex => {
                     "Run `/login openai-codex` to sign in with ChatGPT/Codex."
                 }
+                crate::backends::BackendName::Grok => {
+                    "Run `/login grok` to sign in with SuperGrok / X Premium+."
+                }
             };
             Err(format!("{e}. {hint}"))
         }
@@ -697,15 +701,25 @@ async fn main() -> anyhow::Result<()> {
     crate::theme::init(config.display.color, config.display.ascii);
     let http = crate::openai::build_http_client();
     let backend_desc = config.backend_descriptor();
-    let missing_codex_login = matches!(config.backend, BackendName::OpenAiCodex)
-        && crate::auth::AuthStore::load()
-            .get_oauth("openai-codex")
-            .is_none();
+    let missing_oauth_login = config.backend.is_oauth_login()
+        && match config.backend {
+            BackendName::OpenAiCodex => crate::auth::AuthStore::load()
+                .get_oauth("openai-codex")
+                .is_none(),
+            BackendName::Grok => crate::auth::AuthStore::load()
+                .get_oauth(crate::xai_oauth::PROVIDER)
+                .is_none(),
+            _ => false,
+        };
     if let Err(e) = validate(&backend_desc) {
-        if missing_codex_login {
+        if missing_oauth_login {
+            let login_cmd = match config.backend {
+                BackendName::Grok => "/login grok",
+                _ => "/login openai-codex",
+            };
             println!("  {YELLOW}!{RESET} {DIM}{e}{RESET}");
             println!(
-                "  {DIM}Starting anyway so you can run /login openai-codex, or /backend to switch.{RESET}"
+                "  {DIM}Starting anyway so you can run {login_cmd}, or /backend to switch.{RESET}"
             );
         } else {
             eprintln!("{e}");
@@ -736,8 +750,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut warmed_fingerprint = None;
-    let probe = if missing_codex_login {
-        Err("Run /login openai-codex to sign in with ChatGPT/Codex.".to_string())
+    let probe = if missing_oauth_login {
+        Err(match config.backend {
+            BackendName::Grok => "Run /login grok to sign in with SuperGrok / X Premium+.".into(),
+            _ => "Run /login openai-codex to sign in with ChatGPT/Codex.".into(),
+        })
     } else {
         probe_backend(&http, &backend_desc).await
     };

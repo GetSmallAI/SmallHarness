@@ -7,9 +7,9 @@ use std::path::PathBuf;
 /// Persistent on-disk credential store.
 ///
 /// Legacy files used `{"<provider>": "<api-key>"}`.  New files may also store
-/// typed entries so OAuth providers (notably `openai-codex`, which uses a
-/// ChatGPT/Codex subscription login rather than an API key) can live beside API
-/// keys without changing existing user config.
+/// typed entries so OAuth providers (`openai-codex`, `grok`, …) that use a
+/// subscription login rather than an API key can live beside API keys without
+/// changing existing user config.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AuthStore {
     #[serde(flatten)]
