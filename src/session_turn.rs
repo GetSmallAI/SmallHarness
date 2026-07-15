@@ -1172,19 +1172,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200,
-            87,
-            None,
-            true,
-            0.0,
-            false,
-            None,
-            &metrics,
-            "",
-            "",
-            "",
-            "",
-            "",
+            1200, 87, None, true, 0.0, false, None, &metrics, "", "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.

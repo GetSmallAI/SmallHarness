@@ -1340,7 +1340,10 @@ mod tests {
             system_prompt: "You are a custom assistant.".into(),
             ..Default::default()
         };
-        assert_eq!(config.system_prompt_template(), "You are a custom assistant.");
+        assert_eq!(
+            config.system_prompt_template(),
+            "You are a custom assistant."
+        );
         assert!(config
             .render_system_prompt()
             .starts_with("You are a custom assistant."));
