@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::backends::{backend, default_model, validate, BackendName};
 use crate::config::{dotenv_values, layered_env, AgentConfig, ApprovalPolicy, ToolSelection};
 use crate::hardware::{detect_hardware_spec, save_hardware_summary};
-use crate::input::plain_read_line;
+use crate::input::{plain_read_line, select_from_list};
 use crate::openai::{build_http_client, chat_oneshot, list_models, ChatMessage, ChatRequest};
 
 // Routed through the shared theme so the wizard matches the rest of the TUI
@@ -51,7 +51,7 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
     println!("{pad}{CYAN}{BOLD}Small Harness setup{RESET}");
     println!("{}", crate::theme::rule());
     println!(
-        "{pad}{DIM}A few quick questions — I'll write {CONFIG_PATH}. Press Enter to keep the\n{pad}shown default ({CYAN}*{RESET}{DIM}); type q to cancel.{RESET}"
+        "{pad}{DIM}A few quick questions — I'll write {CONFIG_PATH}. Use ↑/↓ and Enter\n{pad}(or a number); defaults are marked {CYAN}*{RESET}{DIM}. Type q to cancel.{RESET}"
     );
     println!();
 
@@ -65,7 +65,12 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
     prompt_api_key(chosen_backend).await?;
 
     let model_default = default_model(&backend(chosen_backend), None);
-    let Some(model_override) = prompt_model(&model_default, base.model_override.as_deref()).await?
+    let Some(model_override) = prompt_model(
+        chosen_backend,
+        &model_default,
+        base.model_override.as_deref(),
+    )
+    .await?
     else {
         println!("  {DIM}Setup cancelled.{RESET}");
         return Ok(None);
@@ -133,46 +138,22 @@ fn setup_config_value(config: &AgentConfig) -> Value {
 }
 
 async fn prompt_backend(default: BackendName) -> Result<Option<BackendName>> {
-    loop {
-        println!("  {BOLD}Backend{RESET}");
-        for (idx, backend) in BackendName::all().iter().enumerate() {
-            let marker = if *backend == default { " *" } else { "" };
-            println!(
-                "    {DIM}{}){RESET} {}{}",
-                idx + 1,
-                backend.as_str(),
-                marker
-            );
-        }
-        let default_idx = BackendName::all()
-            .iter()
-            .position(|b| *b == default)
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let input = plain_read_line(format!(
-            "  {CYAN}❯{RESET} {DIM}Select backend [{default_idx}]:{RESET} "
-        ))
-        .await?;
-        let trimmed = input.trim().to_lowercase();
-        if is_cancel(&trimmed) {
-            return Ok(None);
-        }
-        if trimmed.is_empty() {
-            return Ok(Some(default));
-        }
-        if let Some(parsed) = BackendName::parse(&trimmed) {
-            return Ok(Some(parsed));
-        }
-        if let Some(parsed) = trimmed
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|idx| BackendName::all().get(idx).copied())
-        {
-            return Ok(Some(parsed));
-        }
-        println!("  {YELLOW}!{RESET} {DIM}Unknown backend: {trimmed}{RESET}");
-    }
+    let backends = BackendName::all();
+    let options: Vec<String> = backends
+        .iter()
+        .map(|b| {
+            if *b == default {
+                format!("{} *", b.as_str())
+            } else {
+                b.as_str().to_string()
+            }
+        })
+        .collect();
+    let default_idx = backends.iter().position(|b| *b == default).unwrap_or(0);
+    let Some(idx) = select_from_list("Backend".into(), options, default_idx).await? else {
+        return Ok(None);
+    };
+    Ok(backends.get(idx).copied())
 }
 
 /// For a cloud backend, make sure an API key is available. If one is already
@@ -238,113 +219,196 @@ async fn prompt_api_key(chosen: BackendName) -> Result<()> {
     Ok(())
 }
 
-async fn prompt_model(
+/// Last menu entry: user types a custom model id after selecting it.
+pub(crate) const MODEL_FREE_TEXT_LABEL: &str = "type a model id…";
+
+/// Build the model menu labels + pick values from a `/models` response.
+///
+/// Ensures `default_model` and any current override appear even if the backend
+/// omitted them, sorts for scanability, marks the preferred row with `*`, and
+/// always appends a free-text entry.
+///
+/// Shared by the setup wizard and the interactive `/model` command.
+pub(crate) fn build_model_menu(
+    fetched: Vec<String>,
+    default_model: &str,
+    current_override: Option<&str>,
+) -> (Vec<String>, Vec<ModelMenuItem>, usize) {
+    let mut ids = Vec::new();
+    for id in fetched {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !ids.iter().any(|existing: &String| existing == trimmed) {
+            ids.push(trimmed.to_string());
+        }
+    }
+    for extra in [Some(default_model), current_override]
+        .into_iter()
+        .flatten()
+    {
+        let trimmed = extra.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !ids.iter().any(|existing| existing == trimmed) {
+            ids.push(trimmed.to_string());
+        }
+    }
+    ids.sort();
+
+    let preferred = current_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_model);
+    let default_idx = ids.iter().position(|m| m == preferred).unwrap_or(0);
+
+    let mut labels = Vec::with_capacity(ids.len() + 1);
+    let mut items = Vec::with_capacity(ids.len() + 1);
+    for id in &ids {
+        let label = if id == preferred {
+            format!("{id} *")
+        } else {
+            id.clone()
+        };
+        labels.push(label);
+        items.push(ModelMenuItem::Id(id.clone()));
+    }
+    labels.push(MODEL_FREE_TEXT_LABEL.into());
+    items.push(ModelMenuItem::FreeText);
+
+    (labels, items, default_idx)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelMenuItem {
+    Id(String),
+    FreeText,
+}
+
+/// Resolve a chosen model id into a config override. Matching the backend
+/// default stores no override so `agent.config.json` stays clean.
+pub(crate) fn model_override_for(chosen: &str, default_model: &str) -> Option<String> {
+    let trimmed = chosen.trim();
+    if trimmed.is_empty() || trimmed == default_model {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn prompt_model_free_text(
     default_model: &str,
     current_override: Option<&str>,
 ) -> Result<Option<Option<String>>> {
-    println!("  {BOLD}Model{RESET}");
     let prompt = if let Some(current) = current_override {
-        format!("  {CYAN}❯{RESET} {DIM}Model override [current: {current}; blank: {default_model}]:{RESET} ")
+        format!(
+            "  {CYAN}❯{RESET} {DIM}Model id [current: {current}; blank: {default_model}]:{RESET} "
+        )
     } else {
-        format!("  {CYAN}❯{RESET} {DIM}Model override [blank: {default_model}]:{RESET} ")
+        format!("  {CYAN}❯{RESET} {DIM}Model id [blank: {default_model}]:{RESET} ")
     };
     let input = plain_read_line(prompt).await?;
     let trimmed = input.trim();
     if is_cancel(trimmed) {
         return Ok(None);
     }
-    if trimmed.is_empty() {
-        Ok(Some(None))
-    } else {
-        Ok(Some(Some(trimmed.to_string())))
+    Ok(Some(model_override_for(trimmed, default_model)))
+}
+
+async fn prompt_model(
+    chosen_backend: BackendName,
+    default_model: &str,
+    current_override: Option<&str>,
+) -> Result<Option<Option<String>>> {
+    use std::io::Write;
+
+    let backend_desc = backend(chosen_backend);
+    let http = build_http_client();
+
+    let mut out = std::io::stdout();
+    let _ = write!(
+        out,
+        "  {DIM}Fetching models from {}…{RESET}",
+        chosen_backend.as_str()
+    );
+    let _ = out.flush();
+
+    let fetched = match with_probe_timeout(list_models(&http, &backend_desc)).await {
+        Ok(models) => {
+            let _ = write!(out, "\r\x1b[K");
+            let _ = out.flush();
+            models
+        }
+        Err(e) => {
+            let _ = write!(out, "\r\x1b[K");
+            let _ = out.flush();
+            println!(
+                "  {YELLOW}!{RESET} {DIM}Could not list models ({e}); enter a model id.{RESET}"
+            );
+            return prompt_model_free_text(default_model, current_override).await;
+        }
+    };
+
+    if fetched.is_empty() {
+        println!("  {YELLOW}!{RESET} {DIM}No models returned; enter a model id.{RESET}");
+        return prompt_model_free_text(default_model, current_override).await;
+    }
+
+    let (labels, items, default_idx) = build_model_menu(fetched, default_model, current_override);
+    let Some(idx) = select_from_list("Model".into(), labels, default_idx).await? else {
+        return Ok(None);
+    };
+    match items.get(idx) {
+        Some(ModelMenuItem::Id(id)) => Ok(Some(model_override_for(id, default_model))),
+        Some(ModelMenuItem::FreeText) => {
+            prompt_model_free_text(default_model, current_override).await
+        }
+        None => Ok(None),
     }
 }
 
 async fn prompt_approval(default: ApprovalPolicy) -> Result<Option<ApprovalPolicy>> {
-    let options = [
+    let policies = [
         ApprovalPolicy::Always,
         ApprovalPolicy::DangerousOnly,
         ApprovalPolicy::Never,
     ];
-    loop {
-        println!("  {BOLD}Approval policy{RESET}");
-        for (idx, policy) in options.iter().enumerate() {
-            let marker = if *policy == default { " *" } else { "" };
-            println!("    {DIM}{}){RESET} {}{}", idx + 1, policy.as_str(), marker);
-        }
-        let default_idx = options
-            .iter()
-            .position(|p| *p == default)
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let input = plain_read_line(format!(
-            "  {CYAN}❯{RESET} {DIM}Select approval [{default_idx}]:{RESET} "
-        ))
-        .await?;
-        let trimmed = input.trim().to_lowercase();
-        if is_cancel(&trimmed) {
-            return Ok(None);
-        }
-        if trimmed.is_empty() {
-            return Ok(Some(default));
-        }
-        if let Some(parsed) = ApprovalPolicy::parse(&trimmed) {
-            return Ok(Some(parsed));
-        }
-        if let Some(parsed) = trimmed
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|idx| options.get(idx).copied())
-        {
-            return Ok(Some(parsed));
-        }
-        println!("  {YELLOW}!{RESET} {DIM}Unknown approval policy: {trimmed}{RESET}");
-    }
+    let options: Vec<String> = policies
+        .iter()
+        .map(|p| {
+            if *p == default {
+                format!("{} *", p.as_str())
+            } else {
+                p.as_str().to_string()
+            }
+        })
+        .collect();
+    let default_idx = policies.iter().position(|p| *p == default).unwrap_or(0);
+    let Some(idx) = select_from_list("Approval policy".into(), options, default_idx).await? else {
+        return Ok(None);
+    };
+    Ok(policies.get(idx).copied())
 }
 
 async fn prompt_tool_selection(default: ToolSelection) -> Result<Option<ToolSelection>> {
-    let options = [ToolSelection::Auto, ToolSelection::Fixed];
-    loop {
-        println!("  {BOLD}Tool mode{RESET}");
-        for (idx, selection) in options.iter().enumerate() {
-            let marker = if *selection == default { " *" } else { "" };
-            println!(
-                "    {DIM}{}){RESET} {}{}",
-                idx + 1,
-                selection.as_str(),
-                marker
-            );
-        }
-        let default_idx = options
-            .iter()
-            .position(|s| *s == default)
-            .map(|i| i + 1)
-            .unwrap_or(1);
-        let input = plain_read_line(format!(
-            "  {CYAN}❯{RESET} {DIM}Select tool mode [{default_idx}]:{RESET} "
-        ))
-        .await?;
-        let trimmed = input.trim().to_lowercase();
-        if is_cancel(&trimmed) {
-            return Ok(None);
-        }
-        if trimmed.is_empty() {
-            return Ok(Some(default));
-        }
-        if let Some(parsed) = ToolSelection::parse(&trimmed) {
-            return Ok(Some(parsed));
-        }
-        if let Some(parsed) = trimmed
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|idx| options.get(idx).copied())
-        {
-            return Ok(Some(parsed));
-        }
-        println!("  {YELLOW}!{RESET} {DIM}Unknown tool mode: {trimmed}{RESET}");
-    }
+    let modes = [ToolSelection::Auto, ToolSelection::Fixed];
+    let options: Vec<String> = modes
+        .iter()
+        .map(|s| {
+            if *s == default {
+                format!("{} *", s.as_str())
+            } else {
+                s.as_str().to_string()
+            }
+        })
+        .collect();
+    let default_idx = modes.iter().position(|s| *s == default).unwrap_or(0);
+    let Some(idx) = select_from_list("Tool mode".into(), options, default_idx).await? else {
+        return Ok(None);
+    };
+    Ok(modes.get(idx).copied())
 }
 
 async fn probe_setup_backend(config: &AgentConfig) {
@@ -495,5 +559,59 @@ mod tests {
         } else {
             std::env::remove_var(NO_WIZARD_ENV);
         }
+    }
+
+    #[test]
+    fn model_menu_lists_fetched_ids_with_free_text_last() {
+        let (labels, items, default_idx) = build_model_menu(
+            vec!["zeta".into(), "alpha".into(), "alpha".into()],
+            "alpha",
+            None,
+        );
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some(MODEL_FREE_TEXT_LABEL)
+        );
+        assert_eq!(items.last(), Some(&ModelMenuItem::FreeText));
+        // Sorted, deduped, default marked, free-text trailing.
+        assert_eq!(
+            labels,
+            vec![
+                "alpha *".to_string(),
+                "zeta".to_string(),
+                MODEL_FREE_TEXT_LABEL.to_string()
+            ]
+        );
+        assert_eq!(default_idx, 0);
+        assert_eq!(
+            items,
+            vec![
+                ModelMenuItem::Id("alpha".into()),
+                ModelMenuItem::Id("zeta".into()),
+                ModelMenuItem::FreeText
+            ]
+        );
+    }
+
+    #[test]
+    fn model_menu_injects_default_and_prefers_current_override() {
+        let (labels, items, default_idx) =
+            build_model_menu(vec!["other".into()], "backend-default", Some("my-custom"));
+        assert!(items.contains(&ModelMenuItem::Id("backend-default".into())));
+        assert!(items.contains(&ModelMenuItem::Id("my-custom".into())));
+        assert!(items.contains(&ModelMenuItem::Id("other".into())));
+        assert_eq!(items.last(), Some(&ModelMenuItem::FreeText));
+        assert!(labels[default_idx].starts_with("my-custom"));
+        assert!(labels[default_idx].contains('*'));
+    }
+
+    #[test]
+    fn model_override_omits_backend_default() {
+        assert_eq!(model_override_for("gpt-4o-mini", "gpt-4o-mini"), None);
+        assert_eq!(model_override_for("  ", "gpt-4o-mini"), None);
+        assert_eq!(
+            model_override_for("gpt-4o", "gpt-4o-mini"),
+            Some("gpt-4o".into())
+        );
     }
 }
