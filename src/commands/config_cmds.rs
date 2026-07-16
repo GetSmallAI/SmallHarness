@@ -503,19 +503,25 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
     let chosen: Option<BackendName> = if !args.is_empty() {
         BackendName::parse(args)
     } else {
-        println!(
-            "  {DIM}Current:{RESET} {CYAN}{}{RESET}",
-            state.config.backend.as_str()
-        );
-        for (i, b) in BackendName::all().iter().enumerate() {
-            println!("  {DIM}{}){RESET} {}", i + 1, b.as_str());
+        let backends = BackendName::all();
+        let options: Vec<String> = backends
+            .iter()
+            .map(|b| {
+                if *b == state.config.backend {
+                    format!("{} *", b.as_str())
+                } else {
+                    b.as_str().to_string()
+                }
+            })
+            .collect();
+        let default_idx = backends
+            .iter()
+            .position(|b| *b == state.config.backend)
+            .unwrap_or(0);
+        match select_from_list("Backend".into(), options, default_idx).await? {
+            Some(idx) => backends.get(idx).copied(),
+            None => None,
         }
-        let prompt = format!("  {DIM}Select (1-{}):{RESET} ", BackendName::all().len());
-        let pick = plain_read_line(prompt).await?.trim().to_string();
-        pick.parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| BackendName::all().get(i).copied())
     };
     let Some(chosen) = chosen else {
         println!("  {DIM}Cancelled.{RESET}");
@@ -581,6 +587,14 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         );
         return Ok(());
     }
+
+    let backend_default = default_model(&state.backend, None);
+    let current = state
+        .config
+        .model_override
+        .clone()
+        .unwrap_or_else(|| state.model.clone());
+
     let mut out = std::io::stdout();
     let _ = write!(
         out,
@@ -589,66 +603,98 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     );
     let _ = out.flush();
     let ids = match list_models(&state.http, &state.backend).await {
-        Ok(v) => v,
+        Ok(v) => {
+            let _ = write!(out, "\r\x1b[K");
+            let _ = out.flush();
+            v
+        }
         Err(e) => {
             let _ = write!(out, "\r\x1b[K");
-            println!("  {RED}✗{RESET} {DIM}Failed: {e}{RESET}");
-            return Ok(());
-        }
-    };
-    let _ = write!(out, "\r\x1b[K");
-    let _ = out.flush();
-    if ids.is_empty() {
-        println!("  {DIM}No models available.{RESET}");
-        return Ok(());
-    }
-    let prompt = format!("  {DIM}Filter (blank for all):{RESET} ");
-    let filter = plain_read_line(prompt).await?.trim().to_lowercase();
-    let matches: Vec<String> = if filter.is_empty() {
-        ids
-    } else {
-        ids.into_iter()
-            .filter(|m| m.to_lowercase().contains(&filter))
-            .collect()
-    };
-    let total = matches.len();
-    let shown: Vec<String> = matches.into_iter().take(20).collect();
-    if shown.is_empty() {
-        println!("  {DIM}No matches.{RESET}");
-        return Ok(());
-    }
-    let name_width = shown.iter().map(|m| m.len()).max().unwrap_or(0);
-    for (i, m) in shown.iter().enumerate() {
-        match catalog::lookup(state.config.backend, m) {
-            Some(info) => println!(
-                "  {DIM}{:>2}){RESET} {:<width$}  {DIM}{}{RESET}",
-                i + 1,
-                m,
-                catalog::format_cost_label(info),
-                width = name_width
-            ),
-            None => println!("  {DIM}{:>2}){RESET} {}", i + 1, m),
-        }
-    }
-    if total > shown.len() {
-        println!("  {DIM}…and {} more{RESET}", total - shown.len());
-    }
-    let prompt = format!("  {DIM}Select (1-{}):{RESET} ", shown.len());
-    let pick = plain_read_line(prompt).await?.trim().to_string();
-    if let Some(idx) = pick.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
-        if let Some(m) = shown.get(idx) {
-            state.config.model_override = Some(m.clone());
-            state.active_effort = None;
-            state.resolve_model();
+            let _ = out.flush();
             println!(
-                "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
-                state.model
+                "  {YELLOW}!{RESET} {DIM}Could not list models ({e}); enter a model id.{RESET}"
+            );
+            return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
+        }
+    };
+    if ids.is_empty() {
+        println!("  {YELLOW}!{RESET} {DIM}No models returned; enter a model id.{RESET}");
+        return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
+    }
+
+    let (mut labels, items, default_idx) =
+        build_model_menu(ids, &backend_default, Some(current.as_str()));
+    // Append catalog pricing/context when known (cloud models) so the arrow
+    // menu keeps the extra detail the old numbered list showed.
+    for (label, item) in labels.iter_mut().zip(items.iter()) {
+        if let ModelMenuItem::Id(id) = item {
+            if let Some(info) = catalog::lookup(state.config.backend, id) {
+                *label = format!("{label}  {}", catalog::format_cost_label(info));
+            }
+        }
+    }
+
+    let Some(idx) = select_from_list("Model".into(), labels, default_idx).await? else {
+        println!("  {DIM}Cancelled.{RESET}");
+        return Ok(());
+    };
+    match items.get(idx) {
+        Some(ModelMenuItem::Id(id)) => {
+            apply_model_choice(state, model_override_for(id, &backend_default));
+        }
+        Some(ModelMenuItem::FreeText) => {
+            apply_model_free_text(state, &backend_default, Some(current.as_str())).await?;
+        }
+        None => println!("  {DIM}Cancelled.{RESET}"),
+    }
+    Ok(())
+}
+
+async fn apply_model_free_text(
+    state: &mut AppState,
+    backend_default: &str,
+    current: Option<&str>,
+) -> Result<()> {
+    let prompt = if let Some(current) = current {
+        format!(
+            "  {CYAN}❯{RESET} {DIM}Model id [current: {current}; blank: {backend_default}]:{RESET} "
+        )
+    } else {
+        format!("  {CYAN}❯{RESET} {DIM}Model id [blank: {backend_default}]:{RESET} ")
+    };
+    let input = plain_read_line(prompt).await?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        apply_model_choice(state, None);
+        return Ok(());
+    }
+    if matches!(trimmed.to_lowercase().as_str(), "q" | "quit" | "cancel") {
+        println!("  {DIM}Cancelled.{RESET}");
+        return Ok(());
+    }
+    if matches!(state.config.backend, BackendName::OpenAiCodex) {
+        let Some(canonical) = crate::codex_responses::canonical_codex_model(trimmed) else {
+            println!(
+                "  {RED}✗{RESET} {DIM}{trimmed} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
+                crate::codex_responses::codex_model_list().join(", ")
             );
             return Ok(());
-        }
+        };
+        apply_model_choice(state, model_override_for(canonical, backend_default));
+        return Ok(());
     }
-    println!("  {DIM}Cancelled.{RESET}");
+    apply_model_choice(state, model_override_for(trimmed, backend_default));
     Ok(())
+}
+
+fn apply_model_choice(state: &mut AppState, model_override: Option<String>) {
+    state.config.model_override = model_override;
+    state.active_effort = None;
+    state.resolve_model();
+    println!(
+        "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
+        state.model
+    );
 }
 
 pub(super) fn cmd_tools(args: &str, state: &mut AppState) {

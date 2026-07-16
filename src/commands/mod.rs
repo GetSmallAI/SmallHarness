@@ -38,7 +38,7 @@ use crate::handoff::{
     render_handoff_prompt, should_refuse_cloud_handoff,
 };
 use crate::hardware::{detect_hardware_spec, save_hardware_summary, HardwareSpec};
-use crate::input::plain_read_line;
+use crate::input::{plain_read_line, select_from_list};
 use crate::iterate_loop::{collect_diff_context, parse_iterate_args, run_iterate_loop};
 use crate::model_system::{EffortLevel, ModelRef, TaskComplexity};
 use crate::openai::{
@@ -72,6 +72,7 @@ use crate::session::{
 };
 use crate::session_paths::{apply_path_session_state, PathStore, DEFAULT_PATH_ID};
 use crate::session_turn::{run_user_turn, TurnOptions};
+use crate::setup::{build_model_menu, model_override_for, ModelMenuItem};
 use crate::shipcheck::{
     collect_shipcheck, collect_shipcheck_with_tests, default_export_path, file_status_label,
     render_markdown as render_shipcheck_markdown, ShipcheckSnapshot,
