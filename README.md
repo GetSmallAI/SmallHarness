@@ -297,7 +297,7 @@ persistently in `agent.config.json`.
 | Policy | Behavior |
 |--------|----------|
 | `always` (default) | Every mutating call prompts you, with a diff preview |
-| `dangerous-only` | File mutations and shell commands not clearly recognized as non-destructive prompt |
+| `dangerous-only` | File mutations and shell commands not clearly recognized as non-destructive prompt. Shell also strips hydrated API-key env vars from the child process. |
 | `never` | No prompts — use only when you trust the model |
 
 At each prompt: `[y]es`, `[n]o`, `[a]lways for this tool`, or `[s]ession-allow
