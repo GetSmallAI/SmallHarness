@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Conservative shell approvals.** `dangerous-only` now skips approval only
+  for commands that Small Harness can clearly classify as non-destructive.
+  Destructive Git operations, file-moving and in-place editing commands,
+  redirects, interpreters, compound shell syntax, and unknown commands prompt
+  instead of relying on a bypass-prone dangerous-command regex. Shell child
+  processes also strip hydrated API-key env vars so approved or auto-run
+  commands cannot casually exfiltrate `OPENAI_API_KEY` / `OPENROUTER_API_KEY`.
+
 ## [1.2.1] - 2026-07-14
 
 ### Added
