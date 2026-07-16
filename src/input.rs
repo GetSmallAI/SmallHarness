@@ -5,7 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-use crate::theme::{ACCENT, BOLD, MUTED, RESET};
+use crate::theme::{ACCENT, BOLD, MUTED, PAD, POINT, RESET};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryEntry {
@@ -354,7 +354,9 @@ fn read_plain_outcome(
                 }
                 if let Some(outcome) = control_key_outcome(code, modifiers) {
                     redraw(&mut out, &chars, cursor, sel, true)?;
-                    writeln!(out)?;
+                    // Raw mode: LF alone stays on the same column; CR+LF
+                    // parks the cursor at column 0 of the next line.
+                    write!(out, "\r\n")?;
                     out.flush()?;
                     return Ok(outcome);
                 }
@@ -362,7 +364,10 @@ fn read_plain_outcome(
                     KeyCode::Enter => {
                         // Clear any open menu, then drop to the next line.
                         redraw(&mut out, &chars, cursor, sel, true)?;
-                        writeln!(out)?;
+                        // Raw mode: LF alone stays on the same column; CR+LF
+                        // parks the cursor at column 0 of the next line so
+                        // subsequent UI (e.g. select menus) is left-aligned.
+                        write!(out, "\r\n")?;
                         out.flush()?;
                         return Ok(ReadLineOutcome::Line(chars.iter().collect()));
                     }
@@ -477,6 +482,223 @@ fn control_key_outcome(code: KeyCode, modifiers: KeyModifiers) -> Option<ReadLin
         KeyCode::Char('c') => Some(ReadLineOutcome::Interrupted),
         _ => None,
     }
+}
+
+/// Interactive single-choice menu (↑/↓, Enter, number keys, q/Esc).
+///
+/// Returns `Some(index)` on confirm, `None` on cancel. Ctrl-C exits the process
+/// the same way as [`plain_read_line`].
+pub async fn select_from_list(
+    title: String,
+    options: Vec<String>,
+    default_idx: usize,
+) -> Result<Option<usize>> {
+    if options.is_empty() {
+        return Ok(None);
+    }
+    let outcome =
+        tokio::task::spawn_blocking(move || read_select_outcome(&title, &options, default_idx))
+            .await??;
+    match outcome {
+        SelectOutcome::Selected(i) => Ok(Some(i)),
+        SelectOutcome::Cancelled => Ok(None),
+        SelectOutcome::Interrupted => std::process::exit(0),
+        SelectOutcome::Eof => Err(anyhow!("input closed")),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectOutcome {
+    Selected(usize),
+    Cancelled,
+    Interrupted,
+    Eof,
+}
+
+/// Visible option rows in a select menu before it starts scrolling. Long
+/// lists (e.g. OpenRouter /models) stay usable without flooding the terminal.
+const SELECT_MAX_ROWS: usize = 12;
+
+/// Pure frame for the select menu. Returns the bytes to write and the number of
+/// lines drawn (so the interactive loop can move the cursor back up to redraw).
+fn render_select_menu(title: &str, options: &[String], selected: usize) -> (String, usize) {
+    let n = options.len();
+    let selected = if n == 0 { 0 } else { selected.min(n - 1) };
+    let mut s = String::new();
+    let mut rows = 0usize;
+
+    s.push_str(&format!("{PAD}{BOLD}{title}{RESET}\r\n"));
+    rows += 1;
+
+    let start = if n <= SELECT_MAX_ROWS || selected < SELECT_MAX_ROWS {
+        0
+    } else {
+        // Keep the highlighted row inside the window as the user arrows past
+        // the first page (same strategy as the slash-command completion menu).
+        selected + 1 - SELECT_MAX_ROWS
+    };
+    let shown = (n - start).min(SELECT_MAX_ROWS);
+
+    if start > 0 {
+        s.push_str(&format!("{PAD}{MUTED}… {start} above{RESET}\r\n"));
+        rows += 1;
+    }
+
+    for (offset, label) in options.iter().skip(start).take(shown).enumerate() {
+        let i = start + offset;
+        let num = i + 1;
+        if i == selected {
+            s.push_str(&format!(
+                "{PAD}{ACCENT}{POINT} {BOLD}{num}) {label}{RESET}\r\n"
+            ));
+        } else {
+            s.push_str(&format!("{PAD}  {MUTED}{num}){RESET} {label}\r\n"));
+        }
+        rows += 1;
+    }
+
+    if start + shown < n {
+        s.push_str(&format!(
+            "{PAD}{MUTED}… +{} more{RESET}\r\n",
+            n - start - shown
+        ));
+        rows += 1;
+    }
+
+    s.push_str(&format!(
+        "{PAD}{MUTED}↑/↓ move · Enter select · 1-9 jump · q cancel{RESET}"
+    ));
+    rows += 1;
+    (s, rows)
+}
+
+fn read_select_outcome(
+    title: &str,
+    options: &[String],
+    default_idx: usize,
+) -> Result<SelectOutcome> {
+    let n = options.len();
+    if n == 0 {
+        return Ok(SelectOutcome::Cancelled);
+    }
+    let mut selected = default_idx.min(n - 1);
+    let mut out = std::io::stdout();
+
+    crossterm::terminal::enable_raw_mode()?;
+    let result = (|| -> Result<SelectOutcome> {
+        let mut first = true;
+        // Track the previous frame height: overflow markers can add/remove a
+        // line as the window scrolls, so we cannot assume a fixed row count.
+        let mut prev_rows = 0usize;
+        loop {
+            let (frame, rows) = render_select_menu(title, options, selected);
+            if !first {
+                // Cursor sits on the last drawn line (hint has no trailing
+                // newline), so go up `prev_rows - 1` to the title, then clear.
+                let up = prev_rows.saturating_sub(1);
+                if up > 0 {
+                    write!(out, "\x1b[{up}A")?;
+                }
+                write!(out, "\r\x1b[0J")?;
+            } else {
+                // Always start the title at column 0. Callers may leave the
+                // cursor mid-line (e.g. raw-mode LF after the prompt), which
+                // made the bold title jump left on the first arrow redraw.
+                write!(out, "\r")?;
+            }
+            first = false;
+            write!(out, "{frame}")?;
+            out.flush()?;
+            prev_rows = rows;
+
+            loop {
+                let Event::Key(KeyEvent {
+                    code,
+                    modifiers,
+                    kind,
+                    ..
+                }) = crossterm::event::read()?
+                else {
+                    continue;
+                };
+                if kind == KeyEventKind::Release {
+                    continue;
+                }
+                if let Some(ctrl) = control_key_outcome(code, modifiers) {
+                    // Park the cursor on the next line so the next println
+                    // doesn't overwrite the menu.
+                    write!(out, "\r\n")?;
+                    out.flush()?;
+                    return Ok(match ctrl {
+                        ReadLineOutcome::Interrupted => SelectOutcome::Interrupted,
+                        ReadLineOutcome::Eof => SelectOutcome::Eof,
+                        ReadLineOutcome::Line(_) => unreachable!(),
+                    });
+                }
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        break;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(n - 1);
+                        break;
+                    }
+                    KeyCode::Home => {
+                        selected = 0;
+                        break;
+                    }
+                    KeyCode::End => {
+                        selected = n - 1;
+                        break;
+                    }
+                    KeyCode::Enter => {
+                        // Final paint so the confirmed row stays highlighted,
+                        // then drop to the next line for subsequent output.
+                        let (frame, _rows) = render_select_menu(title, options, selected);
+                        let up = prev_rows.saturating_sub(1);
+                        if up > 0 {
+                            write!(out, "\x1b[{up}A")?;
+                        }
+                        write!(out, "\r\x1b[0J{frame}\r\n")?;
+                        out.flush()?;
+                        return Ok(SelectOutcome::Selected(selected));
+                    }
+                    KeyCode::Esc => {
+                        write!(out, "\r\n")?;
+                        out.flush()?;
+                        return Ok(SelectOutcome::Cancelled);
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        write!(out, "\r\n")?;
+                        out.flush()?;
+                        return Ok(SelectOutcome::Cancelled);
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        let digit = c.to_digit(10).unwrap_or(0) as usize;
+                        // Single-digit jump only (same as the original wizard).
+                        // Lists with 10+ items use arrows past item 9.
+                        if (1..=n.min(9)).contains(&digit) {
+                            selected = digit - 1;
+                            // Number jump confirms immediately (power-user path
+                            // matching the old "type a number + Enter" flow).
+                            let (frame, _rows) = render_select_menu(title, options, selected);
+                            let up = prev_rows.saturating_sub(1);
+                            if up > 0 {
+                                write!(out, "\x1b[{up}A")?;
+                            }
+                            write!(out, "\r\x1b[0J{frame}\r\n")?;
+                            out.flush()?;
+                            return Ok(SelectOutcome::Selected(selected));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+    crossterm::terminal::disable_raw_mode()?;
+    result
 }
 
 #[cfg(test)]
@@ -602,5 +824,85 @@ mod tests {
             control_key_outcome(KeyCode::Char('d'), KeyModifiers::NONE),
             None
         );
+    }
+
+    #[test]
+    fn select_menu_highlights_selected_row_and_counts_lines() {
+        let options = vec!["ollama".into(), "openai *".into(), "openrouter".into()];
+        let (frame, rows) = render_select_menu("Backend", &options, 1);
+        assert_eq!(rows, 5, "title + 3 options + hint");
+        assert!(frame.contains("Backend"), "title missing: {frame:?}");
+        assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
+        // Title and rows share the left gutter (PAD). The interactive loop also
+        // CR's to column 0 before the first paint so this indent is stable.
+        assert!(
+            frame.starts_with(PAD),
+            "title must start at the left gutter: {frame:?}"
+        );
+        let first_option = frame.lines().nth(1).expect("first option");
+        assert!(
+            first_option.starts_with(PAD),
+            "options must share the title gutter: {first_option:?}"
+        );
+        // Selected row keeps number+label contiguous (bold). Unselected rows
+        // insert a RESET between the muted number and the label.
+        assert!(
+            frame.contains("2) openai *"),
+            "selected row missing: {frame:?}"
+        );
+        assert!(frame.contains("ollama"), "row 1 label missing: {frame:?}");
+        assert!(
+            frame.contains("openrouter"),
+            "row 3 label missing: {frame:?}"
+        );
+        assert!(frame.contains("1)"), "row 1 number missing: {frame:?}");
+        assert!(frame.contains("3)"), "row 3 number missing: {frame:?}");
+        assert!(frame.contains("↑/↓ move"), "hint missing: {frame:?}");
+        let sel_pos = frame.find("2) openai *").expect("selected label");
+        let pointer_pos = frame.find('▸').expect("pointer");
+        assert!(
+            pointer_pos < sel_pos,
+            "pointer should precede selected label"
+        );
+    }
+
+    #[test]
+    fn select_menu_clamps_selected_index() {
+        let options = vec!["a".into(), "b".into()];
+        let (frame, rows) = render_select_menu("Pick", &options, 99);
+        assert_eq!(rows, 4, "title + 2 options + hint");
+        // Out-of-range selection clamps to last item (index 1 → "2) b").
+        let pointer = frame.find('▸').expect("pointer");
+        let b_pos = frame.find("2) b").expect("b row");
+        let a_pos = frame.find('a').expect("a label");
+        assert!(
+            a_pos < pointer && pointer < b_pos,
+            "pointer should sit on the last row when clamped: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn select_menu_scrolls_long_lists() {
+        let options: Vec<String> = (1..=20).map(|i| format!("model-{i:02}")).collect();
+        let (frame, rows) = render_select_menu("Model", &options, 15);
+        // title + "… above" + 12 options + "… more" + hint
+        assert_eq!(rows, 16, "windowed frame height: {frame:?}");
+        assert!(
+            frame.contains("… 4 above"),
+            "top overflow missing: {frame:?}"
+        );
+        assert!(
+            frame.contains("… +4 more"),
+            "bottom overflow missing: {frame:?}"
+        );
+        assert!(
+            frame.contains("16) model-16"),
+            "selected row should be visible: {frame:?}"
+        );
+        assert!(
+            !frame.contains("model-01"),
+            "first page should scroll out: {frame:?}"
+        );
+        assert!(frame.contains("▸"), "selected marker missing: {frame:?}");
     }
 }
