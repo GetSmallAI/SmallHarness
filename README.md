@@ -249,7 +249,11 @@ Switch at runtime with `/backend <name>`. Endpoint overrides:
 
 Each backend has one sensible default; local backends default to a 7B coder
 that runs on modest hardware. Override any time with `/model`, `AGENT_MODEL`,
-or `modelOverride` in your config.
+or `modelOverride` in your config. Append `--default` to `/model` or `/backend`
+to write the choice into `agent.config.json` (surgical merge: only `backend` and
+`modelOverride`). `/model --default` pins the active model; `/backend --default`
+pins the active backend and clears `modelOverride` so the next launch uses that
+backend's built-in default model.
 
 | Backend | Default model |
 |---------|---------------|
@@ -354,8 +358,8 @@ this exact call`. The session cache resets on `/new`.
 
 **Backend, model, tools**
 ```
-/backend <name>        switch backend
-/model [id]            list / pick a model (shows context + cost when known)
+/backend <name> [--default]  switch backend; --default writes agent.config.json
+/model [id] [--default]      list / pick a model; --default pins backend+model
 /tools auto|fixed|<…>  show or set the active tool pool
 /auth                  manage API keys and OAuth credentials
 /login openai-codex    sign in with ChatGPT/Codex subscription OAuth
@@ -939,8 +943,8 @@ Full list with comments in [`.env.example`](.env.example).
 
 ### `agent.config.json`
 
-For project-level defaults, run `/setup` or drop a JSON file at the repo
-root. Common shape:
+For project-level defaults, run `/setup`, use `/backend --default` /
+`/model --default`, or drop a JSON file at the repo root. Common shape:
 
 ```json
 {

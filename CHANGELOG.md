@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`/model --default` and `/backend --default`.** Pin the active (or newly
+  selected) backend/model into `agent.config.json` without re-running `/setup`.
+  `/model … --default` writes `backend` + `modelOverride`; `/backend … --default`
+  writes `backend` and clears `modelOverride`. Session changes still apply if the
+  file cannot be written; invalid JSON is never overwritten.
+
 ## [1.2.2] - 2026-07-15
 
 ### Fixed

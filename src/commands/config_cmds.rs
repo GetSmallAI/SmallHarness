@@ -499,9 +499,48 @@ fn guess_image_mime(path: &std::path::Path) -> &'static str {
     }
 }
 
+fn report_default_persist(result: Result<()>) {
+    match result {
+        Ok(()) => println!(
+            "  {DIM}· saved default in {RESET}{CYAN}{}{RESET}",
+            crate::config::AGENT_CONFIG_PATH
+        ),
+        Err(e) => println!("  {RED}✗{RESET} {DIM}could not save default: {e}{RESET}"),
+    }
+}
+
+fn persist_model_as_default(state: &AppState) {
+    report_default_persist(crate::config::persist_backend_model_defaults(
+        Path::new(crate::config::AGENT_CONFIG_PATH),
+        state.config.backend,
+        Some(state.model.as_str()),
+    ));
+}
+
+fn persist_backend_as_default(state: &AppState) {
+    // Clears modelOverride on disk so the next launch uses the backend default.
+    report_default_persist(crate::config::persist_backend_model_defaults(
+        Path::new(crate::config::AGENT_CONFIG_PATH),
+        state.config.backend,
+        None,
+    ));
+}
+
 pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
-    let chosen: Option<BackendName> = if !args.is_empty() {
-        BackendName::parse(args)
+    let (rest, as_default) = crate::config::strip_default_flag(args);
+
+    // Pin the current backend as project default without switching.
+    if rest.is_empty() && as_default {
+        println!(
+            "  {GREEN}✓{RESET} {DIM}default backend →{RESET} {CYAN}{}{RESET} {DIM}(modelOverride cleared on disk){RESET}",
+            state.config.backend.as_str()
+        );
+        persist_backend_as_default(state);
+        return Ok(());
+    }
+
+    let chosen: Option<BackendName> = if !rest.is_empty() {
+        BackendName::parse(&rest)
     } else {
         println!(
             "  {DIM}Current:{RESET} {CYAN}{}{RESET}",
@@ -554,23 +593,42 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         chosen.as_str(),
         state.model
     );
+    if as_default {
+        persist_backend_as_default(state);
+    }
     Ok(())
 }
 
 pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     use std::io::Write;
-    if !args.is_empty() {
+    let (rest, as_default) = crate::config::strip_default_flag(args);
+
+    // Pin the currently active model (+ backend) as project default.
+    if rest.is_empty() && as_default {
+        // Materialize the resolved id into model_override so memory matches disk.
+        if state.config.model_override.as_deref() != Some(state.model.as_str()) {
+            state.config.model_override = Some(state.model.clone());
+        }
+        println!(
+            "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
+            state.model
+        );
+        persist_model_as_default(state);
+        return Ok(());
+    }
+
+    if !rest.is_empty() {
         let model_override = if matches!(state.config.backend, BackendName::OpenAiCodex) {
-            let Some(canonical) = crate::codex_responses::canonical_codex_model(args) else {
+            let Some(canonical) = crate::codex_responses::canonical_codex_model(&rest) else {
                 println!(
-                    "  {RED}✗{RESET} {DIM}{args} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
+                    "  {RED}✗{RESET} {DIM}{rest} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
                     crate::codex_responses::codex_model_list().join(", ")
                 );
                 return Ok(());
             };
             canonical.to_string()
         } else {
-            args.to_string()
+            rest
         };
         state.config.model_override = Some(model_override);
         state.active_effort = None;
@@ -579,6 +637,9 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
             "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
             state.model
         );
+        if as_default {
+            persist_model_as_default(state);
+        }
         return Ok(());
     }
     let mut out = std::io::stdout();
