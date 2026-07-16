@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.2-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -297,7 +297,7 @@ persistently in `agent.config.json`.
 | Policy | Behavior |
 |--------|----------|
 | `always` (default) | Every mutating call prompts you, with a diff preview |
-| `dangerous-only` | Only `shell` calls matching `rm`, `sudo`, `chmod`, `dd`, `mkfs`, etc. prompt |
+| `dangerous-only` | File mutations and shell commands not clearly recognized as non-destructive prompt. Shell also strips hydrated API-key env vars from the child process. |
 | `never` | No prompts — use only when you trust the model |
 
 At each prompt: `[y]es`, `[n]o`, `[a]lways for this tool`, or `[s]ession-allow
