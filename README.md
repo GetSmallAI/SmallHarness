@@ -253,7 +253,10 @@ or `modelOverride` in your config. Append `--default` to `/model` or `/backend`
 to write the choice into `agent.config.json` (surgical merge: only `backend` and
 `modelOverride`). `/model --default` pins the active model; `/backend --default`
 pins the active backend and clears `modelOverride` so the next launch uses that
-backend's built-in default model.
+backend's built-in default model. In the interactive pickers you can also append
+`--default` to a selection (e.g. `3 --default`) to pin it as you choose, or
+answer the `y/N` save prompt afterwards; each entry is tagged `(selected)` for
+the live session choice and `(default)` for what's persisted on disk.
 
 | Backend | Default model |
 |---------|---------------|
@@ -434,12 +437,16 @@ when present. If a cloud model does not expose cost, the turn shows `$?` and
 prefixes the session total with `≥` to signal it is a lower bound, not a
 fiction.
 
-The `/model` picker shows the same data while you choose:
+The `/model` picker shows the same data while you choose, tagging the live
+session choice `(selected)` and the value persisted in `agent.config.json`
+`(default)`:
 
 ```text
-   1) gpt-4o-mini            128k ctx · $0.15/$0.60 per Mtoken
-   2) gpt-4o                 128k ctx · $2.50/$10.00 per Mtoken
-   3) o1-mini                128k ctx · $3.00/$12.00 per Mtoken
+   1) gpt-4o-mini  (selected) (default)   128k ctx · $0.15/$0.60 per Mtoken
+   2) gpt-4o                               128k ctx · $2.50/$10.00 per Mtoken
+   3) o1-mini                              128k ctx · $3.00/$12.00 per Mtoken
+
+   Select (1-3) · append --default to pin:
 ```
 
 ### Claude Fable tracker

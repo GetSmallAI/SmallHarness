@@ -1120,6 +1120,35 @@ pub fn strip_default_flag(args: &str) -> (String, bool) {
     (kept.join(" "), as_default)
 }
 
+/// Parse an interactive picker reply like `3` or `3 --default`.
+///
+/// Only the literal token `--default` marks persistence intent (not `d` / `!`).
+/// Returns `(1-based selection text without the flag, as_default)`.
+pub fn parse_picker_selection(input: &str) -> (String, bool) {
+    strip_default_flag(input)
+}
+
+/// The backend/model currently persisted as project defaults in
+/// `agent.config.json`, used to mark `(default)` in interactive pickers.
+///
+/// Returns `(backend, model_override)`; either is `None` when the file is
+/// missing, unreadable, not a JSON object, or omits that key. This reflects
+/// what would load on next launch, independent of the live session.
+pub fn persisted_defaults() -> (Option<BackendName>, Option<String>) {
+    persisted_defaults_from(Path::new(AGENT_CONFIG_PATH))
+}
+
+fn persisted_defaults_from(path: &Path) -> (Option<BackendName>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(file) = serde_json::from_str::<FileConfig>(&text) else {
+        return (None, None);
+    };
+    let backend = file.backend.as_deref().and_then(BackendName::parse);
+    (backend, file.model_override)
+}
+
 /// Surgically merge `backend` / `modelOverride` into `agent.config.json`.
 ///
 /// - Creates the file when missing.
@@ -1430,6 +1459,45 @@ mod tests {
             strip_default_flag("--default foo bar"),
             ("foo bar".into(), true)
         );
+    }
+
+    #[test]
+    fn parse_picker_selection_splits_index_and_flag() {
+        assert_eq!(parse_picker_selection("3"), ("3".into(), false));
+        assert_eq!(parse_picker_selection("3 --default"), ("3".into(), true));
+        assert_eq!(parse_picker_selection("--default 3"), ("3".into(), true));
+        // Bare index only; sugar like `d`/`!` is intentionally not persistence.
+        assert_eq!(parse_picker_selection("3d"), ("3d".into(), false));
+    }
+
+    #[test]
+    fn persisted_defaults_reads_backend_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+
+        // Missing file → no defaults.
+        assert_eq!(persisted_defaults_from(&path), (None, None));
+
+        std::fs::write(
+            &path,
+            r#"{ "backend": "openrouter", "modelOverride": "x-ai/grok-4.5" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_defaults_from(&path),
+            (Some(BackendName::Openrouter), Some("x-ai/grok-4.5".into()))
+        );
+
+        // Backend without a pinned model → only the backend is a default.
+        std::fs::write(&path, r#"{ "backend": "ollama" }"#).unwrap();
+        assert_eq!(
+            persisted_defaults_from(&path),
+            (Some(BackendName::Ollama), None)
+        );
+
+        // Non-object / invalid JSON is treated as no defaults, never trusted.
+        std::fs::write(&path, "not-json {").unwrap();
+        assert_eq!(persisted_defaults_from(&path), (None, None));
     }
 
     #[test]

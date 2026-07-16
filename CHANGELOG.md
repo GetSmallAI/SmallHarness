@@ -13,6 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `/model … --default` writes `backend` + `modelOverride`; `/backend … --default`
   writes `backend` and clears `modelOverride`. Session changes still apply if the
   file cannot be written; invalid JSON is never overwritten.
+- **Default-aware `/model` and `/backend` pickers.** Interactive lists now mark
+  each entry with `(selected)` when it is the live session choice and `(default)`
+  when it is what `agent.config.json` would load on next launch (both show when
+  they coincide). Append `--default` to a selection (e.g. `3 --default`) to pin
+  it as you pick; otherwise a `y/N` prompt offers to save the choice as the
+  project default.
 
 ## [1.2.2] - 2026-07-15
 

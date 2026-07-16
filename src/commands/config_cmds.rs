@@ -526,6 +526,47 @@ fn persist_backend_as_default(state: &AppState) {
     ));
 }
 
+/// Build the trailing picker marker for an entry: `(selected)` when it is the
+/// live session choice, `(default)` when it is the value persisted in
+/// `agent.config.json`. Both may show together when they coincide.
+fn picker_marker(is_selected: bool, is_default: bool) -> String {
+    let mut out = String::new();
+    if is_selected {
+        out.push_str(&format!("  {DIM}(selected){RESET}"));
+    }
+    if is_default {
+        out.push_str(&format!("  {DIM}(default){RESET}"));
+    }
+    out
+}
+
+/// Ask whether to pin the just-selected choice as the project default.
+/// Used by interactive pickers when the user did not already pass `--default`.
+async fn confirm_save_as_default() -> Result<bool> {
+    println!(
+        "  {DIM}Save as project default in {RESET}{CYAN}{}{RESET}{DIM}? [y/N]{RESET}",
+        crate::config::AGENT_CONFIG_PATH
+    );
+    let answer = plain_read_line(format!("  {DIM}?{RESET} ")).await?;
+    let a = answer.trim().to_lowercase();
+    Ok(a == "y" || a == "yes")
+}
+
+/// After a session switch, persist if requested via flag or interactive confirm.
+async fn maybe_persist_model_default(state: &AppState, as_default: bool) -> Result<()> {
+    if as_default || confirm_save_as_default().await? {
+        persist_model_as_default(state);
+    }
+    Ok(())
+}
+
+async fn maybe_persist_backend_default(state: &AppState, as_default: bool) -> Result<()> {
+    if as_default || confirm_save_as_default().await? {
+        persist_backend_as_default(state);
+    }
+    Ok(())
+}
+
 pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
     let (rest, as_default) = crate::config::strip_default_flag(args);
 
@@ -539,6 +580,7 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         return Ok(());
     }
 
+    let mut picked_with_default = as_default;
     let chosen: Option<BackendName> = if !rest.is_empty() {
         BackendName::parse(&rest)
     } else {
@@ -546,12 +588,20 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
             "  {DIM}Current:{RESET} {CYAN}{}{RESET}",
             state.config.backend.as_str()
         );
+        let current = state.config.backend;
+        let (persisted_backend, _) = crate::config::persisted_defaults();
         for (i, b) in BackendName::all().iter().enumerate() {
-            println!("  {DIM}{}){RESET} {}", i + 1, b.as_str());
+            let marker = picker_marker(*b == current, persisted_backend == Some(*b));
+            println!("  {DIM}{}){RESET} {}{}", i + 1, b.as_str(), marker);
         }
-        let prompt = format!("  {DIM}Select (1-{}):{RESET} ", BackendName::all().len());
+        let prompt = format!(
+            "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
+            BackendName::all().len()
+        );
         let pick = plain_read_line(prompt).await?.trim().to_string();
-        pick.parse::<usize>()
+        let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
+        picked_with_default = flag_default;
+        sel.parse::<usize>()
             .ok()
             .and_then(|n| n.checked_sub(1))
             .and_then(|i| BackendName::all().get(i).copied())
@@ -593,7 +643,11 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         chosen.as_str(),
         state.model
     );
-    if as_default {
+    // Direct `/backend name --default` skips the confirm; interactive path
+    // either carried `--default` on the selection or gets the y/N prompt.
+    if rest.is_empty() {
+        maybe_persist_backend_default(state, picked_with_default).await?;
+    } else if as_default {
         persist_backend_as_default(state);
     }
     Ok(())
@@ -678,25 +732,36 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         println!("  {DIM}No matches.{RESET}");
         return Ok(());
     }
+    let active_model = state.model.as_str();
+    let (_, persisted_model) = crate::config::persisted_defaults();
     let name_width = shown.iter().map(|m| m.len()).max().unwrap_or(0);
     for (i, m) in shown.iter().enumerate() {
+        let marker = picker_marker(
+            m == active_model,
+            persisted_model.as_deref() == Some(m.as_str()),
+        );
         match catalog::lookup(state.config.backend, m) {
             Some(info) => println!(
-                "  {DIM}{:>2}){RESET} {:<width$}  {DIM}{}{RESET}",
+                "  {DIM}{:>2}){RESET} {:<width$}{}  {DIM}{}{RESET}",
                 i + 1,
                 m,
+                marker,
                 catalog::format_cost_label(info),
                 width = name_width
             ),
-            None => println!("  {DIM}{:>2}){RESET} {}", i + 1, m),
+            None => println!("  {DIM}{:>2}){RESET} {}{}", i + 1, m, marker),
         }
     }
     if total > shown.len() {
         println!("  {DIM}…and {} more{RESET}", total - shown.len());
     }
-    let prompt = format!("  {DIM}Select (1-{}):{RESET} ", shown.len());
+    let prompt = format!(
+        "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
+        shown.len()
+    );
     let pick = plain_read_line(prompt).await?.trim().to_string();
-    if let Some(idx) = pick.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
+    let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
+    if let Some(idx) = sel.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
         if let Some(m) = shown.get(idx) {
             state.config.model_override = Some(m.clone());
             state.active_effort = None;
@@ -705,6 +770,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
                 "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
                 state.model
             );
+            maybe_persist_model_default(state, flag_default).await?;
             return Ok(());
         }
     }
