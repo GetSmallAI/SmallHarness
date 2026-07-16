@@ -510,8 +510,12 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         for (i, b) in BackendName::all().iter().enumerate() {
             println!("  {DIM}{}){RESET} {}", i + 1, b.as_str());
         }
+        // Blank line so the list and the prompt don't crowd each other.
+        println!();
         let prompt = format!("  {DIM}Select (1-{}):{RESET} ", BackendName::all().len());
         let pick = plain_read_line(prompt).await?.trim().to_string();
+        // Blank line between the typed selection and the response below.
+        println!();
         pick.parse::<usize>()
             .ok()
             .and_then(|n| n.checked_sub(1))
@@ -633,8 +637,12 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     if total > shown.len() {
         println!("  {DIM}…and {} more{RESET}", total - shown.len());
     }
+    // Blank line so the list and the prompt don't crowd each other.
+    println!();
     let prompt = format!("  {DIM}Select (1-{}):{RESET} ", shown.len());
     let pick = plain_read_line(prompt).await?.trim().to_string();
+    // Blank line between the typed selection and the response below.
+    println!();
     if let Some(idx) = pick.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
         if let Some(m) = shown.get(idx) {
             state.config.model_override = Some(m.clone());
