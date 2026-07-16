@@ -22,7 +22,10 @@ use crate::hooks::{
 use crate::loader::Loader;
 use crate::model_system::EffortLevel;
 use crate::openai::{ChatMessage, ImageUrl, UserContent, UserContentPart};
-use crate::project_memory::{refresh_project_memory_after_write, render_system_prompt_with_memory};
+use crate::project_memory::{
+    maybe_project_context, refresh_project_memory_after_write, render_stable_system_prompt,
+    PROJECT_CONTEXT_HEADER,
+};
 use crate::session::save_message;
 use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
@@ -369,6 +372,27 @@ pub(crate) fn system_prompt_with_hook_context(
     system_prompt
 }
 
+/// Fold the prompt-focused project context into the final user message of a
+/// request so it rides below the stable system/tools/history cache prefix
+/// instead of mutating the position-0 system message every turn. Mutates only
+/// the request copy; durable history keeps the user's raw prompt.
+fn fold_project_context_into_last_user(messages: &mut [ChatMessage], context: &str) {
+    for msg in messages.iter_mut().rev() {
+        if let ChatMessage::User { content } = msg {
+            let block = format!("{PROJECT_CONTEXT_HEADER}\n{context}\n\n");
+            match content {
+                UserContent::Text(text) => {
+                    *content = UserContent::Text(format!("{block}{text}"));
+                }
+                UserContent::Parts(parts) => {
+                    parts.insert(0, UserContentPart::Text { text: block });
+                }
+            }
+            return;
+        }
+    }
+}
+
 fn maybe_print_context_pressure(
     state: &AppState,
     system_prompt: &str,
@@ -428,16 +452,16 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let trimmed = user_prompt.as_str();
 
     let active_tool_names = select_tool_names(&state.config, trimmed);
+    // The system message is the cache prefix; keep it prompt-independent. The
+    // prompt-focused repo map is computed here but folded into the current user
+    // turn below the cache boundary (see `initial` assembly), not the system
+    // prompt, so the cached prefix survives across turns.
     let raw_base_system_prompt = append_ship_context(
-        &render_system_prompt_with_memory(
-            &state.config,
-            &state.backend,
-            &active_tool_names,
-            trimmed,
-        ),
+        &render_stable_system_prompt(&state.config, &active_tool_names),
         &state.config,
         state.tests_ran_this_session,
     );
+    let project_context = maybe_project_context(&state.config, &state.backend, trimmed);
     let mut hook_prompt_contexts = Vec::new();
     hook_prompt_contexts.extend(state.session_hook_contexts.clone());
     hook_prompt_contexts.append(&mut state.pending_hook_contexts);
@@ -636,7 +660,10 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
-    let initial = state.messages.clone();
+    let mut initial = state.messages.clone();
+    if let Some(context) = project_context.as_deref() {
+        fold_project_context_into_last_user(&mut initial, context);
+    }
     let max_steps = state.config.max_steps;
     let model = state.model.clone();
     let active_effort = state.active_effort;
@@ -1303,6 +1330,85 @@ mod cost_tests {
         assert!(merged.contains("(redacted)"));
         assert!(merged.contains("[truncated]"));
         assert!(merged.len() < 10_000);
+    }
+
+    #[test]
+    fn project_context_folds_into_last_user_not_system() {
+        let mut messages = vec![
+            ChatMessage::System {
+                content: "STABLE SYSTEM".into(),
+            },
+            ChatMessage::User {
+                content: UserContent::Text("first question".into()),
+            },
+            ChatMessage::Assistant {
+                content: Some("answer".into()),
+                tool_calls: vec![],
+            },
+            ChatMessage::User {
+                content: UserContent::Text("how does the parser work".into()),
+            },
+        ];
+        fold_project_context_into_last_user(&mut messages, "Focused map for `parser`:\n- src/x.rs");
+
+        // Cache prefix (system + earlier turns) must be untouched so it stays
+        // byte-identical across turns.
+        match &messages[0] {
+            ChatMessage::System { content } => assert_eq!(content, "STABLE SYSTEM"),
+            other => panic!("expected system at position 0, got {other:?}"),
+        }
+        assert_eq!(messages[1].user_text().unwrap(), "first question");
+
+        // The volatile map rides below the boundary, on the current user turn.
+        let last = messages[3].user_text().unwrap();
+        assert_eq!(
+            last,
+            "Local project memory context:\nFocused map for `parser`:\n- src/x.rs\n\nhow does the parser work"
+        );
+    }
+
+    #[test]
+    fn project_context_folds_ahead_of_image_parts() {
+        let mut messages = vec![ChatMessage::User {
+            content: UserContent::Parts(vec![
+                UserContentPart::Text {
+                    text: "describe this".into(),
+                },
+                UserContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                },
+            ]),
+        }];
+        fold_project_context_into_last_user(&mut messages, "MAP BODY");
+
+        let ChatMessage::User {
+            content: UserContent::Parts(parts),
+        } = &messages[0]
+        else {
+            panic!("expected multi-part user message");
+        };
+        assert_eq!(parts.len(), 3);
+        match &parts[0] {
+            UserContentPart::Text { text } => {
+                assert_eq!(text, "Local project memory context:\nMAP BODY\n\n");
+            }
+            other => panic!("expected leading context text part, got {other:?}"),
+        }
+        assert!(matches!(parts[2], UserContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn folding_project_context_without_user_message_is_a_noop() {
+        let mut messages = vec![ChatMessage::System {
+            content: "sys".into(),
+        }];
+        fold_project_context_into_last_user(&mut messages, "map");
+        match &messages[0] {
+            ChatMessage::System { content } => assert_eq!(content, "sys"),
+            other => panic!("unexpected mutation: {other:?}"),
+        }
     }
 
     #[test]
