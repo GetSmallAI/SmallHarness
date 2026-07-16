@@ -535,6 +535,7 @@ pub async fn summarize_transcript(
             include_usage: false,
         }),
         max_tokens: None,
+        prompt_cache_key: None,
         effort: None,
     };
     let mut out = String::new();

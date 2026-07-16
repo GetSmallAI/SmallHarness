@@ -1195,6 +1195,7 @@ async fn draft_ship_commit_message(
             include_usage: false,
         }),
         max_tokens: Some(500),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut draft = String::new();

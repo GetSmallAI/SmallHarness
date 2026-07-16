@@ -983,6 +983,7 @@ pub(super) async fn cmd_compare(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: None,
+        prompt_cache_key: None,
         effort: None,
     };
     let mut out = std::io::stdout();

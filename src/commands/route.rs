@@ -417,6 +417,7 @@ async fn run_selector(state: &AppState, selector: &ModelRef, task: &str) -> Resu
             include_usage: true,
         }),
         max_tokens: Some(500),
+        prompt_cache_key: None,
         effort: selector.effort,
     };
     let mut text = String::new();

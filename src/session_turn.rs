@@ -180,6 +180,7 @@ fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
 fn format_footer(
     input_tokens: u32,
     output_tokens: u32,
+    cached_input_tokens: u32,
     turn_cost: Option<f64>,
     backend_is_local: bool,
     session_usd: f64,
@@ -195,6 +196,11 @@ fn format_footer(
         format!("{} in", format_tokens(input_tokens)),
         format!("{} out", format_tokens(output_tokens)),
     ];
+    // Only surface cache reuse when the provider reported it, so local backends
+    // (which never report cached tokens) don't get a misleading "0 cached".
+    if cached_input_tokens > 0 {
+        parts.push(format!("{} cached", format_tokens(cached_input_tokens)));
+    }
     let cost = format_cost_suffix(
         turn_cost,
         backend_is_local,
@@ -953,6 +959,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         format_footer(
             res.input_tokens,
             res.output_tokens,
+            res.cached_input_tokens,
             turn_cost,
             state.config.backend.is_local(),
             state.session_usd,
@@ -1194,7 +1201,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200, 87, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1219,6 +1226,7 @@ mod cost_tests {
         let footer = format_footer(
             500,
             120,
+            0,
             Some(0.01),
             false,
             0.01,
@@ -1241,7 +1249,19 @@ mod cost_tests {
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            100, 50, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
+            100,
+            50,
+            0,
+            None,
+            true,
+            0.0,
+            false,
+            None,
+            &metrics,
+            "",
+            "",
+            "",
+            "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1254,6 +1274,7 @@ mod cost_tests {
         let footer = format_footer(
             100,
             50,
+            0,
             None,
             true,
             0.0,
@@ -1268,6 +1289,21 @@ mod cost_tests {
         assert!(!footer.contains('$'));
         assert!(footer.contains("qwen2.5:7b"));
         assert!(!footer.contains("http://"));
+    }
+
+    #[test]
+    fn footer_shows_cached_tokens_only_when_present() {
+        let metrics = TurnMetrics::default();
+        // Provider reported a cache hit: surface it between out and cost.
+        let hit = format_footer(
+            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "",
+        );
+        assert!(hit.contains("1.2k in · 87 out · 900 cached"));
+        // No cache hit reported: no "cached" part at all.
+        let miss = format_footer(
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "",
+        );
+        assert!(!miss.contains("cached"));
     }
 
     #[test]

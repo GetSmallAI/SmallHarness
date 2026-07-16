@@ -89,6 +89,7 @@ pub(crate) async fn perform_reset(state: &mut AppState, dry_run: bool) -> Result
             include_usage: false,
         }),
         max_tokens: Some(1200),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut draft = String::new();

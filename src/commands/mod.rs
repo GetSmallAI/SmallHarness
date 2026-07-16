@@ -535,6 +535,7 @@ async fn cmd_handoff(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: Some(900),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut draft = String::new();
@@ -822,6 +823,7 @@ async fn cmd_plan(args: &str, state: &mut AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: Some(1500),
+        prompt_cache_key: None,
         effort: state.active_effort,
     };
     let mut draft = String::new();
@@ -904,6 +906,7 @@ async fn cmd_plan_route(
             include_usage: true,
         }),
         max_tokens: Some(2400),
+        prompt_cache_key: None,
         effort: planner.effort,
     };
     let mut draft = String::new();

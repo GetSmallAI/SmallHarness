@@ -213,12 +213,17 @@ fn one_tool_chunk(
     }
 }
 
-fn usage_chunk(input: u32, output: u32) -> StreamChunk {
+fn usage_chunk(input: u32, output: u32, cached: u32) -> StreamChunk {
     StreamChunk {
         choices: Vec::new(),
         usage: Some(Usage {
             prompt_tokens: input,
             completion_tokens: output,
+            // The Responses API reports cache reuse under
+            // `input_tokens_details.cached_tokens`; surface it like the chat path.
+            prompt_tokens_details: (cached > 0).then_some(crate::openai::PromptTokensDetails {
+                cached_tokens: cached,
+            }),
             cost: None,
         }),
     }
@@ -372,8 +377,13 @@ where
                     .get("output_tokens")
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as u32;
+                let cached = usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
                 if input > 0 || output > 0 {
-                    on_chunk(usage_chunk(input, output));
+                    on_chunk(usage_chunk(input, output, cached));
                 }
             }
             return Ok(true);
@@ -531,6 +541,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: None,
         };
         let body = build_request_body(&req);
@@ -565,5 +576,51 @@ mod tests {
         let call = chunks[1].choices[0].delta.tool_calls.as_ref().unwrap()[0].clone();
         assert_eq!(call.id.as_deref(), Some("call_1"));
         assert_eq!(call.function.unwrap().name.as_deref(), Some("grep"));
+    }
+
+    #[test]
+    fn response_completed_surfaces_cached_prompt_tokens() {
+        let mut chunks = Vec::new();
+        let mut calls = BTreeMap::new();
+        let mut next_index = 0;
+        let done = handle_event(
+            json!({
+                "type": "response.completed",
+                "response": {"usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 87,
+                    "input_tokens_details": {"cached_tokens": 900}
+                }}
+            }),
+            &mut calls,
+            &mut next_index,
+            |c| chunks.push(c),
+        )
+        .unwrap();
+        assert!(done);
+        let usage = chunks[0].usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert_eq!(usage.completion_tokens, 87);
+        assert_eq!(usage.cached_tokens(), 900);
+    }
+
+    #[test]
+    fn response_completed_without_cache_details_reports_zero_cached() {
+        let mut chunks = Vec::new();
+        let mut calls = BTreeMap::new();
+        let mut next_index = 0;
+        handle_event(
+            json!({
+                "type": "response.completed",
+                "response": {"usage": {"input_tokens": 40, "output_tokens": 10}}
+            }),
+            &mut calls,
+            &mut next_index,
+            |c| chunks.push(c),
+        )
+        .unwrap();
+        let usage = chunks[0].usage.as_ref().unwrap();
+        assert_eq!(usage.cached_tokens(), 0);
+        assert!(usage.prompt_tokens_details.is_none());
     }
 }

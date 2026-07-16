@@ -177,6 +177,7 @@ async fn probe_streaming(
             include_usage: true,
         }),
         max_tokens: Some(8),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut chunks = 0usize;
@@ -262,6 +263,7 @@ async fn probe_tool_calls(
             include_usage: false,
         }),
         max_tokens: Some(128),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut content = String::new();
@@ -583,6 +585,7 @@ async fn cmd_bench(args: &str, state: &AppState) -> Result<()> {
             include_usage: false,
         }),
         max_tokens: None,
+        prompt_cache_key: None,
         effort: state.active_effort,
     };
     let start = Instant::now();

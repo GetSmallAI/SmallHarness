@@ -29,6 +29,7 @@ pub async fn warmup(
         stream: false,
         stream_options: None,
         max_tokens: Some(1),
+        prompt_cache_key: None,
         effort,
     };
     chat_oneshot(http, backend, &req).await?;
