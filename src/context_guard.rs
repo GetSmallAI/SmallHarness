@@ -35,6 +35,8 @@ pub struct CompactResult {
     /// fallback ran: an unavailable backend inherits the main model; a dedicated
     /// model that errors or returns empty is retried with the main model and, if
     /// that also fails, the deterministic trim. Surfaced in the compaction notice.
+    /// The wording always matches the final outcome — never claims "summarized
+    /// with {main}" when the transcript was only trimmed deterministically.
     pub warning: Option<String>,
 }
 
@@ -622,8 +624,10 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
     };
 
     let use_tier2 = transcript_json_bytes(&older) > summarize_budget_bytes;
-    // Only warn about an unavailable compaction model when we would actually have
-    // called it (the LLM-summary path); the deterministic trim uses no model.
+    // Only warn about an unavailable / failed compaction model when we would
+    // actually have called it (the LLM-summary path); the deterministic trim
+    // uses no model. Warnings are set only after the final outcome is known so
+    // a failed main-model retry never claims "summarized with {main}".
     let mut warning = None;
     let (method, new_summary) = if use_tier2 {
         let addition = deterministic_summary(&older);
@@ -632,11 +636,13 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
             append_summary(conversation_summary, &addition),
         )
     } else {
-        if let CompactionModel::Unavailable { label, reason } = compaction {
-            warning = Some(format!(
-                "compaction model {label} unavailable ({reason}); summarized with {model}"
-            ));
-        }
+        let unavailable = match compaction {
+            CompactionModel::Unavailable { label, reason } => {
+                Some((label.as_str(), reason.as_str()))
+            }
+            _ => None,
+        };
+
         let mut result = summarize_transcript(
             http,
             summary_backend,
@@ -649,38 +655,47 @@ async fn compact_messages_core(req: CompactRequest<'_>) -> Result<CompactResult>
         // A dedicated compaction model that errors or returns empty retries with
         // the main conversation model before falling back to the deterministic
         // trim, so a broken compaction backend never silently loses the summary.
-        let retried_main = if let CompactionModel::Use { label, .. } = compaction {
-            if matches!(&result, Ok(summary) if !summary.trim().is_empty()) {
-                false
-            } else {
+        // Capture the failure detail here; only claim "summarized with main"
+        // after the retry actually produces a summary.
+        let mut dedicated_fail: Option<(&str, String)> = None;
+        if let CompactionModel::Use { label, .. } = compaction {
+            if !matches!(&result, Ok(summary) if !summary.trim().is_empty()) {
                 let detail = match &result {
                     Err(e) => e.to_string(),
                     _ => "returned an empty summary".to_string(),
                 };
-                warning = Some(format!(
-                    "compaction model {label} failed ({detail}); summarized with {model} instead"
-                ));
+                dedicated_fail = Some((label.as_str(), detail));
                 result =
                     summarize_transcript(http, backend, model, conversation_summary, &older).await;
-                true
             }
-        } else {
-            false
-        };
+        }
 
         match result {
             Ok(summary) if !summary.trim().is_empty() => {
+                if let Some((label, detail)) = dedicated_fail {
+                    warning = Some(format!(
+                        "compaction model {label} failed ({detail}); summarized with {model} instead"
+                    ));
+                } else if let Some((label, reason)) = unavailable {
+                    warning = Some(format!(
+                        "compaction model {label} unavailable ({reason}); summarized with {model}"
+                    ));
+                }
                 (CompactMethod::LlmSummary, summary.trim().to_string())
             }
             _ => {
-                // The summary model — and the main-model retry, if one ran — both
-                // failed, so fall back to the deterministic trim.
-                if retried_main {
-                    if let CompactionModel::Use { label, .. } = compaction {
-                        warning = Some(format!(
-                            "compaction model {label} and main model {model} both failed; trimmed deterministically"
-                        ));
-                    }
+                // The summary model — and the main-model retry, if one ran —
+                // failed, so fall back to the deterministic trim. Never leave a
+                // "summarized with {main}" notice on this path: the transcript
+                // was cut, not summarized.
+                if let Some((label, detail)) = dedicated_fail {
+                    warning = Some(format!(
+                        "compaction model {label} failed ({detail}); main model {model} also failed; trimmed deterministically"
+                    ));
+                } else if let Some((label, reason)) = unavailable {
+                    warning = Some(format!(
+                        "compaction model {label} unavailable ({reason}); main model {model} also failed; trimmed deterministically"
+                    ));
                 }
                 let addition = deterministic_summary(&older);
                 (
@@ -1171,11 +1186,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn compaction_use_model_failure_surfaces_warning() {
-        // A dedicated compaction model whose summarize call fails must not
-        // silently degrade to the deterministic trim; the failure is surfaced.
-        let mut messages = vec![
+    fn sample_compact_messages() -> Vec<ChatMessage> {
+        vec![
             ChatMessage::System {
                 content: "sys".into(),
             },
@@ -1189,15 +1201,26 @@ mod tests {
             ChatMessage::User {
                 content: "current request".into(),
             },
-        ];
+        ]
+    }
+
+    fn dead_backend() -> BackendDescriptor {
         // Port 9 (discard) refuses the connection, so summarize_transcript errors.
-        let backend = BackendDescriptor {
+        BackendDescriptor {
             name: BackendName::Ollama,
             base_url: "http://127.0.0.1:9/v1".into(),
             api_key: "test".into(),
             is_local: true,
             openrouter: crate::backends::OpenRouterConfig::default(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_use_model_failure_surfaces_warning() {
+        // A dedicated compaction model whose summarize call fails must not
+        // silently degrade to the deterministic trim; the failure is surfaced.
+        let mut messages = sample_compact_messages();
+        let backend = dead_backend();
         let compaction = CompactionModel::Use {
             backend: backend.clone(),
             model: "compactor".into(),
@@ -1225,6 +1248,69 @@ mod tests {
         let warning = result.warning.expect("failure surfaced as warning");
         assert!(warning.contains("ollama:compactor"), "warning: {warning}");
         assert!(warning.contains("failed"), "warning: {warning}");
+        // When the main-model retry also fails, the notice must say we trimmed —
+        // never claim the main model summarized the transcript.
+        assert!(
+            warning.contains("trimmed deterministically"),
+            "warning: {warning}"
+        );
+        assert!(
+            warning.contains("main model mock also failed"),
+            "warning: {warning}"
+        );
+        assert!(
+            !warning.contains("summarized with"),
+            "must not claim main model summarized after both failed: {warning}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_unavailable_then_main_fails_does_not_claim_summarized() {
+        // Compaction model is configured but its backend is not ready, so we
+        // inherit the main model. If that also fails, the notice must not say
+        // "summarized with {main}" while we actually deterministic-trim.
+        let mut messages = sample_compact_messages();
+        let backend = dead_backend();
+        let compaction = CompactionModel::Unavailable {
+            label: "openrouter:anthropic/claude-3.5-haiku".into(),
+            reason: "OPENROUTER_API_KEY is not set".into(),
+        };
+        let http = Client::new();
+        let result = compact_messages_core(CompactRequest {
+            messages: &mut messages,
+            system_prompt: "sys",
+            tool_defs: &[],
+            keep_messages: 1,
+            limit_bytes: 1000,
+            summarize_budget_bytes: 1_000_000,
+            http: &http,
+            backend: &backend,
+            model: "main-model",
+            conversation_summary: None,
+            compaction: &compaction,
+        })
+        .await
+        .expect("compaction runs");
+
+        assert_eq!(result.method, CompactMethod::DeterministicTrim);
+        let warning = result.warning.expect("failure surfaced as warning");
+        assert!(
+            warning.contains("openrouter:anthropic/claude-3.5-haiku"),
+            "warning: {warning}"
+        );
+        assert!(warning.contains("unavailable"), "warning: {warning}");
+        assert!(
+            warning.contains("main model main-model also failed"),
+            "warning: {warning}"
+        );
+        assert!(
+            warning.contains("trimmed deterministically"),
+            "warning: {warning}"
+        );
+        assert!(
+            !warning.contains("summarized with"),
+            "must not claim main model summarized after it failed: {warning}"
+        );
     }
 
     #[test]
