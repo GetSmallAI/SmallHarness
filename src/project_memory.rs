@@ -1082,17 +1082,18 @@ fn map_line_for_file(file: &IndexedFile) -> String {
 }
 
 fn snippet_for_text(text: &str, tokens: &[String]) -> Option<String> {
-    let lower = text.to_lowercase();
-    let idx = tokens
-        .iter()
-        .find_map(|token| lower.find(token))
-        .unwrap_or(0);
-    let start = lower[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let mut end = (idx + MAX_SNIPPET_CHARS).min(text.len());
-    while end < text.len() && !text.is_char_boundary(end) {
-        end += 1;
+    // Match per line on that line's own lowercase copy. Never apply offsets from
+    // a lowercased whole-file string onto the original: to_lowercase can change
+    // byte lengths (e.g. Turkish İ), which used to panic on out-of-bounds slices.
+    let mut chosen = text.lines().next().unwrap_or("");
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if tokens.iter().any(|token| lower.contains(token)) {
+            chosen = line;
+            break;
+        }
     }
-    let snippet = one_line(&text[start..end], MAX_SNIPPET_CHARS);
+    let snippet = one_line(chosen, MAX_SNIPPET_CHARS);
     if snippet.trim().is_empty() {
         None
     } else {
@@ -1361,6 +1362,23 @@ mod tests {
         };
         let hits = search_index(&index, "dispatch", 2);
         assert_eq!(hits[0].path, "src/commands.rs");
+    }
+
+    #[test]
+    fn snippet_for_text_survives_turkish_i_length_change() {
+        // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE expands under to_lowercase
+        // (2 bytes → 3). Offsets from the lowercased file used to panic.
+        let text = format!("{}\nneedle_token appears here", "İ".repeat(200));
+        let tokens = vec!["needle_token".to_string()];
+        let snippet = snippet_for_text(&text, &tokens).expect("snippet");
+        assert!(snippet.contains("needle_token"));
+        assert!(!snippet.contains('İ'));
+    }
+
+    #[test]
+    fn snippet_for_text_returns_first_line_when_no_token_match() {
+        let snippet = snippet_for_text("alpha\nbeta", &["zzz".into()]).unwrap();
+        assert_eq!(snippet, "alpha");
     }
 
     #[test]
