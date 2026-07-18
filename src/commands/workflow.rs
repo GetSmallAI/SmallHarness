@@ -900,8 +900,6 @@ mod tests {
 
     #[test]
     fn truncate_string_does_not_panic_on_multibyte_over_byte_cap() {
-        // "á" is 2 bytes; byte-index slicing at 57 used to panic mid-character even
-        // though the string is only 40 Unicode scalars (under the 60-char display cap).
         let s = "á".repeat(40);
         assert_eq!(truncate_string(&s, 60), s);
     }
@@ -910,9 +908,7 @@ mod tests {
     fn truncate_string_caps_by_unicode_scalars() {
         let s = "á".repeat(70);
         let out = truncate_string(&s, 60);
-        assert_eq!(out.chars().count(), 60);
-        assert!(out.ends_with("..."));
-        assert_eq!(out.chars().take(57).collect::<String>(), "á".repeat(57));
+        assert_eq!(out, format!("{}...", "á".repeat(57)));
     }
 
     #[test]
