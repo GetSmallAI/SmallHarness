@@ -21,17 +21,9 @@ const PREFERRED_REDIRECT_PORT: u16 = 56121;
 const REDIRECT_PATH: &str = "/callback";
 const GROK_CLI_AUTH_SCOPE_KEY: &str = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
 const GROK_CLI_LEGACY_SCOPE_KEY: &str = "https://accounts.x.ai/sign-in";
-pub const GROK_MODEL_LIST: &[&str] = &[
-    "grok-4.5",
-    "grok-4.3",
-    "grok-4.20-0309-reasoning",
-    "grok-4.20-0309-non-reasoning",
-    "grok-4.20-multi-agent-0309",
-    "grok-build-0.1",
-    "grok-4",
-    "grok-3",
-    "grok-3-mini",
-];
+/// Curated agent-ready Grok models, matching pi's built-in xAI catalog.
+/// Kept static so `/model` does not hit `GET /models` on every open.
+pub const GROK_MODEL_LIST: &[&str] = &["grok-4.5", "grok-4.3", "grok-build-0.1"];
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -745,25 +737,30 @@ pub fn grok_model_list() -> Vec<String> {
     GROK_MODEL_LIST.iter().map(|s| (*s).to_string()).collect()
 }
 
-pub fn canonical_grok_model(model: &str) -> Option<&str> {
+/// Canonical SuperGrok/xAI OAuth model ids from pi's current xAI catalog.
+/// Accept a few shorthand / provider-prefixed aliases, but never send those
+/// aliases over the wire.
+pub fn canonical_grok_model(model: &str) -> Option<&'static str> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    for id in GROK_MODEL_LIST {
-        if id.eq_ignore_ascii_case(&lower) {
-            return Some(*id);
-        }
+    let bare = lower
+        .rsplit_once('/')
+        .map(|(_, id)| id)
+        .unwrap_or(lower.as_str());
+    match bare {
+        "grok-4.5" | "grok-4.5-latest" | "4.5" => Some("grok-4.5"),
+        "grok-4.3" | "grok-4.3-latest" | "grok-latest" | "4.3" => Some("grok-4.3"),
+        "grok-build-0.1"
+        | "grok-build-latest"
+        | "grok-code-fast-1"
+        | "grok-code-fast"
+        | "grok-code-fast-1-0825"
+        | "build-0.1" => Some("grok-build-0.1"),
+        _ => None,
     }
-    if let Some(bare) = lower.rsplit('/').next() {
-        for id in GROK_MODEL_LIST {
-            if id.eq_ignore_ascii_case(bare) {
-                return Some(*id);
-            }
-        }
-    }
-    Some(trimmed)
 }
 
 #[cfg(test)]
@@ -807,11 +804,25 @@ mod tests {
     }
 
     #[test]
-    fn canonical_model_accepts_aliases() {
+    fn canonical_model_accepts_pi_catalog_and_aliases() {
         assert_eq!(canonical_grok_model("grok-4.5"), Some("grok-4.5"));
         assert_eq!(canonical_grok_model("xai/grok-4.5"), Some("grok-4.5"));
-        assert_eq!(canonical_grok_model("future-model"), Some("future-model"));
+        assert_eq!(canonical_grok_model("4.3"), Some("grok-4.3"));
+        assert_eq!(
+            canonical_grok_model("grok-code-fast-1"),
+            Some("grok-build-0.1")
+        );
+        assert_eq!(canonical_grok_model("grok-4.20-0309-reasoning"), None);
+        assert_eq!(canonical_grok_model("future-model"), None);
         assert_eq!(canonical_grok_model(""), None);
+        assert_eq!(
+            grok_model_list(),
+            vec![
+                "grok-4.5".to_string(),
+                "grok-4.3".to_string(),
+                "grok-build-0.1".to_string(),
+            ]
+        );
     }
 
     #[test]

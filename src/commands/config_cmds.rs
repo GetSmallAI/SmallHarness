@@ -592,7 +592,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         } else if matches!(state.config.backend, BackendName::Grok) {
             let Some(canonical) = crate::xai_oauth::canonical_grok_model(args) else {
                 println!(
-                    "  {RED}✗{RESET} {DIM}empty model id. Try one of: {}{RESET}",
+                    "  {RED}✗{RESET} {DIM}{args} is not supported with Grok login. Try one of: {}{RESET}",
                     crate::xai_oauth::grok_model_list().join(", ")
                 );
                 return Ok(());

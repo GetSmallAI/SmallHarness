@@ -160,7 +160,9 @@ browser or headless device-code OAuth, no `XAI_API_KEY`:
 
 Pick **1) Browser login** (opens the system browser + local callback) or
 **2) Device-code login** for SSH/headless. Tokens land in `auth.json` under
-`grok` and refresh automatically. Default model is `grok-4.5`.
+`grok` and refresh automatically. Default model is `grok-4.5`. `/model` exposes
+the static agent-ready catalog (`grok-4.5`, `grok-4.3`, `grok-build-0.1`), same
+as pi — it does not scrape xAI's full `/models` list.
 
 ### Path B — Local model
 

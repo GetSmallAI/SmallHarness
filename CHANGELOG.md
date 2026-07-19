@@ -15,9 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `grok` provider, refreshed automatically, and never injected into environment
   variables. Requests use OpenAI-compatible chat completions at
   `https://api.x.ai/v1` (override with `XAI_BASE_URL` / `GROK_BASE_URL`).
-  Default model is `grok-4.5`. `/login grok` can import credentials from the
-  official Grok CLI (`~/.grok/auth.json`) when present. Setup wizard, `/backend`,
-  `/doctor`, and `/auth` list the new provider.
+  Default model is `grok-4.5`. Model selection uses a static agent-ready catalog
+  matching pi (`grok-4.5`, `grok-4.3`, `grok-build-0.1`) instead of live
+  `GET /models`. `/login grok` can import credentials from the official Grok CLI
+  (`~/.grok/auth.json`) when present. Setup wizard, `/backend`, `/doctor`, and
+  `/auth` list the new provider.
 
 ## [1.2.3] - 2026-07-16
 
