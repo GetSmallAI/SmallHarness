@@ -353,16 +353,20 @@ fn read_plain_outcome(
                     continue;
                 }
                 if let Some(outcome) = control_key_outcome(code, modifiers) {
+                    // See the Enter branch: `\r\n`, not `\n`, while raw mode is on.
                     redraw(&mut out, &chars, cursor, sel, true)?;
-                    writeln!(out)?;
+                    write!(out, "\r\n")?;
                     out.flush()?;
                     return Ok(outcome);
                 }
                 match code {
                     KeyCode::Enter => {
-                        // Clear any open menu, then drop to the next line.
+                        // Clear any open menu, then drop to the next line. Raw mode
+                        // is still active here, so a bare `\n` only line-feeds and
+                        // leaves the cursor in the input's last column — `\r` returns
+                        // it to column 0 so the caller's output isn't shifted right.
                         redraw(&mut out, &chars, cursor, sel, true)?;
-                        writeln!(out)?;
+                        write!(out, "\r\n")?;
                         out.flush()?;
                         return Ok(ReadLineOutcome::Line(chars.iter().collect()));
                     }
