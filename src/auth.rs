@@ -193,17 +193,19 @@ pub fn mask_key(key: &str) -> String {
     if key.is_empty() {
         return "(not set)".into();
     }
+    // Index by Unicode scalars so multi-byte keys cannot panic mid-character.
+    let chars: Vec<char> = key.chars().collect();
     let head_len = if key.starts_with("sk-") {
         3
     } else {
-        3.min(key.len())
+        3.min(chars.len())
     };
-    let tail_len = 4.min(key.len().saturating_sub(head_len));
-    if head_len + tail_len >= key.len() {
-        return "•".repeat(key.len());
+    let tail_len = 4.min(chars.len().saturating_sub(head_len));
+    if head_len + tail_len >= chars.len() {
+        return "•".repeat(chars.len());
     }
-    let head = &key[..head_len];
-    let tail = &key[key.len() - tail_len..];
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
     format!("{head}•••{tail}")
 }
 
@@ -229,6 +231,13 @@ mod tests {
     fn mask_preserves_sk_prefix_and_last_four() {
         assert_eq!(mask_key("sk-abcdefgh1234"), "sk-•••1234");
         assert_eq!(mask_key(""), "(not set)");
+    }
+
+    #[test]
+    fn mask_key_does_not_panic_on_multibyte_chars() {
+        // CJK ideographs are 3 bytes; byte-index head/tail used to panic.
+        let key = "日".repeat(12);
+        assert_eq!(mask_key(&key), "日日日•••日日日日");
     }
 
     #[test]
