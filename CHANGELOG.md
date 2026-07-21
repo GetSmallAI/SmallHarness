@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Arrow-key selection menus.** Setup and the interactive `/backend` and
+  `/model` flows now support ↑/↓, j/k, Home/End, Enter, number-key shortcuts,
+  and q/Esc cancellation with windowed scrolling for long lists. `/model`
+  retains its text filter, pricing/context labels, free-text fallback, and
+  `(selected)` / `(default)` markers; interactive choices retain the save-as-
+  default confirmation and direct `--default` commands remain supported.
+
+## [1.2.5] - 2026-07-20
+
+### Added
+
+- **`/model --default` and `/backend --default`.** Pin the active (or newly
+  selected) backend/model into `agent.config.json` without re-running `/setup`.
+  `/model … --default` writes `backend` + `modelOverride`; `/backend … --default`
+  writes `backend` and clears `modelOverride`. Session changes still apply if the
+  file cannot be written; invalid JSON is never overwritten.
+- **Default-aware `/model` and `/backend` pickers.** Interactive lists now mark
+  each entry with `(selected)` when it is the live session choice and `(default)`
+  when it is what `agent.config.json` would load on next launch (both show when
+  they coincide). Append `--default` to a selection (e.g. `3 --default`) to pin
+  it as you pick; otherwise a `y/N` prompt offers to save the choice as the
+  project default.
+
+## [1.2.4] - 2026-07-20
+
+### Fixed
+
+- **Aligned output after raw-mode prompts.** Sub-prompts now emit a carriage
+  return with their newline before leaving raw mode, so confirmations and
+  subsequent picker output start in column 0. Backend and model pickers also
+  include spacing around the selection prompt for easier scanning.
+
+## [1.2.3] - 2026-07-16
+
+### Fixed
+
+- **Compaction notice after dual-model failure.** When a dedicated compaction
+  model fails and the main-model retry also fails (or a configured compaction
+  backend is unavailable and the main model then fails), the harness still
+  deterministic-trims older turns, but the compaction notice no longer claims
+  the transcript was "summarized with" the main model. The warning now reports
+  that both paths failed and that the transcript was trimmed.
+
 ## [1.2.2] - 2026-07-15
 
 ### Fixed

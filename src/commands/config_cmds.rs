@@ -499,19 +499,100 @@ fn guess_image_mime(path: &std::path::Path) -> &'static str {
     }
 }
 
+fn report_default_persist(result: Result<()>) {
+    match result {
+        Ok(()) => println!(
+            "  {DIM}· saved default in {RESET}{CYAN}{}{RESET}",
+            crate::config::AGENT_CONFIG_PATH
+        ),
+        Err(e) => println!("  {RED}✗{RESET} {DIM}could not save default: {e}{RESET}"),
+    }
+}
+
+fn persist_model_as_default(state: &AppState) {
+    report_default_persist(crate::config::persist_backend_model_defaults(
+        Path::new(crate::config::AGENT_CONFIG_PATH),
+        state.config.backend,
+        Some(state.model.as_str()),
+    ));
+}
+
+fn persist_backend_as_default(state: &AppState) {
+    // Clears modelOverride on disk so the next launch uses the backend default.
+    report_default_persist(crate::config::persist_backend_model_defaults(
+        Path::new(crate::config::AGENT_CONFIG_PATH),
+        state.config.backend,
+        None,
+    ));
+}
+
+/// Build the trailing picker marker for an entry: `(selected)` when it is the
+/// live session choice, `(default)` when it is the value persisted in
+/// `agent.config.json`. Both may show together when they coincide.
+fn picker_marker(is_selected: bool, is_default: bool) -> String {
+    let mut out = String::new();
+    if is_selected {
+        out.push_str(&format!("  {DIM}(selected){RESET}"));
+    }
+    if is_default {
+        out.push_str(&format!("  {DIM}(default){RESET}"));
+    }
+    out
+}
+
+/// Ask whether to pin the just-selected choice as the project default.
+/// Used by interactive pickers when the user did not already pass `--default`.
+async fn confirm_save_as_default() -> Result<bool> {
+    println!(
+        "  {DIM}Save as project default in {RESET}{CYAN}{}{RESET}{DIM}? [y/N]{RESET}",
+        crate::config::AGENT_CONFIG_PATH
+    );
+    let answer = plain_read_line(format!("  {DIM}?{RESET} ")).await?;
+    let a = answer.trim().to_lowercase();
+    Ok(a == "y" || a == "yes")
+}
+
+/// After a session switch, persist if requested via flag or interactive confirm.
+async fn maybe_persist_model_default(state: &AppState, as_default: bool) -> Result<()> {
+    if as_default || confirm_save_as_default().await? {
+        persist_model_as_default(state);
+    }
+    Ok(())
+}
+
+async fn maybe_persist_backend_default(state: &AppState, as_default: bool) -> Result<()> {
+    if as_default || confirm_save_as_default().await? {
+        persist_backend_as_default(state);
+    }
+    Ok(())
+}
+
 pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> {
-    let chosen: Option<BackendName> = if !args.is_empty() {
-        BackendName::parse(args)
+    let (rest, as_default) = crate::config::strip_default_flag(args);
+
+    // Pin the current backend as project default without switching.
+    if rest.is_empty() && as_default {
+        println!(
+            "  {GREEN}✓{RESET} {DIM}default backend →{RESET} {CYAN}{}{RESET} {DIM}(modelOverride cleared on disk){RESET}",
+            state.config.backend.as_str()
+        );
+        persist_backend_as_default(state);
+        return Ok(());
+    }
+
+    let chosen: Option<BackendName> = if !rest.is_empty() {
+        BackendName::parse(&rest)
     } else {
         let backends = BackendName::all();
+        let (persisted_backend, _) = crate::config::persisted_defaults();
         let options: Vec<String> = backends
             .iter()
             .map(|b| {
-                if *b == state.config.backend {
-                    format!("{} *", b.as_str())
-                } else {
-                    b.as_str().to_string()
-                }
+                format!(
+                    "{}{}",
+                    b.as_str(),
+                    picker_marker(*b == state.config.backend, persisted_backend == Some(*b),)
+                )
             })
             .collect();
         let default_idx = backends
@@ -560,23 +641,86 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         chosen.as_str(),
         state.model
     );
+    // Direct `/backend name --default` skips the confirm; the arrow picker
+    // offers to save the selected backend after applying it to this session.
+    if rest.is_empty() {
+        maybe_persist_backend_default(state, false).await?;
+    } else if as_default {
+        persist_backend_as_default(state);
+    }
     Ok(())
+}
+
+fn build_filtered_model_picker(
+    ids: Vec<String>,
+    backend_default: &str,
+    current: &str,
+    persisted: Option<&str>,
+    filter: &str,
+    backend: BackendName,
+) -> (Vec<String>, Vec<ModelMenuItem>, usize) {
+    let (_, candidates, _) = build_model_menu(ids, backend_default, Some(current));
+    let filter = filter.trim().to_lowercase();
+    let mut labels = Vec::new();
+    let mut items = Vec::new();
+    let mut selected_idx = None;
+
+    for item in candidates {
+        let ModelMenuItem::Id(id) = item else {
+            continue;
+        };
+        if !filter.is_empty() && !id.to_lowercase().contains(&filter) {
+            continue;
+        }
+
+        if id == current {
+            selected_idx = Some(labels.len());
+        }
+        let marker = picker_marker(id == current, persisted == Some(id.as_str()));
+        let mut label = format!("{id}{marker}");
+        if let Some(info) = catalog::lookup(backend, &id) {
+            label.push_str(&format!(
+                "  {DIM}{}{RESET}",
+                catalog::format_cost_label(info)
+            ));
+        }
+        labels.push(label);
+        items.push(ModelMenuItem::Id(id));
+    }
+
+    labels.push(MODEL_FREE_TEXT_LABEL.into());
+    items.push(ModelMenuItem::FreeText);
+    (labels, items, selected_idx.unwrap_or(0))
 }
 
 pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     use std::io::Write;
-    if !args.is_empty() {
+    let (rest, as_default) = crate::config::strip_default_flag(args);
+
+    if rest.is_empty() && as_default {
+        if state.config.model_override.as_deref() != Some(state.model.as_str()) {
+            state.config.model_override = Some(state.model.clone());
+        }
+        println!(
+            "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
+            state.model
+        );
+        persist_model_as_default(state);
+        return Ok(());
+    }
+
+    if !rest.is_empty() {
         let model_override = if matches!(state.config.backend, BackendName::OpenAiCodex) {
-            let Some(canonical) = crate::codex_responses::canonical_codex_model(args) else {
+            let Some(canonical) = crate::codex_responses::canonical_codex_model(&rest) else {
                 println!(
-                    "  {RED}✗{RESET} {DIM}{args} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
+                    "  {RED}✗{RESET} {DIM}{rest} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
                     crate::codex_responses::codex_model_list().join(", ")
                 );
                 return Ok(());
             };
             canonical.to_string()
         } else {
-            args.to_string()
+            rest
         };
         state.config.model_override = Some(model_override);
         state.active_effort = None;
@@ -585,16 +729,14 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
             "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
             state.model
         );
+        if as_default {
+            persist_model_as_default(state);
+        }
         return Ok(());
     }
 
     let backend_default = default_model(&state.backend, None);
-    let current = state
-        .config
-        .model_override
-        .clone()
-        .unwrap_or_else(|| state.model.clone());
-
+    let current = state.model.clone();
     let mut out = std::io::stdout();
     let _ = write!(
         out,
@@ -603,10 +745,10 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     );
     let _ = out.flush();
     let ids = match list_models(&state.http, &state.backend).await {
-        Ok(v) => {
+        Ok(ids) => {
             let _ = write!(out, "\r\x1b[K");
             let _ = out.flush();
-            v
+            ids
         }
         Err(e) => {
             let _ = write!(out, "\r\x1b[K");
@@ -622,16 +764,26 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
     }
 
-    let (mut labels, items, default_idx) =
-        build_model_menu(ids, &backend_default, Some(current.as_str()));
-    // Append catalog pricing/context when known (cloud models) so the arrow
-    // menu keeps the extra detail the old numbered list showed.
-    for (label, item) in labels.iter_mut().zip(items.iter()) {
-        if let ModelMenuItem::Id(id) = item {
-            if let Some(info) = catalog::lookup(state.config.backend, id) {
-                *label = format!("{label}  {}", catalog::format_cost_label(info));
-            }
-        }
+    let filter = plain_read_line(format!("  {DIM}Filter (blank for all):{RESET} "))
+        .await?
+        .trim()
+        .to_string();
+    let (_, persisted_model) = crate::config::persisted_defaults();
+    let (labels, items, default_idx) = build_filtered_model_picker(
+        ids,
+        &backend_default,
+        &current,
+        persisted_model.as_deref(),
+        &filter,
+        state.config.backend,
+    );
+
+    if !items
+        .iter()
+        .any(|item| matches!(item, ModelMenuItem::Id(_)))
+    {
+        println!("  {DIM}No matches; enter a model id.{RESET}");
+        return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
     }
 
     let Some(idx) = select_from_list("Model".into(), labels, default_idx).await? else {
@@ -640,7 +792,7 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     };
     match items.get(idx) {
         Some(ModelMenuItem::Id(id)) => {
-            apply_model_choice(state, model_override_for(id, &backend_default));
+            apply_interactive_model_choice(state, model_override_for(id, &backend_default)).await?;
         }
         Some(ModelMenuItem::FreeText) => {
             apply_model_free_text(state, &backend_default, Some(current.as_str())).await?;
@@ -664,13 +816,12 @@ async fn apply_model_free_text(
     };
     let input = plain_read_line(prompt).await?;
     let trimmed = input.trim();
-    if trimmed.is_empty() {
-        apply_model_choice(state, None);
-        return Ok(());
-    }
     if matches!(trimmed.to_lowercase().as_str(), "q" | "quit" | "cancel") {
         println!("  {DIM}Cancelled.{RESET}");
         return Ok(());
+    }
+    if trimmed.is_empty() {
+        return apply_interactive_model_choice(state, None).await;
     }
     if matches!(state.config.backend, BackendName::OpenAiCodex) {
         let Some(canonical) = crate::codex_responses::canonical_codex_model(trimmed) else {
@@ -680,11 +831,21 @@ async fn apply_model_free_text(
             );
             return Ok(());
         };
-        apply_model_choice(state, model_override_for(canonical, backend_default));
-        return Ok(());
+        return apply_interactive_model_choice(
+            state,
+            model_override_for(canonical, backend_default),
+        )
+        .await;
     }
-    apply_model_choice(state, model_override_for(trimmed, backend_default));
-    Ok(())
+    apply_interactive_model_choice(state, model_override_for(trimmed, backend_default)).await
+}
+
+async fn apply_interactive_model_choice(
+    state: &mut AppState,
+    model_override: Option<String>,
+) -> Result<()> {
+    apply_model_choice(state, model_override);
+    maybe_persist_model_default(state, false).await
 }
 
 fn apply_model_choice(state: &mut AppState, model_override: Option<String>) {
@@ -1159,5 +1320,42 @@ mod tests {
         assert!(parse_fusion_args("tool max-tools=0").is_none());
         assert!(parse_fusion_args("tool max-tools=17").is_none());
         assert!(parse_fusion_args("tool judge=").is_none());
+    }
+
+    #[test]
+    fn filtered_model_picker_preserves_filter_and_default_markers() {
+        let (labels, items, selected_idx) = build_filtered_model_picker(
+            vec!["gpt-4o-mini".into(), "gpt-4o".into(), "o1-mini".into()],
+            "gpt-4o-mini",
+            "gpt-4o",
+            Some("gpt-4o-mini"),
+            "gpt",
+            BackendName::OpenAi,
+        );
+
+        assert_eq!(items.len(), 3, "two filtered ids plus free text");
+        assert!(labels.iter().all(|label| !label.contains("o1-mini")));
+        assert!(labels[selected_idx].contains("gpt-4o"));
+        assert!(labels[selected_idx].contains("(selected)"));
+        assert!(labels
+            .iter()
+            .any(|label| label.contains("gpt-4o-mini") && label.contains("(default)")));
+        assert_eq!(items.last(), Some(&ModelMenuItem::FreeText));
+    }
+
+    #[test]
+    fn filtered_model_picker_keeps_free_text_when_nothing_matches() {
+        let (labels, items, selected_idx) = build_filtered_model_picker(
+            vec!["gpt-4o-mini".into()],
+            "gpt-4o-mini",
+            "gpt-4o-mini",
+            None,
+            "claude",
+            BackendName::OpenAi,
+        );
+
+        assert_eq!(labels, vec![MODEL_FREE_TEXT_LABEL.to_string()]);
+        assert_eq!(items, vec![ModelMenuItem::FreeText]);
+        assert_eq!(selected_idx, 0);
     }
 }

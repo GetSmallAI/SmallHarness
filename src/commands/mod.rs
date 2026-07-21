@@ -72,7 +72,7 @@ use crate::session::{
 };
 use crate::session_paths::{apply_path_session_state, PathStore, DEFAULT_PATH_ID};
 use crate::session_turn::{run_user_turn, TurnOptions};
-use crate::setup::{build_model_menu, model_override_for, ModelMenuItem};
+use crate::setup::{build_model_menu, model_override_for, ModelMenuItem, MODEL_FREE_TEXT_LABEL};
 use crate::shipcheck::{
     collect_shipcheck, collect_shipcheck_with_tests, default_export_path, file_status_label,
     render_markdown as render_shipcheck_markdown, ShipcheckSnapshot,
@@ -190,11 +190,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex)",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex); --default persists",
     ),
     (
         "/model",
-        "List models from the current backend and pick one",
+        "List/pick a model; --default pins backend+model in agent.config.json",
     ),
     (
         "/tools",

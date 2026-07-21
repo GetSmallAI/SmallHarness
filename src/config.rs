@@ -1,10 +1,15 @@
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::backends::{BackendDescriptor, BackendName, OpenRouterConfig};
 use crate::model_system::ModelSystemConfig;
+
+/// Project-local config file read by [`load_config`] and updated by
+/// `/backend --default` / `/model --default`.
+pub const AGENT_CONFIG_PATH: &str = "agent.config.json";
 
 pub const ALL_TOOL_NAMES: &[&str] = &[
     "apply_patch",
@@ -1097,11 +1102,102 @@ where
     Some(crate::hooks::HookGroupConfig { matcher, hooks })
 }
 
+/// Strip a lone `--default` token from slash-command args.
+///
+/// Returns the remaining argument string (tokens rejoined with spaces) and
+/// whether the flag was present. Order is free: `--default` may appear first,
+/// last, or between other tokens.
+pub fn strip_default_flag(args: &str) -> (String, bool) {
+    let mut as_default = false;
+    let mut kept = Vec::new();
+    for token in args.split_whitespace() {
+        if token == "--default" {
+            as_default = true;
+        } else {
+            kept.push(token);
+        }
+    }
+    (kept.join(" "), as_default)
+}
+
+/// The backend/model currently persisted as project defaults in
+/// `agent.config.json`, used to mark `(default)` in interactive pickers.
+///
+/// Returns `(backend, model_override)`; either is `None` when the file is
+/// missing, unreadable, not a JSON object, or omits that key. This reflects
+/// what would load on next launch, independent of the live session.
+pub fn persisted_defaults() -> (Option<BackendName>, Option<String>) {
+    persisted_defaults_from(Path::new(AGENT_CONFIG_PATH))
+}
+
+fn persisted_defaults_from(path: &Path) -> (Option<BackendName>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(file) = serde_json::from_str::<FileConfig>(&text) else {
+        return (None, None);
+    };
+    let backend = file.backend.as_deref().and_then(BackendName::parse);
+    (backend, file.model_override)
+}
+
+/// Surgically merge `backend` / `modelOverride` into `agent.config.json`.
+///
+/// - Creates the file when missing.
+/// - Preserves every other key when the existing root is a JSON object.
+/// - When `model_override` is `None`, removes `modelOverride` from the file.
+/// - Refuses to overwrite an existing file whose contents are not a JSON object
+///   (invalid JSON or non-object root).
+pub fn persist_backend_model_defaults(
+    path: &Path,
+    backend: BackendName,
+    model_override: Option<&str>,
+) -> Result<()> {
+    let mut root = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow!("could not read {}: {e}", path.display()))?;
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("could not merge {}: invalid JSON ({e})", path.display()))?;
+        match parsed {
+            Value::Object(map) => Value::Object(map),
+            _ => bail!(
+                "could not merge {}: root must be a JSON object",
+                path.display()
+            ),
+        }
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+
+    {
+        let Some(obj) = root.as_object_mut() else {
+            bail!(
+                "could not merge {}: root must be a JSON object",
+                path.display()
+            );
+        };
+        obj.insert("backend".into(), json!(backend.as_str()));
+        match model_override {
+            Some(model) => {
+                obj.insert("modelOverride".into(), json!(model));
+            }
+            None => {
+                obj.remove("modelOverride");
+            }
+        }
+    }
+
+    let body = serde_json::to_string_pretty(&root)?;
+    std::fs::write(path, format!("{body}\n"))
+        .map_err(|e| anyhow!("could not write {}: {e}", path.display()))?;
+    Ok(())
+}
+
 pub fn load_config() -> AgentConfig {
     let mut config = AgentConfig::default();
     let dotenv = dotenv_values();
 
-    let path = Path::new("agent.config.json");
+    let path = Path::new(AGENT_CONFIG_PATH);
     if path.exists() {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<FileConfig>(&text) {
@@ -1332,6 +1428,133 @@ mod tests {
             Some("process")
         );
         std::env::remove_var("SMALL_HARNESS_TEST_LAYER");
+    }
+
+    #[test]
+    fn strip_default_flag_positions_and_absence() {
+        assert_eq!(
+            strip_default_flag("grok-4.5 --default"),
+            ("grok-4.5".into(), true)
+        );
+        assert_eq!(
+            strip_default_flag("--default grok-4.5"),
+            ("grok-4.5".into(), true)
+        );
+        assert_eq!(strip_default_flag("--default"), ("".into(), true));
+        assert_eq!(strip_default_flag("ollama"), ("ollama".into(), false));
+        assert_eq!(
+            strip_default_flag("provider/model-name --default"),
+            ("provider/model-name".into(), true)
+        );
+        // Multi-token ids rejoin with a single space.
+        assert_eq!(
+            strip_default_flag("--default foo bar"),
+            ("foo bar".into(), true)
+        );
+    }
+
+    #[test]
+    fn persisted_defaults_reads_backend_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+
+        // Missing file → no defaults.
+        assert_eq!(persisted_defaults_from(&path), (None, None));
+
+        std::fs::write(
+            &path,
+            r#"{ "backend": "openrouter", "modelOverride": "x-ai/grok-4.5" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_defaults_from(&path),
+            (Some(BackendName::Openrouter), Some("x-ai/grok-4.5".into()))
+        );
+
+        // Backend without a pinned model → only the backend is a default.
+        std::fs::write(&path, r#"{ "backend": "ollama" }"#).unwrap();
+        assert_eq!(
+            persisted_defaults_from(&path),
+            (Some(BackendName::Ollama), None)
+        );
+
+        // Non-object / invalid JSON is treated as no defaults, never trusted.
+        std::fs::write(&path, "not-json {").unwrap();
+        assert_eq!(persisted_defaults_from(&path), (None, None));
+    }
+
+    #[test]
+    fn persist_backend_model_defaults_creates_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+
+        persist_backend_model_defaults(&path, BackendName::OpenAi, Some("gpt-4o-mini")).unwrap();
+        let created: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(created["backend"], "openai");
+        assert_eq!(created["modelOverride"], "gpt-4o-mini");
+
+        std::fs::write(
+            &path,
+            r#"{
+  "backend": "ollama",
+  "modelOverride": "qwen2.5:7b",
+  "approvalPolicy": "dangerous-only",
+  "display": { "showBanner": false }
+}
+"#,
+        )
+        .unwrap();
+
+        persist_backend_model_defaults(&path, BackendName::Openrouter, Some("x-ai/grok-3"))
+            .unwrap();
+        let merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["backend"], "openrouter");
+        assert_eq!(merged["modelOverride"], "x-ai/grok-3");
+        assert_eq!(merged["approvalPolicy"], "dangerous-only");
+        assert_eq!(merged["display"]["showBanner"], false);
+    }
+
+    #[test]
+    fn persist_backend_model_defaults_clears_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+        std::fs::write(
+            &path,
+            r#"{"backend":"openai","modelOverride":"gpt-4o","tools":["shell"]}"#,
+        )
+        .unwrap();
+
+        persist_backend_model_defaults(&path, BackendName::Ollama, None).unwrap();
+        let merged: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["backend"], "ollama");
+        assert!(merged.get("modelOverride").is_none());
+        assert_eq!(merged["tools"], json!(["shell"]));
+    }
+
+    #[test]
+    fn persist_backend_model_defaults_refuses_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+        std::fs::write(&path, "not-json {").unwrap();
+        let err = persist_backend_model_defaults(&path, BackendName::Ollama, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid JSON"), "unexpected error: {msg}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-json {");
+    }
+
+    #[test]
+    fn persist_backend_model_defaults_refuses_non_object_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.config.json");
+        std::fs::write(&path, r#"[1, 2, 3]"#).unwrap();
+        let err = persist_backend_model_defaults(&path, BackendName::Ollama, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("root must be a JSON object"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"[1, 2, 3]"#);
     }
 
     #[test]

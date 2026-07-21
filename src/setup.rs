@@ -4,7 +4,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::backends::{backend, default_model, validate, BackendName};
-use crate::config::{dotenv_values, layered_env, AgentConfig, ApprovalPolicy, ToolSelection};
+use crate::config::{
+    dotenv_values, layered_env, AgentConfig, ApprovalPolicy, ToolSelection, AGENT_CONFIG_PATH,
+};
 use crate::hardware::{detect_hardware_spec, save_hardware_summary};
 use crate::input::{plain_read_line, select_from_list};
 use crate::openai::{build_http_client, chat_oneshot, list_models, ChatMessage, ChatRequest};
@@ -19,7 +21,6 @@ const GREEN: crate::theme::Style = crate::theme::SUCCESS;
 const YELLOW: crate::theme::Style = crate::theme::WARN;
 const RED: crate::theme::Style = crate::theme::ERROR;
 
-const CONFIG_PATH: &str = "agent.config.json";
 const NO_WIZARD_ENV: &str = "SMALL_HARNESS_NO_WIZARD";
 
 pub fn setup_disabled() -> bool {
@@ -34,7 +35,7 @@ pub fn should_run_first_run_setup(config_path: &Path) -> bool {
 }
 
 pub async fn maybe_run_first_run_setup(base: &AgentConfig) -> Result<Option<AgentConfig>> {
-    if should_run_first_run_setup(Path::new(CONFIG_PATH)) {
+    if should_run_first_run_setup(Path::new(AGENT_CONFIG_PATH)) {
         let mut first_run_defaults = base.clone();
         let spec = detect_hardware_spec();
         let _ = save_hardware_summary(&first_run_defaults.session_dir, &spec);
@@ -51,7 +52,7 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
     println!("{pad}{CYAN}{BOLD}Small Harness setup{RESET}");
     println!("{}", crate::theme::rule());
     println!(
-        "{pad}{DIM}A few quick questions — I'll write {CONFIG_PATH}. Use ↑/↓ and Enter\n{pad}(or a number); defaults are marked {CYAN}*{RESET}{DIM}. Type q to cancel.{RESET}"
+        "{pad}{DIM}A few quick questions — I'll write {AGENT_CONFIG_PATH}. Use ↑/↓ and Enter\n{pad}(or a number); defaults are marked {CYAN}*{RESET}{DIM}. Type q to cancel.{RESET}"
     );
     println!();
 
@@ -90,8 +91,8 @@ pub async fn run_setup_wizard(base: &AgentConfig) -> Result<Option<AgentConfig>>
     config.approval_policy = approval_policy;
     config.tool_selection = tool_selection;
 
-    write_agent_config(Path::new(CONFIG_PATH), &config)?;
-    println!("  {GREEN}✓{RESET} {DIM}wrote {CONFIG_PATH}{RESET}");
+    write_agent_config(Path::new(AGENT_CONFIG_PATH), &config)?;
+    println!("  {GREEN}✓{RESET} {DIM}wrote {AGENT_CONFIG_PATH}{RESET}");
     probe_setup_backend(&config).await;
 
     Ok(Some(config))

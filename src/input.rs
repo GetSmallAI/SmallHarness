@@ -353,20 +353,19 @@ fn read_plain_outcome(
                     continue;
                 }
                 if let Some(outcome) = control_key_outcome(code, modifiers) {
+                    // See the Enter branch: `\r\n`, not `\n`, while raw mode is on.
                     redraw(&mut out, &chars, cursor, sel, true)?;
-                    // Raw mode: LF alone stays on the same column; CR+LF
-                    // parks the cursor at column 0 of the next line.
                     write!(out, "\r\n")?;
                     out.flush()?;
                     return Ok(outcome);
                 }
                 match code {
                     KeyCode::Enter => {
-                        // Clear any open menu, then drop to the next line.
+                        // Clear any open menu, then drop to the next line. Raw mode
+                        // is still active here, so a bare `\n` only line-feeds and
+                        // leaves the cursor in the input's last column — `\r` returns
+                        // it to column 0 so the caller's output isn't shifted right.
                         redraw(&mut out, &chars, cursor, sel, true)?;
-                        // Raw mode: LF alone stays on the same column; CR+LF
-                        // parks the cursor at column 0 of the next line so
-                        // subsequent UI (e.g. select menus) is left-aligned.
                         write!(out, "\r\n")?;
                         out.flush()?;
                         return Ok(ReadLineOutcome::Line(chars.iter().collect()));
@@ -601,9 +600,8 @@ fn read_select_outcome(
                 }
                 write!(out, "\r\x1b[0J")?;
             } else {
-                // Always start the title at column 0. Callers may leave the
-                // cursor mid-line (e.g. raw-mode LF after the prompt), which
-                // made the bold title jump left on the first arrow redraw.
+                // Defensively start the title at column 0 even though shared
+                // raw-mode line input now exits with CRLF.
                 write!(out, "\r")?;
             }
             first = false;
