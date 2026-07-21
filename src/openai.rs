@@ -205,12 +205,45 @@ pub fn build_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+async fn resolve_bearer(client: &reqwest::Client, backend: &BackendDescriptor) -> Result<String> {
+    if matches!(backend.name, BackendName::Grok) {
+        return crate::xai_oauth::access_token(client).await;
+    }
+    Ok(backend.api_key.clone())
+}
+
+fn chat_request_builder(
+    client: &reqwest::Client,
+    backend: &BackendDescriptor,
+    url: String,
+    bearer: &str,
+    model: &str,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    let request = client.post(url).bearer_auth(bearer).json(body);
+    if matches!(backend.name, BackendName::Grok) {
+        request
+            .header(
+                "X-XAI-Token-Auth",
+                crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE,
+            )
+            .header("x-grok-model-override", model)
+    } else {
+        request
+    }
+}
+
 pub async fn list_models(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
 ) -> Result<Vec<String>> {
     if matches!(backend.name, BackendName::OpenAiCodex) {
         return Ok(crate::codex_responses::codex_model_list());
+    }
+    if matches!(backend.name, BackendName::Grok) {
+        // Static catalog (same shape as openai-codex): avoid GET /models on
+        // every `/model` open and only expose agent-ready Grok ids.
+        return Ok(crate::xai_oauth::grok_model_list());
     }
     let url = format!("{}/models", backend.base_url.trim_end_matches('/'));
     let resp = client.get(url).bearer_auth(&backend.api_key).send().await?;
@@ -243,10 +276,8 @@ pub async fn chat_oneshot(
         backend.base_url.trim_end_matches('/')
     );
     let body = request_body(backend, req)?;
-    let resp = client
-        .post(url)
-        .bearer_auth(&backend.api_key)
-        .json(&body)
+    let bearer = resolve_bearer(client, backend).await?;
+    let resp = chat_request_builder(client, backend, url, &bearer, req.model, &body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -343,10 +374,8 @@ where
         backend.base_url.trim_end_matches('/')
     );
     let body = request_body(backend, req)?;
-    let resp = client
-        .post(url)
-        .bearer_auth(&backend.api_key)
-        .json(&body)
+    let bearer = resolve_bearer(client, backend).await?;
+    let resp = chat_request_builder(client, backend, url, &bearer, req.model, &body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -413,7 +442,7 @@ fn apply_effort_to_request(
                 serde_json::json!({ "effort": effort.openrouter_reasoning_effort() }),
             );
         }
-        BackendName::OpenAi => {
+        BackendName::OpenAi | BackendName::Grok => {
             if let Some(value) = effort.openai_reasoning_effort() {
                 obj.insert("reasoning_effort".into(), Value::String(value.into()));
             }
@@ -478,6 +507,38 @@ mod tests {
             SseEvent::Chunk(c) => c.choices.first()?.delta.content.as_deref(),
             _ => None,
         }
+    }
+
+    #[test]
+    fn grok_oauth_requests_use_cli_proxy_headers() {
+        let backend = BackendDescriptor {
+            name: BackendName::Grok,
+            base_url: crate::xai_oauth::INFERENCE_BASE_URL.into(),
+            api_key: String::new(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let request = chat_request_builder(
+            &reqwest::Client::new(),
+            &backend,
+            format!("{}/chat/completions", backend.base_url),
+            "oauth-token",
+            "grok-4.5",
+            &serde_json::json!({"model": "grok-4.5", "stream": true}),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers()["x-xai-token-auth"],
+            crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE
+        );
+        assert_eq!(request.headers()["x-grok-model-override"], "grok-4.5");
+        assert_eq!(request.headers()["authorization"], "Bearer oauth-token");
     }
 
     #[test]

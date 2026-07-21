@@ -212,35 +212,49 @@ pub(super) async fn cmd_auth(args: &str) -> Result<()> {
 
 struct AppStateLoginOnly;
 
+fn normalize_login_provider(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "openai-codex" | "codex" | "chatgpt" => Some("openai-codex"),
+        "grok" | "xai" | "xai-oauth" | "x-ai" | "supergrok" | "grok-oauth" => Some("grok"),
+        _ => None,
+    }
+}
+
 pub(super) async fn cmd_login(args: &str, state: &mut impl LoginState) -> Result<()> {
-    let provider = if args.trim().is_empty() {
-        "openai-codex"
-    } else {
-        args.trim()
-    };
-    if !matches!(provider, "openai-codex" | "codex" | "chatgpt") {
+    let Some(provider) = normalize_login_provider(args) else {
         println!(
-            "  {RED}✗{RESET} {DIM}unknown login provider: {provider} (try: openai-codex){RESET}"
+            "  {RED}✗{RESET} {DIM}unknown login provider: {} (try: openai-codex, grok){RESET}",
+            args.trim()
         );
         return Ok(());
-    }
+    };
 
-    println!("  {BOLD}ChatGPT / Codex login{RESET}");
-    println!(
-        "  {DIM}This uses your ChatGPT/Codex subscription OAuth token, not OPENAI_API_KEY.{RESET}"
-    );
+    let (title, note) = match provider {
+        "grok" => (
+            "Grok / SuperGrok login",
+            "This uses your SuperGrok or X Premium+ subscription OAuth, not XAI_API_KEY.",
+        ),
+        _ => (
+            "ChatGPT / Codex login",
+            "This uses your ChatGPT/Codex subscription OAuth token, not OPENAI_API_KEY.",
+        ),
+    };
+    println!("  {BOLD}{title}{RESET}");
+    println!("  {DIM}{note}{RESET}");
     println!("  {DIM}1) Browser login (default){RESET}");
     println!("  {DIM}2) Device-code login (headless/SSH){RESET}");
     let pick = plain_read_line(format!("  {DIM}Select [1]: {RESET}")).await?;
-    let result = if pick.trim() == "2" || pick.trim().eq_ignore_ascii_case("device") {
-        crate::codex_oauth::login_and_save_device_code(state.http()).await
-    } else {
-        crate::codex_oauth::login_and_save_browser(state.http()).await
+    let device = pick.trim() == "2" || pick.trim().eq_ignore_ascii_case("device");
+    let result = match (provider, device) {
+        ("grok", true) => crate::xai_oauth::login_and_save_device_code(state.http()).await,
+        ("grok", false) => crate::xai_oauth::login_and_save_browser(state.http()).await,
+        (_, true) => crate::codex_oauth::login_and_save_device_code(state.http()).await,
+        (_, false) => crate::codex_oauth::login_and_save_browser(state.http()).await,
     };
     match result {
         Ok(path) => {
             println!(
-                "  {GREEN}✓{RESET} {DIM}logged in to openai-codex; saved to {}{RESET}",
+                "  {GREEN}✓{RESET} {DIM}logged in to {provider}; saved to {}{RESET}",
                 path.display()
             );
             state.after_login()?;
@@ -260,7 +274,7 @@ impl LoginState for AppState {
         &self.http
     }
     fn after_login(&mut self) -> Result<()> {
-        if matches!(self.config.backend, BackendName::OpenAiCodex) {
+        if self.config.backend.is_oauth_login() {
             self.rebuild_client()?;
             self.resolve_model();
         }
@@ -279,25 +293,46 @@ impl LoginState for AppStateLoginOnly {
 }
 
 pub(super) fn cmd_logout(args: &str) -> Result<()> {
-    let provider = if args.trim().is_empty() {
-        "openai-codex"
-    } else {
-        args.trim()
-    };
-    if !matches!(provider, "openai-codex" | "codex" | "chatgpt") {
+    let Some(provider) = normalize_login_provider(args) else {
         println!(
-            "  {RED}✗{RESET} {DIM}unknown logout provider: {provider} (try: openai-codex){RESET}"
+            "  {RED}✗{RESET} {DIM}unknown logout provider: {} (try: openai-codex, grok){RESET}",
+            args.trim()
         );
         return Ok(());
-    }
+    };
     let mut store = crate::auth::AuthStore::load();
-    if store.clear("openai-codex") {
+    if store.clear(provider) {
         store.save()?;
-        println!("  {GREEN}✓{RESET} {DIM}cleared openai-codex login{RESET}");
+        println!("  {GREEN}✓{RESET} {DIM}cleared {provider} login{RESET}");
     } else {
-        println!("  {DIM}no stored openai-codex login{RESET}");
+        println!("  {DIM}no stored {provider} login{RESET}");
     }
     Ok(())
+}
+
+fn print_oauth_status(store: &crate::auth::AuthStore, provider: &str, login_hint: &str) {
+    if let Some(oauth) = store.get_oauth(provider) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let status = if oauth.expires > now + 60 {
+            "oauth logged in"
+        } else {
+            "oauth refresh needed"
+        };
+        let source = oauth
+            .account_id
+            .as_ref()
+            .map(|id| format!("auth file · account {id}"))
+            .unwrap_or_else(|| "auth file".into());
+        println!("  {:<12} {:<22}  {DIM}{}{RESET}", provider, status, source);
+    } else {
+        println!(
+            "  {:<12} {:<22}  {DIM}{login_hint}{RESET}",
+            provider, "(not logged in)"
+        );
+    }
 }
 
 fn print_auth_status() {
@@ -315,31 +350,8 @@ fn print_auth_status() {
         };
         println!("  {:<12} {:<22}  {DIM}{}{RESET}", provider, display, source);
     }
-    if let Some(oauth) = store.get_oauth("openai-codex") {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let status = if oauth.expires > now + 60 {
-            "oauth logged in"
-        } else {
-            "oauth refresh needed"
-        };
-        let source = oauth
-            .account_id
-            .as_ref()
-            .map(|id| format!("auth file · account {id}"))
-            .unwrap_or_else(|| "auth file".into());
-        println!(
-            "  {:<12} {:<22}  {DIM}{}{RESET}",
-            "openai-codex", status, source
-        );
-    } else {
-        println!(
-            "  {:<12} {:<22}  {DIM}/login openai-codex{RESET}",
-            "openai-codex", "(not logged in)"
-        );
-    }
+    print_oauth_status(&store, "openai-codex", "/login openai-codex");
+    print_oauth_status(&store, "grok", "/login grok");
     if let Some(path) = auth_file_path() {
         println!("  {DIM}file{RESET}     {}", path.display());
     }
@@ -618,14 +630,22 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         );
         return Ok(());
     }
-    if !chosen.is_local()
-        && !matches!(chosen, BackendName::OpenAiCodex)
-        && backend(chosen).api_key.is_empty()
+    if matches!(chosen, BackendName::Grok)
+        && crate::auth::AuthStore::load()
+            .get_oauth(crate::xai_oauth::PROVIDER)
+            .is_none()
     {
+        println!(
+            "  {RED}✗{RESET} {DIM}not logged in for grok. Run /login grok to sign in with SuperGrok / X Premium+.{RESET}"
+        );
+        return Ok(());
+    }
+    if !chosen.is_local() && !chosen.is_oauth_login() && backend(chosen).api_key.is_empty() {
         let env_name = match chosen {
             BackendName::Openrouter => "OPENROUTER_API_KEY",
             BackendName::OpenAi => "OPENAI_API_KEY",
             BackendName::OpenAiCodex => "ChatGPT login",
+            BackendName::Grok => "Grok login",
             _ => "API key",
         };
         println!("  {RED}✗{RESET} {DIM}{env_name} not set in environment.{RESET}");
@@ -715,6 +735,15 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
                 println!(
                     "  {RED}✗{RESET} {DIM}{rest} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
                     crate::codex_responses::codex_model_list().join(", ")
+                );
+                return Ok(());
+            };
+            canonical.to_string()
+        } else if matches!(state.config.backend, BackendName::Grok) {
+            let Some(canonical) = crate::xai_oauth::canonical_grok_model(&rest) else {
+                println!(
+                    "  {RED}✗{RESET} {DIM}{rest} is not supported with Grok login. Try one of: {}{RESET}",
+                    crate::xai_oauth::grok_model_list().join(", ")
                 );
                 return Ok(());
             };

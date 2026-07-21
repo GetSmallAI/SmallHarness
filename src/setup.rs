@@ -504,6 +504,9 @@ fn backend_hint(backend: BackendName) -> &'static str {
         BackendName::OpenAiCodex => {
             "run `/login openai-codex` to sign in with ChatGPT/Codex subscription OAuth."
         }
+        BackendName::Grok => {
+            "run `/login grok` to sign in with SuperGrok / X Premium+ (browser or device-code)."
+        }
     }
 }
 
