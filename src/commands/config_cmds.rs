@@ -594,11 +594,15 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
             let marker = picker_marker(*b == current, persisted_backend == Some(*b));
             println!("  {DIM}{}){RESET} {}{}", i + 1, b.as_str(), marker);
         }
+        // Blank line so the list and the prompt don't crowd each other.
+        println!();
         let prompt = format!(
             "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
             BackendName::all().len()
         );
         let pick = plain_read_line(prompt).await?.trim().to_string();
+        // Blank line between the typed selection and the response below.
+        println!();
         let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
         picked_with_default = flag_default;
         sel.parse::<usize>()
@@ -755,11 +759,15 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     if total > shown.len() {
         println!("  {DIM}…and {} more{RESET}", total - shown.len());
     }
+    // Blank line so the list and the prompt don't crowd each other.
+    println!();
     let prompt = format!(
         "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
         shown.len()
     );
     let pick = plain_read_line(prompt).await?.trim().to_string();
+    // Blank line between the typed selection and the response below.
+    println!();
     let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
     if let Some(idx) = sel.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
         if let Some(m) = shown.get(idx) {

@@ -20,6 +20,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   it as you pick; otherwise a `y/N` prompt offers to save the choice as the
   project default.
 
+## [1.2.4] - 2026-07-20
+
+### Fixed
+
+- **Aligned output after raw-mode prompts.** Sub-prompts now emit a carriage
+  return with their newline before leaving raw mode, so confirmations and
+  subsequent picker output start in column 0. Backend and model pickers also
+  include spacing around the selection prompt for easier scanning.
+
 ## [1.2.3] - 2026-07-16
 
 ### Fixed
