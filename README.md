@@ -21,7 +21,7 @@
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
   <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.3-111827">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.5-111827">
   <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
@@ -269,7 +269,14 @@ env var); `openai-codex` requires `/login openai-codex`; `grok` requires
 
 Each backend has one sensible default; local backends default to a 7B coder
 that runs on modest hardware. Override any time with `/model`, `AGENT_MODEL`,
-or `modelOverride` in your config.
+or `modelOverride` in your config. Append `--default` to `/model` or `/backend`
+to write the choice into `agent.config.json` (surgical merge: only `backend` and
+`modelOverride`). `/model --default` pins the active model; `/backend --default`
+pins the active backend and clears `modelOverride` so the next launch uses that
+backend's built-in default model. In the interactive pickers you can also append
+`--default` to a selection (e.g. `3 --default`) to pin it as you choose, or
+answer the `y/N` save prompt afterwards; each entry is tagged `(selected)` for
+the live session choice and `(default)` for what's persisted on disk.
 
 | Backend | Default model |
 |---------|---------------|
@@ -375,8 +382,8 @@ this exact call`. The session cache resets on `/new`.
 
 **Backend, model, tools**
 ```
-/backend <name>        switch backend
-/model [id]            list / pick a model (shows context + cost when known)
+/backend <name> [--default]  switch backend; --default writes agent.config.json
+/model [id] [--default]      list / pick a model; --default pins backend+model
 /tools auto|fixed|<…>  show or set the active tool pool
 /auth                  manage API keys and OAuth credentials
 /login openai-codex    sign in with ChatGPT/Codex subscription OAuth
@@ -462,12 +469,16 @@ when present. If a cloud model does not expose cost, the turn shows `$?` and
 prefixes the session total with `≥` to signal it is a lower bound, not a
 fiction.
 
-The `/model` picker shows the same data while you choose:
+The `/model` picker shows the same data while you choose, tagging the live
+session choice `(selected)` and the value persisted in `agent.config.json`
+`(default)`:
 
 ```text
-   1) gpt-4o-mini            128k ctx · $0.15/$0.60 per Mtoken
-   2) gpt-4o                 128k ctx · $2.50/$10.00 per Mtoken
-   3) o1-mini                128k ctx · $3.00/$12.00 per Mtoken
+   1) gpt-4o-mini  (selected) (default)   128k ctx · $0.15/$0.60 per Mtoken
+   2) gpt-4o                               128k ctx · $2.50/$10.00 per Mtoken
+   3) o1-mini                              128k ctx · $3.00/$12.00 per Mtoken
+
+   Select (1-3) · append --default to pin:
 ```
 
 ### Claude Fable tracker
@@ -971,8 +982,8 @@ Full list with comments in [`.env.example`](.env.example).
 
 ### `agent.config.json`
 
-For project-level defaults, run `/setup` or drop a JSON file at the repo
-root. Common shape:
+For project-level defaults, run `/setup`, use `/backend --default` /
+`/model --default`, or drop a JSON file at the repo root. Common shape:
 
 ```json
 {

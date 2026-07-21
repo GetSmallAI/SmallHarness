@@ -189,11 +189,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/backend",
-        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex, grok)",
+        "Switch backend (ollama, lm-studio, mlx, llamacpp, openrouter, openai, openai-codex, grok); --default persists",
     ),
     (
         "/model",
-        "List models from the current backend and pick one",
+        "List/pick a model; --default pins backend+model in agent.config.json",
     ),
     (
         "/tools",
