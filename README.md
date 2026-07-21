@@ -19,10 +19,8 @@
 <p align="center">
   <a href="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GetSmallAI/SmallHarness/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-1.75%2B-dea584">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-111827">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
   <img alt="Version" src="https://img.shields.io/badge/version-1.2.5-111827">
-  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI-2563eb">
+  <img alt="Backends" src="https://img.shields.io/badge/backends-Ollama%20%7C%20LM%20Studio%20%7C%20MLX%20%7C%20llama.cpp%20%7C%20OpenRouter%20%7C%20OpenAI%20%7C%20Grok-2563eb">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-optimized-111827">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-111827">
 </p>
@@ -150,8 +148,8 @@ backend.
 
 ### Path A3 — Grok / SuperGrok subscription login
 
-Use a SuperGrok or X Premium+ subscription the same way OpenCode / Hermes do —
-browser or headless device-code OAuth, no `XAI_API_KEY`:
+Use a SuperGrok or X Premium+ subscription through browser or headless
+device-code OAuth, with no `XAI_API_KEY`:
 
 ```text
 /login grok
@@ -256,11 +254,12 @@ A handful of moves worth knowing right away:
 | `openrouter` | `https://openrouter.ai/api/v1` | Cloud A/B with `/compare`; access to frontier models and Fusion |
 | `openai` | `https://api.openai.com/v1` | Direct provider access with your own key |
 | `openai-codex` | `https://chatgpt.com/backend-api/codex/responses` | ChatGPT/Codex subscription OAuth via `/login openai-codex` |
-| `grok` | `https://api.x.ai/v1` | SuperGrok / X Premium+ OAuth via `/login grok` (browser or device-code) |
+| `grok` | `https://cli-chat-proxy.grok.com/v1` | SuperGrok / X Premium+ OAuth via `/login grok` (browser or device-code) |
 
 Switch at runtime with `/backend <name>`. Endpoint overrides:
 `OLLAMA_BASE_URL`, `LM_STUDIO_BASE_URL`, `MLX_BASE_URL`, `LLAMACPP_BASE_URL`,
-`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`, `XAI_BASE_URL` / `GROK_BASE_URL`.
+`OPENAI_BASE_URL`, `OPENAI_CODEX_BASE_URL`. The Grok OAuth proxy is fixed to
+xAI's first-party host so subscription tokens cannot be redirected elsewhere.
 API backends require an API key (set via [`/auth`](#cost-and-credentials) or
 env var); `openai-codex` requires `/login openai-codex`; `grok` requires
 `/login grok`.
@@ -274,9 +273,8 @@ to write the choice into `agent.config.json` (surgical merge: only `backend` and
 `modelOverride`). `/model --default` pins the active model; `/backend --default`
 pins the active backend and clears `modelOverride` so the next launch uses that
 backend's built-in default model. In the interactive pickers you can also append
-`--default` to a selection (e.g. `3 --default`) to pin it as you choose, or
-answer the `y/N` save prompt afterwards; each entry is tagged `(selected)` for
-the live session choice and `(default)` for what's persisted on disk.
+answer the `y/N` save prompt after choosing; each entry is tagged `(selected)`
+for the live session choice and `(default)` for what's persisted on disk.
 
 | Backend | Default model |
 |---------|---------------|
@@ -449,9 +447,9 @@ Responses backend.
 `grok` is not an `XAI_API_KEY` replacement either. It uses the same OAuth
 shape as the official Grok CLI (browser PKCE on localhost, or RFC 8628
 device-code for SSH/headless), stores tokens under the `grok` key in
-`auth.json`, refreshes automatically, and calls `https://api.x.ai/v1`
-chat completions. If `~/.grok/auth.json` already has a Grok CLI login,
-`/login grok` can import and refresh those credentials.
+`auth.json`, refreshes automatically, and calls xAI's Grok CLI inference proxy
+with its required OAuth headers. If `~/.grok/auth.json` already has a Grok CLI
+login, `/login grok` can import and refresh those credentials.
 
 ### Per-turn and session cost
 
@@ -469,17 +467,21 @@ when present. If a cloud model does not expose cost, the turn shows `$?` and
 prefixes the session total with `≥` to signal it is a lower bound, not a
 fiction.
 
-The `/model` picker shows the same data while you choose, tagging the live
-session choice `(selected)` and the value persisted in `agent.config.json`
-`(default)`:
+The `/model` picker first accepts an optional text filter, then shows the same
+data in an arrow-key menu. It tags the live session choice `(selected)` and the
+value persisted in `agent.config.json` `(default)`:
 
 ```text
-   1) gpt-4o-mini  (selected) (default)   128k ctx · $0.15/$0.60 per Mtoken
-   2) gpt-4o                               128k ctx · $2.50/$10.00 per Mtoken
-   3) o1-mini                              128k ctx · $3.00/$12.00 per Mtoken
-
-   Select (1-3) · append --default to pin:
+  ▸ 1) gpt-4o-mini  (selected) (default)   128k ctx · $0.15/$0.60 per Mtoken
+    2) gpt-4o                               128k ctx · $2.50/$10.00 per Mtoken
+    3) o1-mini                              128k ctx · $3.00/$12.00 per Mtoken
+    4) type a model id…
+  ↑/↓ move · Enter select · 1-9 jump · q cancel
 ```
+
+After an interactive `/model` or `/backend` choice, answer the `y/N` prompt to
+save it as the project default. Direct forms such as `/model gpt-4o --default`
+and `/backend ollama --default` still switch and persist in one command.
 
 ### Claude Fable tracker
 

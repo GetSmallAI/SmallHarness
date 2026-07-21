@@ -187,7 +187,6 @@ fn format_footer(
     scorecard_suffix: &str,
     fable_suffix: &str,
     model: &str,
-    endpoint: &str,
 ) -> String {
     let mut parts = vec![
         format!("{} in", format_tokens(input_tokens)),
@@ -221,9 +220,6 @@ fn format_footer(
     }
     if !model.is_empty() {
         parts.push(model.to_string());
-    }
-    if !endpoint.is_empty() {
-        parts.push(endpoint.trim_end_matches('/').to_string());
     }
     format!("{GRAY}  {}{RESET}", parts.join(" · "))
 }
@@ -940,7 +936,6 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &scorecard_suffix,
             &fable_suffix,
             &state.model,
-            &state.backend.base_url,
         )
     );
 
@@ -1172,7 +1167,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200, 87, None, true, 0.0, false, None, &metrics, "", "", "", "", "",
+            1200, 87, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1207,36 +1202,23 @@ mod cost_tests {
             "3 turn(s) tracked · /ship pr closes scorecard",
             "Fable 25.0k / 50.0k wk (50%)",
             "grok-4.5",
-            "https://api.x.ai/v1",
         );
         assert!(footer.contains("500 in · 120 out · $0.01 this turn · $0.01 session · effort high"));
         assert!(footer.contains("path: main · 2 paths"));
         assert!(footer.contains("3 turn(s) tracked"));
         assert!(footer.contains("Fable 25.0k / 50.0k wk (50%)"));
-        assert!(footer.contains("grok-4.5 · https://api.x.ai/v1"));
-        assert!(footer.ends_with(&format!("https://api.x.ai/v1{RESET}")));
+        assert!(footer.ends_with(&format!("grok-4.5{RESET}")));
     }
 
     #[test]
-    fn footer_ends_with_model_and_endpoint_when_set() {
+    fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            100,
-            50,
-            None,
-            true,
-            0.0,
-            false,
-            None,
-            &metrics,
-            "",
-            "",
-            "",
-            "grok-4.5",
-            "https://api.x.ai/v1/",
+            100, 50, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
         );
-        assert!(footer.contains("100 in · 50 out · grok-4.5 · https://api.x.ai/v1"));
-        assert!(footer.ends_with(&format!("https://api.x.ai/v1{RESET}")));
+        assert!(footer.contains("100 in · 50 out · grok-4.5"));
+        assert!(!footer.contains("https://"));
+        assert!(footer.ends_with(&format!("grok-4.5{RESET}")));
     }
 
     #[test]
@@ -1255,10 +1237,10 @@ mod cost_tests {
             "",
             "",
             "qwen2.5:7b",
-            "http://localhost:11434/v1",
         );
         assert!(!footer.contains('$'));
-        assert!(footer.contains("qwen2.5:7b · http://localhost:11434/v1"));
+        assert!(footer.contains("qwen2.5:7b"));
+        assert!(!footer.contains("http://"));
     }
 
     #[test]

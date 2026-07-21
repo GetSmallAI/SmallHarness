@@ -161,9 +161,10 @@ pub fn backend(name: BackendName) -> BackendDescriptor {
         },
         BackendName::Grok => BackendDescriptor {
             name,
-            base_url: std::env::var("XAI_BASE_URL")
-                .or_else(|_| std::env::var("GROK_BASE_URL"))
-                .unwrap_or_else(|_| "https://api.x.ai/v1".into()),
+            // OAuth session tokens belong only on xAI's first-party CLI
+            // proxy. Do not permit an environment override that could receive
+            // and exfiltrate the bearer token.
+            base_url: crate::xai_oauth::INFERENCE_BASE_URL.into(),
             api_key: String::new(),
             is_local: false,
             openrouter: OpenRouterConfig::default(),
@@ -310,8 +311,10 @@ mod tests {
 
     #[test]
     fn defaults_grok_to_grok_4_5() {
-        let model = default_model(&descriptor(BackendName::Grok), None);
+        let backend = backend(BackendName::Grok);
+        let model = default_model(&backend, None);
         assert_eq!(model, "grok-4.5");
+        assert_eq!(backend.base_url, crate::xai_oauth::INFERENCE_BASE_URL);
     }
 
     #[test]

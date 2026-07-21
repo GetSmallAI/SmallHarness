@@ -3,22 +3,28 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::auth::{auth_file_path, AuthStore, OAuthCredential};
 use crate::input::plain_read_line;
 
 pub const PROVIDER: &str = "grok";
+pub const INFERENCE_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
+pub const TOKEN_AUTH_HEADER_VALUE: &str = "xai-grok-cli";
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const ISSUER: &str = "https://auth.x.ai";
 const DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
 const REDIRECT_HOST: &str = "127.0.0.1";
-const PREFERRED_REDIRECT_PORT: u16 = 56121;
+const PREFERRED_REDIRECT_PORT: u16 = 20000;
 const REDIRECT_PATH: &str = "/callback";
+const CALLBACK_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const CALLBACK_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 const GROK_CLI_AUTH_SCOPE_KEY: &str = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
 const GROK_CLI_LEGACY_SCOPE_KEY: &str = "https://accounts.x.ai/sign-in";
 /// Curated agent-ready Grok models, matching pi's built-in xAI catalog.
@@ -155,7 +161,7 @@ async fn discover(client: &reqwest::Client) -> Result<Discovery> {
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
             "xAI OAuth discovery failed ({status}): {}",
-            body.trim()
+            oauth_error_detail(&body)
         ));
     }
     let data: Value = resp.json().await?;
@@ -202,20 +208,86 @@ fn authorization_url(
     )
 }
 
-fn write_callback_response(mut stream: TcpStream, ok: bool, message: &str, origin: Option<&str>) {
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn terminal_safe(input: &str) -> String {
+    let mut output = String::new();
+    let mut output_chars = 0;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.next_if_eq(&'[').is_some() {
+                for sequence_ch in chars.by_ref() {
+                    if ('@'..='~').contains(&sequence_ch) {
+                        break;
+                    }
+                }
+            } else {
+                let _ = chars.next();
+            }
+            continue;
+        }
+        if !ch.is_control() && output_chars < 512 {
+            output.push(ch);
+            output_chars += 1;
+        }
+    }
+    output
+}
+
+fn oauth_error_detail(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return "request rejected".into();
+    };
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(terminal_safe)
+        .unwrap_or_else(|| "request rejected".into());
+    let description = value
+        .get("error_description")
+        .and_then(Value::as_str)
+        .map(terminal_safe)
+        .unwrap_or_default();
+    if description.is_empty() {
+        error
+    } else {
+        format!("{error}: {description}")
+    }
+}
+
+fn callback_html(ok: bool, message: &str) -> String {
     let title = if ok {
         "Grok login complete"
     } else {
         "Grok login failed"
     };
-    let body = format!(
+    let message = escape_html(message);
+    format!(
         "<!doctype html><meta charset=\"utf-8\"><title>{}</title><body style=\"font-family: system-ui; margin: 3rem\"><h1>{}</h1><p>{}</p></body>",
         title, title, message
-    );
+    )
+}
+
+fn write_callback_response(mut stream: TcpStream, ok: bool, message: &str, origin: Option<&str>) {
+    let body = callback_html(ok, message);
     let status = if ok { "200 OK" } else { "400 Bad Request" };
     let mut headers = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\ncontent-security-policy: {CALLBACK_CSP}\r\nreferrer-policy: no-referrer\r\nx-content-type-options: nosniff\r\nconnection: close\r\n",
+        body.len(),
     );
     if let Some(origin) = origin {
         headers.push_str(&format!(
@@ -225,6 +297,8 @@ fn write_callback_response(mut stream: TcpStream, ok: bool, message: &str, origi
     headers.push_str("\r\n");
     headers.push_str(&body);
     let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Write);
 }
 
 fn cors_origin(headers: &str) -> Option<String> {
@@ -286,7 +360,7 @@ async fn read_token_response(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
             "xAI Grok token {operation} failed ({status}): {}",
-            body.trim()
+            oauth_error_detail(&body)
         ));
     }
     let token: TokenResponse = resp.json().await?;
@@ -372,10 +446,38 @@ fn bind_callback_port() -> Result<(TcpListener, u16)> {
 }
 
 fn wait_for_browser_callback_with_listener(listener: TcpListener, state: String) -> Result<String> {
+    wait_for_browser_callback_with_timeout(listener, state, CALLBACK_WAIT_TIMEOUT)
+}
+
+fn wait_for_browser_callback_with_timeout(
+    listener: TcpListener,
+    state: String,
+    timeout: Duration,
+) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .context("configuring OAuth callback listener")?;
+    let deadline = Instant::now() + timeout;
     loop {
-        let (mut stream, _) = listener.accept().context("waiting for OAuth callback")?;
+        if Instant::now() >= deadline {
+            return Err(anyhow!("OAuth callback timed out"));
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(e) => return Err(e).context("waiting for OAuth callback"),
+        };
+        let _ = stream.set_read_timeout(Some(CALLBACK_READ_TIMEOUT));
         let mut buf = [0u8; 8192];
-        let n = stream.read(&mut buf).unwrap_or(0);
+        let n = match stream.read(&mut buf) {
+            Ok(0) => continue,
+            Ok(n) => n,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
+            Err(_) => continue,
+        };
         let request = String::from_utf8_lossy(&buf[..n]);
         let first = request.lines().next().unwrap_or_default();
         let method = first.split_whitespace().next().unwrap_or_default();
@@ -391,35 +493,59 @@ fn wait_for_browser_callback_with_listener(listener: TcpListener, state: String)
             }
             headers.push_str("\r\n");
             let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(Shutdown::Write);
             continue;
         }
 
-        if !path.starts_with(REDIRECT_PATH) {
+        if !method.eq_ignore_ascii_case("GET") {
+            write_callback_response(stream, false, "Method not allowed.", origin.as_deref());
+            continue;
+        }
+        let route = path.split_once('?').map(|(route, _)| route).unwrap_or(path);
+        if route != REDIRECT_PATH {
             write_callback_response(
                 stream,
                 false,
                 "Callback route not found.",
                 origin.as_deref(),
             );
-            return Err(anyhow!("unexpected OAuth callback path"));
-        }
-        if let Some(err) = query_param(path, "error") {
-            let desc = query_param(path, "error_description").unwrap_or_default();
-            write_callback_response(
-                stream,
-                false,
-                &format!("Authorization failed: {err} {desc}"),
-                origin.as_deref(),
-            );
-            return Err(anyhow!("xAI authorization failed: {err} {desc}"));
+            continue;
         }
         let got_state = query_param(path, "state");
         if got_state.as_deref() != Some(state.as_str()) {
             write_callback_response(stream, false, "State mismatch.", origin.as_deref());
-            return Err(anyhow!("OAuth state mismatch"));
+            continue;
         }
-        let code =
-            query_param(path, "code").ok_or_else(|| anyhow!("OAuth callback missing code"))?;
+        if let Some(err) = query_param(path, "error") {
+            let err = terminal_safe(&err);
+            let desc = terminal_safe(
+                query_param(path, "error_description")
+                    .unwrap_or_default()
+                    .as_str(),
+            );
+            let detail = if desc.is_empty() {
+                err
+            } else {
+                format!("{err}: {desc}")
+            };
+            write_callback_response(
+                stream,
+                false,
+                &format!("Authorization failed: {detail}"),
+                origin.as_deref(),
+            );
+            return Err(anyhow!("xAI authorization failed: {detail}"));
+        }
+        let Some(code) = query_param(path, "code") else {
+            write_callback_response(
+                stream,
+                false,
+                "Authorization code missing.",
+                origin.as_deref(),
+            );
+            continue;
+        };
         write_callback_response(
             stream,
             true,
@@ -549,7 +675,7 @@ pub async fn login_browser(client: &reqwest::Client) -> Result<OAuthCredential> 
     }
     println!("  Waiting for callback on {redirect_uri} ...");
     println!(
-        "  (If the browser cannot reach localhost, cancel and paste the redirect URL or code.)"
+        "  (If no callback arrives within 60 seconds, you can paste the redirect URL or code.)"
     );
 
     let state_for_thread = state.clone();
@@ -618,7 +744,7 @@ pub async fn login_device_code(client: &reqwest::Client) -> Result<OAuthCredenti
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!(
             "xAI device-code request failed ({status}): {}",
-            body.trim()
+            oauth_error_detail(&body)
         ));
     }
     let device: DeviceStartResponse = resp.json().await?;
@@ -679,7 +805,7 @@ pub async fn login_device_code(client: &reqwest::Client) -> Result<OAuthCredenti
             "expired_token" | "access_denied" => {
                 return Err(anyhow!(
                     "xAI device-code login failed ({err}): {}",
-                    body.trim()
+                    oauth_error_detail(&body)
                 ));
             }
             _ => {
@@ -688,7 +814,7 @@ pub async fn login_device_code(client: &reqwest::Client) -> Result<OAuthCredenti
                 }
                 return Err(anyhow!(
                     "xAI device-code polling failed ({status}): {}",
-                    body.trim()
+                    oauth_error_detail(&body)
                 ));
             }
         }
@@ -767,6 +893,16 @@ pub fn canonical_grok_model(model: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    fn send_callback(port: u16, target: &str) {
+        let mut stream = TcpStream::connect((REDIRECT_HOST, port)).unwrap();
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: {REDIRECT_HOST}:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let _ = stream.shutdown(Shutdown::Write);
+    }
+
     #[test]
     fn authorization_url_has_xai_oauth_params() {
         let discovery = Discovery {
@@ -776,7 +912,7 @@ mod tests {
         };
         let url = authorization_url(
             &discovery,
-            "http://127.0.0.1:56121/callback",
+            "http://127.0.0.1:20000/callback",
             "challenge",
             "state",
             "nonce",
@@ -791,9 +927,79 @@ mod tests {
     #[test]
     fn parses_redirect_url_input() {
         let (code, state) =
-            parse_authorization_input("http://127.0.0.1:56121/callback?code=abc%20123&state=st");
+            parse_authorization_input("http://127.0.0.1:20000/callback?code=abc%20123&state=st");
         assert_eq!(code.as_deref(), Some("abc 123"));
         assert_eq!(state.as_deref(), Some("st"));
+    }
+
+    #[test]
+    fn callback_ignores_untrusted_requests_until_state_matches() {
+        let listener = TcpListener::bind((REDIRECT_HOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            wait_for_browser_callback_with_timeout(
+                listener,
+                "expected-state".into(),
+                Duration::from_secs(2),
+            )
+        });
+
+        send_callback(port, "/callback-evil?code=bad&state=expected-state");
+        send_callback(
+            port,
+            "/callback?error=denied&error_description=%3Cscript%3Ebad%3C%2Fscript%3E&state=wrong-state",
+        );
+        send_callback(port, "/callback?code=good-code&state=expected-state");
+        assert_eq!(server.join().unwrap().unwrap(), "good-code");
+    }
+
+    #[test]
+    fn callback_escapes_provider_errors_and_restricts_content() {
+        let html = callback_html(false, "Authorization failed: <script>alert(1)</script>");
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(CALLBACK_CSP.contains("default-src 'none'"));
+
+        let listener = TcpListener::bind((REDIRECT_HOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            wait_for_browser_callback_with_timeout(
+                listener,
+                "expected-state".into(),
+                Duration::from_secs(2),
+            )
+        });
+
+        send_callback(
+            port,
+            "/callback?error=denied&error_description=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state=expected-state",
+        );
+        assert!(server.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn callback_wait_has_a_deadline() {
+        let listener = TcpListener::bind((REDIRECT_HOST, 0)).unwrap();
+        let started = Instant::now();
+        let result = wait_for_browser_callback_with_timeout(
+            listener,
+            "state".into(),
+            Duration::from_millis(40),
+        );
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn oauth_errors_do_not_echo_unstructured_response_bodies() {
+        assert_eq!(
+            oauth_error_detail("gateway exploded with a token"),
+            "request rejected"
+        );
+        assert_eq!(
+            oauth_error_detail(r#"{"error":"access_denied","error_description":"no\u001b[31mpe"}"#,),
+            "access_denied: nope"
+        );
     }
 
     #[test]

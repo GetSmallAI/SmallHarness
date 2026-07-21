@@ -13,13 +13,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   login, plus RFC 8628 device-code for headless/SSH) via `/login grok`. Access
   and refresh tokens are stored in the existing `0600` `auth.json` under the
   `grok` provider, refreshed automatically, and never injected into environment
-  variables. Requests use OpenAI-compatible chat completions at
-  `https://api.x.ai/v1` (override with `XAI_BASE_URL` / `GROK_BASE_URL`).
+  variables. Requests use OpenAI-compatible chat completions through xAI's
+  Grok CLI inference proxy with the required OAuth headers.
   Default model is `grok-4.5`. Model selection uses a static agent-ready catalog
   matching pi (`grok-4.5`, `grok-4.3`, `grok-build-0.1`) instead of live
   `GET /models`. `/login grok` can import credentials from the official Grok CLI
   (`~/.grok/auth.json`) when present. Setup wizard, `/backend`, `/doctor`, and
   `/auth` list the new provider.
+- **Arrow-key selection menus.** Setup and the interactive `/backend` and
+  `/model` flows now support ↑/↓, j/k, Home/End, Enter, number-key shortcuts,
+  and q/Esc cancellation with windowed scrolling for long lists. `/model`
+  retains its text filter, pricing/context labels, free-text fallback, and
+  `(selected)` / `(default)` markers; interactive choices retain the save-as-
+  default confirmation and direct `--default` commands remain supported.
 
 ## [1.2.5] - 2026-07-20
 

@@ -592,35 +592,29 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         return Ok(());
     }
 
-    let mut picked_with_default = as_default;
     let chosen: Option<BackendName> = if !rest.is_empty() {
         BackendName::parse(&rest)
     } else {
-        println!(
-            "  {DIM}Current:{RESET} {CYAN}{}{RESET}",
-            state.config.backend.as_str()
-        );
-        let current = state.config.backend;
+        let backends = BackendName::all();
         let (persisted_backend, _) = crate::config::persisted_defaults();
-        for (i, b) in BackendName::all().iter().enumerate() {
-            let marker = picker_marker(*b == current, persisted_backend == Some(*b));
-            println!("  {DIM}{}){RESET} {}{}", i + 1, b.as_str(), marker);
+        let options: Vec<String> = backends
+            .iter()
+            .map(|b| {
+                format!(
+                    "{}{}",
+                    b.as_str(),
+                    picker_marker(*b == state.config.backend, persisted_backend == Some(*b),)
+                )
+            })
+            .collect();
+        let default_idx = backends
+            .iter()
+            .position(|b| *b == state.config.backend)
+            .unwrap_or(0);
+        match select_from_list("Backend".into(), options, default_idx).await? {
+            Some(idx) => backends.get(idx).copied(),
+            None => None,
         }
-        // Blank line so the list and the prompt don't crowd each other.
-        println!();
-        let prompt = format!(
-            "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
-            BackendName::all().len()
-        );
-        let pick = plain_read_line(prompt).await?.trim().to_string();
-        // Blank line between the typed selection and the response below.
-        println!();
-        let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
-        picked_with_default = flag_default;
-        sel.parse::<usize>()
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| BackendName::all().get(i).copied())
     };
     let Some(chosen) = chosen else {
         println!("  {DIM}Cancelled.{RESET}");
@@ -667,23 +661,63 @@ pub(super) async fn cmd_backend(args: &str, state: &mut AppState) -> Result<()> 
         chosen.as_str(),
         state.model
     );
-    // Direct `/backend name --default` skips the confirm; interactive path
-    // either carried `--default` on the selection or gets the y/N prompt.
+    // Direct `/backend name --default` skips the confirm; the arrow picker
+    // offers to save the selected backend after applying it to this session.
     if rest.is_empty() {
-        maybe_persist_backend_default(state, picked_with_default).await?;
+        maybe_persist_backend_default(state, false).await?;
     } else if as_default {
         persist_backend_as_default(state);
     }
     Ok(())
 }
 
+fn build_filtered_model_picker(
+    ids: Vec<String>,
+    backend_default: &str,
+    current: &str,
+    persisted: Option<&str>,
+    filter: &str,
+    backend: BackendName,
+) -> (Vec<String>, Vec<ModelMenuItem>, usize) {
+    let (_, candidates, _) = build_model_menu(ids, backend_default, Some(current));
+    let filter = filter.trim().to_lowercase();
+    let mut labels = Vec::new();
+    let mut items = Vec::new();
+    let mut selected_idx = None;
+
+    for item in candidates {
+        let ModelMenuItem::Id(id) = item else {
+            continue;
+        };
+        if !filter.is_empty() && !id.to_lowercase().contains(&filter) {
+            continue;
+        }
+
+        if id == current {
+            selected_idx = Some(labels.len());
+        }
+        let marker = picker_marker(id == current, persisted == Some(id.as_str()));
+        let mut label = format!("{id}{marker}");
+        if let Some(info) = catalog::lookup(backend, &id) {
+            label.push_str(&format!(
+                "  {DIM}{}{RESET}",
+                catalog::format_cost_label(info)
+            ));
+        }
+        labels.push(label);
+        items.push(ModelMenuItem::Id(id));
+    }
+
+    labels.push(MODEL_FREE_TEXT_LABEL.into());
+    items.push(ModelMenuItem::FreeText);
+    (labels, items, selected_idx.unwrap_or(0))
+}
+
 pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     use std::io::Write;
     let (rest, as_default) = crate::config::strip_default_flag(args);
 
-    // Pin the currently active model (+ backend) as project default.
     if rest.is_empty() && as_default {
-        // Materialize the resolved id into model_override so memory matches disk.
         if state.config.model_override.as_deref() != Some(state.model.as_str()) {
             state.config.model_override = Some(state.model.clone());
         }
@@ -706,9 +740,9 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
             };
             canonical.to_string()
         } else if matches!(state.config.backend, BackendName::Grok) {
-            let Some(canonical) = crate::xai_oauth::canonical_grok_model(args) else {
+            let Some(canonical) = crate::xai_oauth::canonical_grok_model(&rest) else {
                 println!(
-                    "  {RED}✗{RESET} {DIM}{args} is not supported with Grok login. Try one of: {}{RESET}",
+                    "  {RED}✗{RESET} {DIM}{rest} is not supported with Grok login. Try one of: {}{RESET}",
                     crate::xai_oauth::grok_model_list().join(", ")
                 );
                 return Ok(());
@@ -729,6 +763,9 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
         }
         return Ok(());
     }
+
+    let backend_default = default_model(&state.backend, None);
+    let current = state.model.clone();
     let mut out = std::io::stdout();
     let _ = write!(
         out,
@@ -737,91 +774,117 @@ pub(super) async fn cmd_model(args: &str, state: &mut AppState) -> Result<()> {
     );
     let _ = out.flush();
     let ids = match list_models(&state.http, &state.backend).await {
-        Ok(v) => v,
+        Ok(ids) => {
+            let _ = write!(out, "\r\x1b[K");
+            let _ = out.flush();
+            ids
+        }
         Err(e) => {
             let _ = write!(out, "\r\x1b[K");
-            println!("  {RED}✗{RESET} {DIM}Failed: {e}{RESET}");
-            return Ok(());
-        }
-    };
-    let _ = write!(out, "\r\x1b[K");
-    let _ = out.flush();
-    if ids.is_empty() {
-        println!("  {DIM}No models available.{RESET}");
-        return Ok(());
-    }
-    println!(
-        "  {DIM}{} model(s) from {}{RESET}",
-        ids.len(),
-        state.config.backend.as_str()
-    );
-    let matches: Vec<String> = if ids.len() > 20 {
-        let prompt = format!("  {DIM}Filter (blank for all):{RESET} ");
-        let filter = plain_read_line(prompt).await?.trim().to_lowercase();
-        if filter.is_empty() {
-            ids
-        } else {
-            ids.into_iter()
-                .filter(|m| m.to_lowercase().contains(&filter))
-                .collect()
-        }
-    } else {
-        ids
-    };
-    let total = matches.len();
-    let shown: Vec<String> = matches.into_iter().take(20).collect();
-    if shown.is_empty() {
-        println!("  {DIM}No matches.{RESET}");
-        return Ok(());
-    }
-    let active_model = state.model.as_str();
-    let (_, persisted_model) = crate::config::persisted_defaults();
-    let name_width = shown.iter().map(|m| m.len()).max().unwrap_or(0);
-    for (i, m) in shown.iter().enumerate() {
-        let marker = picker_marker(
-            m == active_model,
-            persisted_model.as_deref() == Some(m.as_str()),
-        );
-        match catalog::lookup(state.config.backend, m) {
-            Some(info) => println!(
-                "  {DIM}{:>2}){RESET} {:<width$}{}  {DIM}{}{RESET}",
-                i + 1,
-                m,
-                marker,
-                catalog::format_cost_label(info),
-                width = name_width
-            ),
-            None => println!("  {DIM}{:>2}){RESET} {}{}", i + 1, m, marker),
-        }
-    }
-    if total > shown.len() {
-        println!("  {DIM}…and {} more{RESET}", total - shown.len());
-    }
-    // Blank line so the list and the prompt don't crowd each other.
-    println!();
-    let prompt = format!(
-        "  {DIM}Select (1-{}) · append --default to pin:{RESET} ",
-        shown.len()
-    );
-    let pick = plain_read_line(prompt).await?.trim().to_string();
-    // Blank line between the typed selection and the response below.
-    println!();
-    let (sel, flag_default) = crate::config::parse_picker_selection(&pick);
-    if let Some(idx) = sel.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
-        if let Some(m) = shown.get(idx) {
-            state.config.model_override = Some(m.clone());
-            state.active_effort = None;
-            state.resolve_model();
+            let _ = out.flush();
             println!(
-                "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
-                state.model
+                "  {YELLOW}!{RESET} {DIM}Could not list models ({e}); enter a model id.{RESET}"
             );
-            maybe_persist_model_default(state, flag_default).await?;
-            return Ok(());
+            return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
         }
+    };
+    if ids.is_empty() {
+        println!("  {YELLOW}!{RESET} {DIM}No models returned; enter a model id.{RESET}");
+        return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
     }
-    println!("  {DIM}Cancelled.{RESET}");
+
+    let filter = plain_read_line(format!("  {DIM}Filter (blank for all):{RESET} "))
+        .await?
+        .trim()
+        .to_string();
+    let (_, persisted_model) = crate::config::persisted_defaults();
+    let (labels, items, default_idx) = build_filtered_model_picker(
+        ids,
+        &backend_default,
+        &current,
+        persisted_model.as_deref(),
+        &filter,
+        state.config.backend,
+    );
+
+    if !items
+        .iter()
+        .any(|item| matches!(item, ModelMenuItem::Id(_)))
+    {
+        println!("  {DIM}No matches; enter a model id.{RESET}");
+        return apply_model_free_text(state, &backend_default, Some(current.as_str())).await;
+    }
+
+    let Some(idx) = select_from_list("Model".into(), labels, default_idx).await? else {
+        println!("  {DIM}Cancelled.{RESET}");
+        return Ok(());
+    };
+    match items.get(idx) {
+        Some(ModelMenuItem::Id(id)) => {
+            apply_interactive_model_choice(state, model_override_for(id, &backend_default)).await?;
+        }
+        Some(ModelMenuItem::FreeText) => {
+            apply_model_free_text(state, &backend_default, Some(current.as_str())).await?;
+        }
+        None => println!("  {DIM}Cancelled.{RESET}"),
+    }
     Ok(())
+}
+
+async fn apply_model_free_text(
+    state: &mut AppState,
+    backend_default: &str,
+    current: Option<&str>,
+) -> Result<()> {
+    let prompt = if let Some(current) = current {
+        format!(
+            "  {CYAN}❯{RESET} {DIM}Model id [current: {current}; blank: {backend_default}]:{RESET} "
+        )
+    } else {
+        format!("  {CYAN}❯{RESET} {DIM}Model id [blank: {backend_default}]:{RESET} ")
+    };
+    let input = plain_read_line(prompt).await?;
+    let trimmed = input.trim();
+    if matches!(trimmed.to_lowercase().as_str(), "q" | "quit" | "cancel") {
+        println!("  {DIM}Cancelled.{RESET}");
+        return Ok(());
+    }
+    if trimmed.is_empty() {
+        return apply_interactive_model_choice(state, None).await;
+    }
+    if matches!(state.config.backend, BackendName::OpenAiCodex) {
+        let Some(canonical) = crate::codex_responses::canonical_codex_model(trimmed) else {
+            println!(
+                "  {RED}✗{RESET} {DIM}{trimmed} is not supported with ChatGPT/Codex login. Try one of: {}{RESET}",
+                crate::codex_responses::codex_model_list().join(", ")
+            );
+            return Ok(());
+        };
+        return apply_interactive_model_choice(
+            state,
+            model_override_for(canonical, backend_default),
+        )
+        .await;
+    }
+    apply_interactive_model_choice(state, model_override_for(trimmed, backend_default)).await
+}
+
+async fn apply_interactive_model_choice(
+    state: &mut AppState,
+    model_override: Option<String>,
+) -> Result<()> {
+    apply_model_choice(state, model_override);
+    maybe_persist_model_default(state, false).await
+}
+
+fn apply_model_choice(state: &mut AppState, model_override: Option<String>) {
+    state.config.model_override = model_override;
+    state.active_effort = None;
+    state.resolve_model();
+    println!(
+        "  {GREEN}✓{RESET} {DIM}model →{RESET} {CYAN}{}{RESET}",
+        state.model
+    );
 }
 
 pub(super) fn cmd_tools(args: &str, state: &mut AppState) {
@@ -1286,5 +1349,42 @@ mod tests {
         assert!(parse_fusion_args("tool max-tools=0").is_none());
         assert!(parse_fusion_args("tool max-tools=17").is_none());
         assert!(parse_fusion_args("tool judge=").is_none());
+    }
+
+    #[test]
+    fn filtered_model_picker_preserves_filter_and_default_markers() {
+        let (labels, items, selected_idx) = build_filtered_model_picker(
+            vec!["gpt-4o-mini".into(), "gpt-4o".into(), "o1-mini".into()],
+            "gpt-4o-mini",
+            "gpt-4o",
+            Some("gpt-4o-mini"),
+            "gpt",
+            BackendName::OpenAi,
+        );
+
+        assert_eq!(items.len(), 3, "two filtered ids plus free text");
+        assert!(labels.iter().all(|label| !label.contains("o1-mini")));
+        assert!(labels[selected_idx].contains("gpt-4o"));
+        assert!(labels[selected_idx].contains("(selected)"));
+        assert!(labels
+            .iter()
+            .any(|label| label.contains("gpt-4o-mini") && label.contains("(default)")));
+        assert_eq!(items.last(), Some(&ModelMenuItem::FreeText));
+    }
+
+    #[test]
+    fn filtered_model_picker_keeps_free_text_when_nothing_matches() {
+        let (labels, items, selected_idx) = build_filtered_model_picker(
+            vec!["gpt-4o-mini".into()],
+            "gpt-4o-mini",
+            "gpt-4o-mini",
+            None,
+            "claude",
+            BackendName::OpenAi,
+        );
+
+        assert_eq!(labels, vec![MODEL_FREE_TEXT_LABEL.to_string()]);
+        assert_eq!(items, vec![ModelMenuItem::FreeText]);
+        assert_eq!(selected_idx, 0);
     }
 }

@@ -212,6 +212,27 @@ async fn resolve_bearer(client: &reqwest::Client, backend: &BackendDescriptor) -
     Ok(backend.api_key.clone())
 }
 
+fn chat_request_builder(
+    client: &reqwest::Client,
+    backend: &BackendDescriptor,
+    url: String,
+    bearer: &str,
+    model: &str,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    let request = client.post(url).bearer_auth(bearer).json(body);
+    if matches!(backend.name, BackendName::Grok) {
+        request
+            .header(
+                "X-XAI-Token-Auth",
+                crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE,
+            )
+            .header("x-grok-model-override", model)
+    } else {
+        request
+    }
+}
+
 pub async fn list_models(
     client: &reqwest::Client,
     backend: &BackendDescriptor,
@@ -256,10 +277,7 @@ pub async fn chat_oneshot(
     );
     let body = request_body(backend, req)?;
     let bearer = resolve_bearer(client, backend).await?;
-    let resp = client
-        .post(url)
-        .bearer_auth(bearer)
-        .json(&body)
+    let resp = chat_request_builder(client, backend, url, &bearer, req.model, &body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -357,10 +375,7 @@ where
     );
     let body = request_body(backend, req)?;
     let bearer = resolve_bearer(client, backend).await?;
-    let resp = client
-        .post(url)
-        .bearer_auth(bearer)
-        .json(&body)
+    let resp = chat_request_builder(client, backend, url, &bearer, req.model, &body)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -492,6 +507,38 @@ mod tests {
             SseEvent::Chunk(c) => c.choices.first()?.delta.content.as_deref(),
             _ => None,
         }
+    }
+
+    #[test]
+    fn grok_oauth_requests_use_cli_proxy_headers() {
+        let backend = BackendDescriptor {
+            name: BackendName::Grok,
+            base_url: crate::xai_oauth::INFERENCE_BASE_URL.into(),
+            api_key: String::new(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let request = chat_request_builder(
+            &reqwest::Client::new(),
+            &backend,
+            format!("{}/chat/completions", backend.base_url),
+            "oauth-token",
+            "grok-4.5",
+            &serde_json::json!({"model": "grok-4.5", "stream": true}),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers()["x-xai-token-auth"],
+            crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE
+        );
+        assert_eq!(request.headers()["x-grok-model-override"], "grok-4.5");
+        assert_eq!(request.headers()["authorization"], "Bearer oauth-token");
     }
 
     #[test]
