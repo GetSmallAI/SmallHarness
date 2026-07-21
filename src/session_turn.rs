@@ -399,13 +399,41 @@ fn fold_project_context_into_last_user(messages: &mut [ChatMessage], context: &s
     }
 }
 
+fn request_messages_with_project_context(
+    messages: &[ChatMessage],
+    context: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut request_messages = messages.to_vec();
+    if let Some(context) = context {
+        fold_project_context_into_last_user(&mut request_messages, context);
+    }
+    request_messages
+}
+
+fn restore_last_user_message(messages: &mut [ChatMessage], raw_user_message: &ChatMessage) {
+    let ChatMessage::User {
+        content: raw_content,
+    } = raw_user_message
+    else {
+        return;
+    };
+    if let Some(ChatMessage::User { content }) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message, ChatMessage::User { .. }))
+    {
+        *content = raw_content.clone();
+    }
+}
+
 fn maybe_print_context_pressure(
     state: &AppState,
     system_prompt: &str,
+    request_messages: &[ChatMessage],
     tool_defs: &[crate::openai::ToolDef],
 ) {
     let guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
-    let budget = measure_prompt_budget(system_prompt, &state.messages, tool_defs);
+    let budget = measure_prompt_budget(system_prompt, request_messages, tool_defs);
     let ratio = usage_ratio(&budget, guard.effective_limit_bytes);
     let threshold = guard.compact_threshold * 0.7;
     if ratio < threshold {
@@ -524,12 +552,20 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     // closing after the agent future returns.
     drop(tool_runtime);
     let tool_defs = crate::agent::to_openai_tools(&tools);
-    maybe_print_context_pressure(state, &system_prompt, &tool_defs);
+    let request_messages =
+        request_messages_with_project_context(&state.messages, project_context.as_deref());
+    maybe_print_context_pressure(state, &system_prompt, &request_messages, &tool_defs);
 
     let compact_guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
     let active_compact_prompt =
         merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
-    let compact_budget = measure_prompt_budget(&active_compact_prompt, &state.messages, &tool_defs);
+    let compact_budget =
+        measure_prompt_budget(&active_compact_prompt, &request_messages, &tool_defs);
+    let raw_compact_budget =
+        measure_prompt_budget(&active_compact_prompt, &state.messages, &tool_defs);
+    let request_only_context_bytes = compact_budget
+        .effective_total_bytes
+        .saturating_sub(raw_compact_budget.effective_total_bytes);
     let auto_compact_due = compact_guard.auto_compact
         && should_compact(
             &compact_budget,
@@ -577,6 +613,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &mut compact_ctx,
             &state.session_dir,
             &mut state.session_path,
+            request_only_context_bytes,
         )
         .await?
         {
@@ -666,10 +703,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
-    let mut initial = state.messages.clone();
-    if let Some(context) = project_context.as_deref() {
-        fold_project_context_into_last_user(&mut initial, context);
-    }
+    let initial =
+        request_messages_with_project_context(&state.messages, project_context.as_deref());
     let max_steps = state.config.max_steps;
     let model = state.model.clone();
     let active_effort = state.active_effort;
@@ -798,7 +833,12 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.renderer.end_turn();
 
-    let res = result?;
+    let mut res = result?;
+    if project_context.is_some() {
+        // The model saw the request-only repo map, but session state and any
+        // transcript rewrite must retain exactly what the user submitted.
+        restore_last_user_message(&mut res.messages, &user_msg);
+    }
     let mut metrics = res.metrics.clone();
     if !opts.yolo_approve {
         metrics.approval_ms = tracing_approval.approval_ms.get();
@@ -1201,7 +1241,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1249,19 +1289,7 @@ mod cost_tests {
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            100,
-            50,
-            0,
-            None,
-            true,
-            0.0,
-            false,
-            None,
-            &metrics,
-            "",
-            "",
-            "",
-            "grok-4.5",
+            100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1296,12 +1324,12 @@ mod cost_tests {
         let metrics = TurnMetrics::default();
         // Provider reported a cache hit: surface it between out and cost.
         let hit = format_footer(
-            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "",
+            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(hit.contains("1.2k in · 87 out · 900 cached"));
         // No cache hit reported: no "cached" part at all.
         let miss = format_footer(
-            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         assert!(!miss.contains("cached"));
     }
@@ -1433,6 +1461,44 @@ mod cost_tests {
             other => panic!("expected leading context text part, got {other:?}"),
         }
         assert!(matches!(parts[2], UserContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn request_only_project_context_is_counted_in_prompt_budget() {
+        let messages = vec![
+            ChatMessage::System {
+                content: "stable system".into(),
+            },
+            ChatMessage::User {
+                content: "question".into(),
+            },
+        ];
+        let raw = measure_prompt_budget("stable system", &messages, &[]);
+        let request = request_messages_with_project_context(&messages, Some("repo map body"));
+        let augmented = measure_prompt_budget("stable system", &request, &[]);
+        assert!(augmented.effective_total_bytes > raw.effective_total_bytes);
+        assert_eq!(messages[1].user_text().unwrap(), "question");
+    }
+
+    #[test]
+    fn request_only_project_context_is_removed_before_persisting() {
+        let raw = ChatMessage::User {
+            content: "question".into(),
+        };
+        let mut request = vec![
+            ChatMessage::System {
+                content: "stable system".into(),
+            },
+            raw.clone(),
+        ];
+        fold_project_context_into_last_user(&mut request, "repo map body");
+        assert!(request[1]
+            .user_text()
+            .unwrap()
+            .contains(PROJECT_CONTEXT_HEADER));
+
+        restore_last_user_message(&mut request, &raw);
+        assert_eq!(request[1].user_text().unwrap(), "question");
     }
 
     #[test]

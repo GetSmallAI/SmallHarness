@@ -317,7 +317,7 @@ where
     let mut total_cached: u32 = 0;
     let mut reported_cost_usd: Option<f64> = None;
     // Prefix identity is fixed for the turn (system message + model are stable
-    // across steps), so derive the cache-routing key once and reuse it.
+    // across steps), so derive OpenAI's cache-routing key once and reuse it.
     let cache_key = crate::openai::session_cache_key(backend, model, &messages);
     let mut transcript_rewritten = false;
     let mut natural_stop = false;

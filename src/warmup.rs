@@ -22,6 +22,7 @@ pub async fn warmup(
             content: "ok".into(),
         },
     ];
+    let cache_key = crate::openai::session_cache_key(backend, model, &messages);
     let req = ChatRequest {
         model,
         messages: &messages,
@@ -29,7 +30,9 @@ pub async fn warmup(
         stream: false,
         stream_options: None,
         max_tokens: Some(1),
-        prompt_cache_key: None,
+        // Use the same routing key as the real turn; otherwise a successful
+        // warmup may populate a different OpenAI cache shard.
+        prompt_cache_key: cache_key.as_deref(),
         effort,
     };
     chat_oneshot(http, backend, &req).await?;

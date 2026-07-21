@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backends::BackendDescriptor;
 use crate::budget::{
-    format_bytes, headroom_bytes, measure_prompt_budget, usage_ratio, PromptBudget,
+    estimate_tokens, format_bytes, headroom_bytes, measure_prompt_budget, usage_ratio, PromptBudget,
 };
 use crate::config::{AgentConfig, ContextConfig};
 use crate::openai::{stream_chat, ChatMessage, ChatRequest, StreamOptions, ToolDef};
@@ -771,10 +771,14 @@ pub async fn maybe_auto_compact(
     ctx: &mut CompactSessionContext<'_>,
     session_dir: &str,
     session_path: &mut PathBuf,
+    request_only_context_bytes: usize,
 ) -> Result<Option<CompactNotice>> {
     let guard = guard_config_from(ctx.config, ctx.model, ctx.is_local);
     let active_system_prompt = merge_system_prompt(ctx.system_prompt, ctx.conversation_summary);
-    let budget = measure_prompt_budget(&active_system_prompt, ctx.messages, ctx.tool_defs);
+    let budget = add_request_only_context_bytes(
+        measure_prompt_budget(&active_system_prompt, ctx.messages, ctx.tool_defs),
+        request_only_context_bytes,
+    );
 
     if !guard.auto_compact {
         if should_compact(
@@ -802,11 +806,23 @@ pub async fn maybe_auto_compact(
         return Ok(None);
     }
 
-    let result = compact_messages(ctx, None).await?;
+    let mut result = compact_messages(ctx, None).await?;
 
     if !result.compacted {
         return Ok(None);
     }
+
+    // `compact_messages` operates on the durable raw transcript. Correct its
+    // reported ratios for request-only context that is injected on the wire
+    // but intentionally never written into session history.
+    result.before_ratio = usage_ratio(&budget, guard.effective_limit_bytes);
+    let active_system_prompt =
+        merge_system_prompt(ctx.system_prompt, result.conversation_summary.as_deref());
+    let after_budget = add_request_only_context_bytes(
+        measure_prompt_budget(&active_system_prompt, ctx.messages, ctx.tool_defs),
+        request_only_context_bytes,
+    );
+    result.after_ratio = usage_ratio(&after_budget, guard.effective_limit_bytes);
 
     rewrite_session_transcript(session_dir, session_path, ctx.messages)?;
 
@@ -815,6 +831,23 @@ pub async fn maybe_auto_compact(
         conversation_summary: result.conversation_summary.clone(),
         transcript_rewritten: true,
     }))
+}
+
+fn add_request_only_context_bytes(
+    mut budget: PromptBudget,
+    request_only_context_bytes: usize,
+) -> PromptBudget {
+    budget.transcript_bytes = budget
+        .transcript_bytes
+        .saturating_add(request_only_context_bytes);
+    budget.total_bytes = budget
+        .total_bytes
+        .saturating_add(request_only_context_bytes);
+    budget.effective_total_bytes = budget
+        .effective_total_bytes
+        .saturating_add(request_only_context_bytes);
+    budget.estimated_tokens = estimate_tokens(budget.effective_total_bytes);
+    budget
 }
 
 pub async fn maybe_compact_messages(

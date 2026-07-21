@@ -134,27 +134,26 @@ pub struct ChatRequest<'a> {
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Stable per-session cache-routing hint for hosted providers (OpenAI
-    /// `prompt_cache_key`). Keeps a session's requests on the same cache so the
-    /// shared system+tools+history prefix stays warm across turns. Omitted for
-    /// local backends, which ignore it. See [`session_cache_key`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Stable cache-routing hint for OpenAI Chat Completions. The request-body
+    /// builder deliberately omits it for every other backend because compatible
+    /// APIs use different routing fields (or enable prompt caching automatically).
+    #[serde(skip)]
     pub prompt_cache_key: Option<&'a str>,
     #[serde(skip)]
     pub effort: Option<EffortLevel>,
 }
 
-/// Derive a stable prompt-cache-routing key from the request's cacheable prefix
-/// (model + the position-0 system message, which the interactive loop keeps
-/// byte-identical across turns). Same session/config yields the same key every
-/// turn, so hosted providers co-locate the session and keep its prefix cached.
-/// Returns `None` for local backends, which do not use the hint.
+/// Derive OpenAI's stable prompt-cache-routing key from the request's cacheable
+/// prefix (model + the position-0 system message). Other hosted providers have
+/// different routing contracts: OpenRouter handles conversation stickiness
+/// itself, while Grok's cache is automatic. Sending OpenAI's field to those
+/// compatible APIs can make an otherwise valid request fail.
 pub fn session_cache_key(
     backend: &BackendDescriptor,
     model: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
-    if backend.is_local {
+    if !matches!(backend.name, BackendName::OpenAi) {
         return None;
     }
     use std::hash::{Hash, Hasher};
@@ -465,6 +464,13 @@ where
 
 fn request_body(backend: &BackendDescriptor, req: &ChatRequest<'_>) -> Result<Value> {
     let mut body = serde_json::to_value(req)?;
+    if matches!(backend.name, BackendName::OpenAi) {
+        if let Some(key) = req.prompt_cache_key {
+            body.as_object_mut()
+                .ok_or_else(|| anyhow!("chat request did not serialize to an object"))?
+                .insert("prompt_cache_key".into(), Value::String(key.into()));
+        }
+    }
     if let Some(effort) = req.effort {
         apply_effort_to_request(backend, &mut body, effort)?;
     }
@@ -880,7 +886,8 @@ mod tests {
             session_cache_key(&hosted, "gpt-4o", &a_plus),
         );
 
-        // Local backends opt out: no hint is emitted at all.
+        // Every non-OpenAI backend opts out: compatible APIs use different
+        // routing contracts and must not receive OpenAI-only request fields.
         let local = BackendDescriptor {
             name: BackendName::Ollama,
             base_url: "http://localhost:11434/v1".into(),
@@ -889,6 +896,14 @@ mod tests {
             openrouter: OpenRouterConfig::default(),
         };
         assert_eq!(session_cache_key(&local, "gpt-4o", &a), None);
+        let openrouter = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        assert_eq!(session_cache_key(&openrouter, "gpt-4o", &a), None);
     }
 
     #[test]
@@ -911,16 +926,25 @@ mod tests {
         // see the field.
         let without = request_body(&backend, &base).unwrap();
         assert!(without.get("prompt_cache_key").is_none());
-        // Round-trips onto the wire verbatim when present.
-        let with = request_body(
-            &backend,
-            &ChatRequest {
-                prompt_cache_key: Some("sh-deadbeef"),
-                ..base
-            },
-        )
-        .unwrap();
+        // Round-trips onto the native OpenAI wire format when present.
+        let with_key = ChatRequest {
+            prompt_cache_key: Some("sh-deadbeef"),
+            ..base
+        };
+        let with = request_body(&backend, &with_key).unwrap();
         assert_eq!(with["prompt_cache_key"], "sh-deadbeef");
+
+        // Even an incorrectly populated request cannot leak the OpenAI-only
+        // field to a compatible backend.
+        let openrouter = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let compatible = request_body(&openrouter, &with_key).unwrap();
+        assert!(compatible.get("prompt_cache_key").is_none());
     }
 
     #[test]
