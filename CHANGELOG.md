@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Arrow-key selection menus.** Setup and the interactive `/backend` and
+  `/model` flows now support ↑/↓, j/k, Home/End, Enter, number-key shortcuts,
+  and q/Esc cancellation with windowed scrolling for long lists. `/model`
+  retains its text filter, pricing/context labels, free-text fallback, and
+  `(selected)` / `(default)` markers; interactive choices retain the save-as-
+  default confirmation and direct `--default` commands remain supported.
+
 ## [1.2.5] - 2026-07-20
 
 ### Added

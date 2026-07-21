@@ -1120,14 +1120,6 @@ pub fn strip_default_flag(args: &str) -> (String, bool) {
     (kept.join(" "), as_default)
 }
 
-/// Parse an interactive picker reply like `3` or `3 --default`.
-///
-/// Only the literal token `--default` marks persistence intent (not `d` / `!`).
-/// Returns `(1-based selection text without the flag, as_default)`.
-pub fn parse_picker_selection(input: &str) -> (String, bool) {
-    strip_default_flag(input)
-}
-
 /// The backend/model currently persisted as project defaults in
 /// `agent.config.json`, used to mark `(default)` in interactive pickers.
 ///
@@ -1459,15 +1451,6 @@ mod tests {
             strip_default_flag("--default foo bar"),
             ("foo bar".into(), true)
         );
-    }
-
-    #[test]
-    fn parse_picker_selection_splits_index_and_flag() {
-        assert_eq!(parse_picker_selection("3"), ("3".into(), false));
-        assert_eq!(parse_picker_selection("3 --default"), ("3".into(), true));
-        assert_eq!(parse_picker_selection("--default 3"), ("3".into(), true));
-        // Bare index only; sugar like `d`/`!` is intentionally not persistence.
-        assert_eq!(parse_picker_selection("3d"), ("3d".into(), false));
     }
 
     #[test]
