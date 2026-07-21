@@ -195,12 +195,21 @@ pub fn append_ship_context(
         return base.to_string();
     };
     let line = ship_status_one_liner(&snapshot, tests_ran_this_session);
-    let capped = if line.len() > 512 {
-        format!("{}…", &line[..509])
-    } else {
-        line
-    };
-    format!("{base}\n\n{capped}")
+    format!("{base}\n\n{}", cap_ship_status_line(&line, 512))
+}
+
+/// Cap a ship status line to `max_bytes`, rolling back to a char boundary so
+/// multi-byte branch names cannot panic on a mid-character slice.
+fn cap_ship_status_line(line: &str, max_bytes: usize) -> String {
+    if line.len() <= max_bytes {
+        return line.to_string();
+    }
+    let ellipsis = "…";
+    let mut end = max_bytes.saturating_sub(ellipsis.len()).min(line.len());
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ellipsis}", &line[..end])
 }
 
 pub fn collect_shipcheck(workspace_root: &str) -> Result<ShipcheckSnapshot> {
@@ -661,6 +670,50 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn cap_ship_status_line_leaves_short_ascii() {
+        assert_eq!(cap_ship_status_line("short", 512), "short");
+    }
+
+    #[test]
+    fn cap_ship_status_line_does_not_panic_on_emoji_over_cap() {
+        // 🚀 is 4 bytes; a hard slice at byte 509 used to panic mid-character.
+        let line = format!(
+            "Ship status: branch {}, 0 unstaged file(s), 0 staged, tests not run this session",
+            "🚀".repeat(130)
+        );
+        assert!(line.len() > 512);
+        assert!(!line.is_char_boundary(509));
+        let capped = cap_ship_status_line(&line, 512);
+        assert!(capped.len() <= 512);
+        assert!(capped.ends_with('…'));
+        assert!(capped.is_char_boundary(capped.len() - '…'.len_utf8()));
+    }
+
+    #[test]
+    fn ship_status_one_liner_with_emoji_branch_caps_safely() {
+        let snapshot = ShipcheckSnapshot {
+            workspace_root: ".".into(),
+            git_root: ".".into(),
+            branch: GitBranchState {
+                oid: None,
+                head: Some("🚀".repeat(120)),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+            },
+            files: Vec::new(),
+            staged_diff_stat: String::new(),
+            unstaged_diff_stat: String::new(),
+            test_status: None,
+        };
+        let line = ship_status_one_liner(&snapshot, false);
+        assert!(line.len() > 512);
+        let capped = cap_ship_status_line(&line, 512);
+        assert!(capped.len() <= 512);
+        assert!(capped.contains("Ship status: branch"));
+    }
 
     #[test]
     fn parses_clean_branch_status() {
