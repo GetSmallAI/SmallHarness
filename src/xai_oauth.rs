@@ -895,12 +895,13 @@ mod tests {
 
     fn send_callback(port: u16, target: &str) {
         let mut stream = TcpStream::connect((REDIRECT_HOST, port)).unwrap();
-        write!(
-            stream,
+        let request = format!(
             "GET {target} HTTP/1.1\r\nHost: {REDIRECT_HOST}:{port}\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
+        );
+        stream.write_all(request.as_bytes()).unwrap();
         let _ = stream.shutdown(Shutdown::Write);
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
     }
 
     #[test]
