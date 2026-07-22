@@ -271,11 +271,15 @@ fn chat_request_builder(
 ) -> reqwest::RequestBuilder {
     let request = client.post(url).bearer_auth(bearer).json(body);
     if matches!(backend.name, BackendName::Grok) {
+        let version = crate::xai_oauth::client_version();
+        let user_agent = crate::xai_oauth::user_agent();
         request
             .header(
                 "X-XAI-Token-Auth",
                 crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE,
             )
+            .header(crate::xai_oauth::CLIENT_VERSION_HEADER, version)
+            .header("User-Agent", user_agent)
             .header("x-grok-model-override", model)
     } else {
         request
@@ -589,9 +593,18 @@ mod tests {
             request.url().as_str(),
             "https://cli-chat-proxy.grok.com/v1/chat/completions"
         );
+        let version = crate::xai_oauth::client_version();
         assert_eq!(
             request.headers()["x-xai-token-auth"],
             crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE
+        );
+        assert_eq!(
+            request.headers()[crate::xai_oauth::CLIENT_VERSION_HEADER],
+            version.as_str()
+        );
+        assert_eq!(
+            request.headers()["user-agent"],
+            format!("xai-grok-workspace/{version}")
         );
         assert_eq!(request.headers()["x-grok-model-override"], "grok-4.5");
         assert_eq!(request.headers()["authorization"], "Bearer oauth-token");
