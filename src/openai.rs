@@ -271,15 +271,16 @@ fn chat_request_builder(
 ) -> reqwest::RequestBuilder {
     let request = client.post(url).bearer_auth(bearer).json(body);
     if matches!(backend.name, BackendName::Grok) {
-        let version = crate::xai_oauth::client_version();
-        let user_agent = crate::xai_oauth::user_agent();
         request
             .header(
                 "X-XAI-Token-Auth",
                 crate::xai_oauth::TOKEN_AUTH_HEADER_VALUE,
             )
-            .header(crate::xai_oauth::CLIENT_VERSION_HEADER, version)
-            .header("User-Agent", user_agent)
+            .header(
+                crate::xai_oauth::CLIENT_VERSION_HEADER,
+                crate::xai_oauth::client_version(),
+            )
+            .header("User-Agent", crate::xai_oauth::user_agent())
             .header("x-grok-model-override", model)
     } else {
         request
