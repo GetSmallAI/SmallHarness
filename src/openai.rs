@@ -134,8 +134,35 @@ pub struct ChatRequest<'a> {
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Stable cache-routing hint for OpenAI Chat Completions. The request-body
+    /// builder deliberately omits it for every other backend because compatible
+    /// APIs use different routing fields (or enable prompt caching automatically).
+    #[serde(skip)]
+    pub prompt_cache_key: Option<&'a str>,
     #[serde(skip)]
     pub effort: Option<EffortLevel>,
+}
+
+/// Derive OpenAI's stable prompt-cache-routing key from the request's cacheable
+/// prefix (model + the position-0 system message). Other hosted providers have
+/// different routing contracts: OpenRouter handles conversation stickiness
+/// itself, while Grok's cache is automatic. Sending OpenAI's field to those
+/// compatible APIs can make an otherwise valid request fail.
+pub fn session_cache_key(
+    backend: &BackendDescriptor,
+    model: &str,
+    messages: &[ChatMessage],
+) -> Option<String> {
+    if !matches!(backend.name, BackendName::OpenAi) {
+        return None;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut hasher);
+    if let Some(ChatMessage::System { content }) = messages.first() {
+        content.hash(&mut hasher);
+    }
+    Some(format!("sh-{:016x}", hasher.finish()))
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +220,28 @@ pub struct Usage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub cost: Option<f64>,
+    /// Cached-prompt accounting, when the provider reports it. OpenAI and
+    /// OpenRouter nest the cache hit here as `prompt_tokens_details.cached_tokens`
+    /// (a subset of `prompt_tokens`); local backends omit it.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
+}
+
+impl Usage {
+    /// Prompt tokens served from the provider's prompt cache this call, or 0
+    /// when the provider reports no cache details.
+    pub fn cached_tokens(&self) -> u32 {
+        self.prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0)
+    }
 }
 
 pub fn build_http_client() -> reqwest::Client {
@@ -415,6 +464,13 @@ where
 
 fn request_body(backend: &BackendDescriptor, req: &ChatRequest<'_>) -> Result<Value> {
     let mut body = serde_json::to_value(req)?;
+    if matches!(backend.name, BackendName::OpenAi) {
+        if let Some(key) = req.prompt_cache_key {
+            body.as_object_mut()
+                .ok_or_else(|| anyhow!("chat request did not serialize to an object"))?
+                .insert("prompt_cache_key".into(), Value::String(key.into()));
+        }
+    }
     if let Some(effort) = req.effort {
         apply_effort_to_request(backend, &mut body, effort)?;
     }
@@ -775,6 +831,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: None,
         };
 
@@ -784,6 +841,110 @@ mod tests {
         assert_eq!(plugin["analysis_models"][0], "~google/gemini-flash-latest");
         assert_eq!(plugin["model"], "~anthropic/claude-opus-latest");
         assert_eq!(plugin["max_tool_calls"], 4);
+    }
+
+    fn hosted_backend() -> BackendDescriptor {
+        BackendDescriptor {
+            name: BackendName::OpenAi,
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        }
+    }
+
+    #[test]
+    fn session_cache_key_is_stable_and_prefix_scoped() {
+        let hosted = hosted_backend();
+        let sys = |t: &str| vec![ChatMessage::System { content: t.into() }];
+        let a = sys("stable system prompt");
+
+        // Same model + same system prefix => identical key across turns. This is
+        // the whole point: a session keeps routing to the same warm cache shard.
+        assert_eq!(
+            session_cache_key(&hosted, "gpt-4o", &a),
+            session_cache_key(&hosted, "gpt-4o", &a),
+        );
+        // A different model must not share a cache key.
+        assert_ne!(
+            session_cache_key(&hosted, "gpt-4o", &a),
+            session_cache_key(&hosted, "gpt-4o-mini", &a),
+        );
+        // A different stable prefix (system prompt) must not share a cache key.
+        assert_ne!(
+            session_cache_key(&hosted, "gpt-4o", &a),
+            session_cache_key(&hosted, "gpt-4o", &sys("a different system prompt")),
+        );
+        // Appending volatile turns below the prefix must NOT change the key,
+        // otherwise every turn would route to a cold shard.
+        let mut a_plus = a.clone();
+        a_plus.push(ChatMessage::User {
+            content: "turn two".into(),
+        });
+        assert_eq!(
+            session_cache_key(&hosted, "gpt-4o", &a),
+            session_cache_key(&hosted, "gpt-4o", &a_plus),
+        );
+
+        // Every non-OpenAI backend opts out: compatible APIs use different
+        // routing contracts and must not receive OpenAI-only request fields.
+        let local = BackendDescriptor {
+            name: BackendName::Ollama,
+            base_url: "http://localhost:11434/v1".into(),
+            api_key: String::new(),
+            is_local: true,
+            openrouter: OpenRouterConfig::default(),
+        };
+        assert_eq!(session_cache_key(&local, "gpt-4o", &a), None);
+        let openrouter = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        assert_eq!(session_cache_key(&openrouter, "gpt-4o", &a), None);
+    }
+
+    #[test]
+    fn prompt_cache_key_is_serialized_only_when_set() {
+        let backend = hosted_backend();
+        let messages = vec![ChatMessage::User {
+            content: "hi".into(),
+        }];
+        let base = ChatRequest {
+            model: "gpt-4o",
+            messages: &messages,
+            tools: None,
+            stream: true,
+            stream_options: None,
+            max_tokens: None,
+            prompt_cache_key: None,
+            effort: None,
+        };
+        // Omitted when None (serde skip), so backends that don't support it never
+        // see the field.
+        let without = request_body(&backend, &base).unwrap();
+        assert!(without.get("prompt_cache_key").is_none());
+        // Round-trips onto the native OpenAI wire format when present.
+        let with_key = ChatRequest {
+            prompt_cache_key: Some("sh-deadbeef"),
+            ..base
+        };
+        let with = request_body(&backend, &with_key).unwrap();
+        assert_eq!(with["prompt_cache_key"], "sh-deadbeef");
+
+        // Even an incorrectly populated request cannot leak the OpenAI-only
+        // field to a compatible backend.
+        let openrouter = BackendDescriptor {
+            name: BackendName::Openrouter,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: "test".into(),
+            is_local: false,
+            openrouter: OpenRouterConfig::default(),
+        };
+        let compatible = request_body(&openrouter, &with_key).unwrap();
+        assert!(compatible.get("prompt_cache_key").is_none());
     }
 
     #[test]
@@ -805,6 +966,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: Some(EffortLevel::Max),
         };
 
@@ -832,6 +994,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: Some(EffortLevel::High),
         };
 
@@ -865,6 +1028,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: None,
         };
 
@@ -936,6 +1100,7 @@ mod tests {
             stream: true,
             stream_options: None,
             max_tokens: None,
+            prompt_cache_key: None,
             effort: None,
         };
         let mut name = String::new();

@@ -452,6 +452,7 @@ async fn probe_setup_backend(config: &AgentConfig) {
         stream: false,
         stream_options: None,
         max_tokens: Some(4),
+        prompt_cache_key: None,
         effort: None,
     };
     match with_probe_timeout(chat_oneshot(&http, &backend_desc, &req)).await {

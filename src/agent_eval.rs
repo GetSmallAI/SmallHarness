@@ -648,6 +648,7 @@ mod tests {
                 messages: vec![],
                 input_tokens: 0,
                 output_tokens: 0,
+                cached_input_tokens: 0,
                 reported_cost_usd: None,
                 transcript_rewritten: false,
                 conversation_summary: None,

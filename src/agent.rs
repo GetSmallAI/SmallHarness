@@ -80,6 +80,9 @@ pub struct RunResult {
     pub messages: Vec<ChatMessage>,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Portion of `input_tokens` the provider served from its prompt cache
+    /// across this turn's steps (0 when the provider reports no cache details).
+    pub cached_input_tokens: u32,
     pub reported_cost_usd: Option<f64>,
     pub transcript_rewritten: bool,
     pub conversation_summary: Option<String>,
@@ -311,7 +314,11 @@ where
 
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
+    let mut total_cached: u32 = 0;
     let mut reported_cost_usd: Option<f64> = None;
+    // Prefix identity is fixed for the turn (system message + model are stable
+    // across steps), so derive OpenAI's cache-routing key once and reuse it.
+    let cache_key = crate::openai::session_cache_key(backend, model, &messages);
     let mut transcript_rewritten = false;
     let mut natural_stop = false;
     let mut conversation_summary = guard
@@ -351,6 +358,7 @@ where
                 include_usage: true,
             }),
             max_tokens: None,
+            prompt_cache_key: cache_key.as_deref(),
             effort,
         };
 
@@ -418,6 +426,7 @@ where
             if let Some(usage) = &chunk.usage {
                 total_in += usage.prompt_tokens;
                 total_out += usage.completion_tokens;
+                total_cached += usage.cached_tokens();
                 if let Some(cost) = usage.cost {
                     step_reported_cost_usd = Some(cost);
                 }
@@ -1012,6 +1021,7 @@ where
         messages,
         input_tokens: total_in,
         output_tokens: total_out,
+        cached_input_tokens: total_cached,
         reported_cost_usd,
         transcript_rewritten,
         conversation_summary,

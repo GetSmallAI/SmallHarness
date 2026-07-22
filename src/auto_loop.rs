@@ -493,6 +493,7 @@ pub(crate) async fn run_done_check(
             include_usage: false,
         }),
         max_tokens: Some(400),
+        prompt_cache_key: None,
         effort: None,
     };
     let mut raw = String::new();

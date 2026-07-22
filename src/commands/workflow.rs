@@ -43,6 +43,7 @@ async fn eval_once(
             include_usage: false,
         }),
         max_tokens: None,
+        prompt_cache_key: None,
         effort: None,
     };
     let mut out = String::new();
@@ -832,6 +833,7 @@ async fn run_prompt_content(content: &str, state: &mut AppState) -> Result<()> {
             include_usage: true,
         }),
         max_tokens: None,
+        prompt_cache_key: None,
         effort: state.active_effort,
     };
 

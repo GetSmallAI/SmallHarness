@@ -22,7 +22,10 @@ use crate::hooks::{
 use crate::loader::Loader;
 use crate::model_system::EffortLevel;
 use crate::openai::{ChatMessage, ImageUrl, UserContent, UserContentPart};
-use crate::project_memory::{refresh_project_memory_after_write, render_system_prompt_with_memory};
+use crate::project_memory::{
+    maybe_project_context, refresh_project_memory_after_write, render_stable_system_prompt,
+    PROJECT_CONTEXT_HEADER,
+};
 use crate::session::save_message;
 use crate::shipcheck::{append_ship_context, collect_shipcheck};
 use crate::test_integration::{
@@ -177,6 +180,7 @@ fn format_effort_suffix(effort: Option<EffortLevel>) -> String {
 fn format_footer(
     input_tokens: u32,
     output_tokens: u32,
+    cached_input_tokens: u32,
     turn_cost: Option<f64>,
     backend_is_local: bool,
     session_usd: f64,
@@ -192,6 +196,11 @@ fn format_footer(
         format!("{} in", format_tokens(input_tokens)),
         format!("{} out", format_tokens(output_tokens)),
     ];
+    // Only surface cache reuse when the provider reported it, so local backends
+    // (which never report cached tokens) don't get a misleading "0 cached".
+    if cached_input_tokens > 0 {
+        parts.push(format!("{} cached", format_tokens(cached_input_tokens)));
+    }
     let cost = format_cost_suffix(
         turn_cost,
         backend_is_local,
@@ -369,13 +378,62 @@ pub(crate) fn system_prompt_with_hook_context(
     system_prompt
 }
 
+/// Fold the prompt-focused project context into the final user message of a
+/// request so it rides below the stable system/tools/history cache prefix
+/// instead of mutating the position-0 system message every turn. Mutates only
+/// the request copy; durable history keeps the user's raw prompt.
+fn fold_project_context_into_last_user(messages: &mut [ChatMessage], context: &str) {
+    for msg in messages.iter_mut().rev() {
+        if let ChatMessage::User { content } = msg {
+            let block = format!("{PROJECT_CONTEXT_HEADER}\n{context}\n\n");
+            match content {
+                UserContent::Text(text) => {
+                    *content = UserContent::Text(format!("{block}{text}"));
+                }
+                UserContent::Parts(parts) => {
+                    parts.insert(0, UserContentPart::Text { text: block });
+                }
+            }
+            return;
+        }
+    }
+}
+
+fn request_messages_with_project_context(
+    messages: &[ChatMessage],
+    context: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut request_messages = messages.to_vec();
+    if let Some(context) = context {
+        fold_project_context_into_last_user(&mut request_messages, context);
+    }
+    request_messages
+}
+
+fn restore_last_user_message(messages: &mut [ChatMessage], raw_user_message: &ChatMessage) {
+    let ChatMessage::User {
+        content: raw_content,
+    } = raw_user_message
+    else {
+        return;
+    };
+    if let Some(ChatMessage::User { content }) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message, ChatMessage::User { .. }))
+    {
+        *content = raw_content.clone();
+    }
+}
+
 fn maybe_print_context_pressure(
     state: &AppState,
     system_prompt: &str,
+    request_messages: &[ChatMessage],
     tool_defs: &[crate::openai::ToolDef],
 ) {
     let guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
-    let budget = measure_prompt_budget(system_prompt, &state.messages, tool_defs);
+    let budget = measure_prompt_budget(system_prompt, request_messages, tool_defs);
     let ratio = usage_ratio(&budget, guard.effective_limit_bytes);
     let threshold = guard.compact_threshold * 0.7;
     if ratio < threshold {
@@ -428,16 +486,16 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     let trimmed = user_prompt.as_str();
 
     let active_tool_names = select_tool_names(&state.config, trimmed);
+    // The system message is the cache prefix; keep it prompt-independent. The
+    // prompt-focused repo map is computed here but folded into the current user
+    // turn below the cache boundary (see `initial` assembly), not the system
+    // prompt, so the cached prefix survives across turns.
     let raw_base_system_prompt = append_ship_context(
-        &render_system_prompt_with_memory(
-            &state.config,
-            &state.backend,
-            &active_tool_names,
-            trimmed,
-        ),
+        &render_stable_system_prompt(&state.config, &active_tool_names),
         &state.config,
         state.tests_ran_this_session,
     );
+    let project_context = maybe_project_context(&state.config, &state.backend, trimmed);
     let mut hook_prompt_contexts = Vec::new();
     hook_prompt_contexts.extend(state.session_hook_contexts.clone());
     hook_prompt_contexts.append(&mut state.pending_hook_contexts);
@@ -494,12 +552,20 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     // closing after the agent future returns.
     drop(tool_runtime);
     let tool_defs = crate::agent::to_openai_tools(&tools);
-    maybe_print_context_pressure(state, &system_prompt, &tool_defs);
+    let request_messages =
+        request_messages_with_project_context(&state.messages, project_context.as_deref());
+    maybe_print_context_pressure(state, &system_prompt, &request_messages, &tool_defs);
 
     let compact_guard = guard_config_from(&state.config, &state.model, state.backend.is_local);
     let active_compact_prompt =
         merge_system_prompt(&base_system_prompt, state.conversation_summary.as_deref());
-    let compact_budget = measure_prompt_budget(&active_compact_prompt, &state.messages, &tool_defs);
+    let compact_budget =
+        measure_prompt_budget(&active_compact_prompt, &request_messages, &tool_defs);
+    let raw_compact_budget =
+        measure_prompt_budget(&active_compact_prompt, &state.messages, &tool_defs);
+    let request_only_context_bytes = compact_budget
+        .effective_total_bytes
+        .saturating_sub(raw_compact_budget.effective_total_bytes);
     let auto_compact_due = compact_guard.auto_compact
         && should_compact(
             &compact_budget,
@@ -547,6 +613,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
             &mut compact_ctx,
             &state.session_dir,
             &mut state.session_path,
+            request_only_context_bytes,
         )
         .await?
         {
@@ -636,7 +703,8 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         }
     }
 
-    let initial = state.messages.clone();
+    let initial =
+        request_messages_with_project_context(&state.messages, project_context.as_deref());
     let max_steps = state.config.max_steps;
     let model = state.model.clone();
     let active_effort = state.active_effort;
@@ -765,7 +833,12 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
     }
     state.renderer.end_turn();
 
-    let res = result?;
+    let mut res = result?;
+    if project_context.is_some() {
+        // The model saw the request-only repo map, but session state and any
+        // transcript rewrite must retain exactly what the user submitted.
+        restore_last_user_message(&mut res.messages, &user_msg);
+    }
     let mut metrics = res.metrics.clone();
     if !opts.yolo_approve {
         metrics.approval_ms = tracing_approval.approval_ms.get();
@@ -926,6 +999,7 @@ pub async fn run_user_turn(state: &mut AppState, opts: TurnOptions) -> Result<Tu
         format_footer(
             res.input_tokens,
             res.output_tokens,
+            res.cached_input_tokens,
             turn_cost,
             state.config.backend.is_local(),
             state.session_usd,
@@ -1167,7 +1241,7 @@ mod cost_tests {
     fn footer_has_no_doubled_or_leading_separators_when_parts_empty() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            1200, 87, None, true, 0.0, false, None, &metrics, "", "", "", "",
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
         );
         // Only the two always-present parts (tokens in/out) should appear,
         // joined by exactly one " · ", with no trailing/leading separator.
@@ -1192,6 +1266,7 @@ mod cost_tests {
         let footer = format_footer(
             500,
             120,
+            0,
             Some(0.01),
             false,
             0.01,
@@ -1214,7 +1289,7 @@ mod cost_tests {
     fn footer_ends_with_model_without_exposing_endpoint() {
         let metrics = TurnMetrics::default();
         let footer = format_footer(
-            100, 50, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
+            100, 50, 0, None, true, 0.0, false, None, &metrics, "", "", "", "grok-4.5",
         );
         assert!(footer.contains("100 in · 50 out · grok-4.5"));
         assert!(!footer.contains("https://"));
@@ -1227,6 +1302,7 @@ mod cost_tests {
         let footer = format_footer(
             100,
             50,
+            0,
             None,
             true,
             0.0,
@@ -1241,6 +1317,21 @@ mod cost_tests {
         assert!(!footer.contains('$'));
         assert!(footer.contains("qwen2.5:7b"));
         assert!(!footer.contains("http://"));
+    }
+
+    #[test]
+    fn footer_shows_cached_tokens_only_when_present() {
+        let metrics = TurnMetrics::default();
+        // Provider reported a cache hit: surface it between out and cost.
+        let hit = format_footer(
+            1200, 87, 900, None, true, 0.0, false, None, &metrics, "", "", "", "",
+        );
+        assert!(hit.contains("1.2k in · 87 out · 900 cached"));
+        // No cache hit reported: no "cached" part at all.
+        let miss = format_footer(
+            1200, 87, 0, None, true, 0.0, false, None, &metrics, "", "", "", "",
+        );
+        assert!(!miss.contains("cached"));
     }
 
     #[test]
@@ -1303,6 +1394,123 @@ mod cost_tests {
         assert!(merged.contains("(redacted)"));
         assert!(merged.contains("[truncated]"));
         assert!(merged.len() < 10_000);
+    }
+
+    #[test]
+    fn project_context_folds_into_last_user_not_system() {
+        let mut messages = vec![
+            ChatMessage::System {
+                content: "STABLE SYSTEM".into(),
+            },
+            ChatMessage::User {
+                content: UserContent::Text("first question".into()),
+            },
+            ChatMessage::Assistant {
+                content: Some("answer".into()),
+                tool_calls: vec![],
+            },
+            ChatMessage::User {
+                content: UserContent::Text("how does the parser work".into()),
+            },
+        ];
+        fold_project_context_into_last_user(&mut messages, "Focused map for `parser`:\n- src/x.rs");
+
+        // Cache prefix (system + earlier turns) must be untouched so it stays
+        // byte-identical across turns.
+        match &messages[0] {
+            ChatMessage::System { content } => assert_eq!(content, "STABLE SYSTEM"),
+            other => panic!("expected system at position 0, got {other:?}"),
+        }
+        assert_eq!(messages[1].user_text().unwrap(), "first question");
+
+        // The volatile map rides below the boundary, on the current user turn.
+        let last = messages[3].user_text().unwrap();
+        assert_eq!(
+            last,
+            "Local project memory context:\nFocused map for `parser`:\n- src/x.rs\n\nhow does the parser work"
+        );
+    }
+
+    #[test]
+    fn project_context_folds_ahead_of_image_parts() {
+        let mut messages = vec![ChatMessage::User {
+            content: UserContent::Parts(vec![
+                UserContentPart::Text {
+                    text: "describe this".into(),
+                },
+                UserContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                    },
+                },
+            ]),
+        }];
+        fold_project_context_into_last_user(&mut messages, "MAP BODY");
+
+        let ChatMessage::User {
+            content: UserContent::Parts(parts),
+        } = &messages[0]
+        else {
+            panic!("expected multi-part user message");
+        };
+        assert_eq!(parts.len(), 3);
+        match &parts[0] {
+            UserContentPart::Text { text } => {
+                assert_eq!(text, "Local project memory context:\nMAP BODY\n\n");
+            }
+            other => panic!("expected leading context text part, got {other:?}"),
+        }
+        assert!(matches!(parts[2], UserContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn request_only_project_context_is_counted_in_prompt_budget() {
+        let messages = vec![
+            ChatMessage::System {
+                content: "stable system".into(),
+            },
+            ChatMessage::User {
+                content: "question".into(),
+            },
+        ];
+        let raw = measure_prompt_budget("stable system", &messages, &[]);
+        let request = request_messages_with_project_context(&messages, Some("repo map body"));
+        let augmented = measure_prompt_budget("stable system", &request, &[]);
+        assert!(augmented.effective_total_bytes > raw.effective_total_bytes);
+        assert_eq!(messages[1].user_text().unwrap(), "question");
+    }
+
+    #[test]
+    fn request_only_project_context_is_removed_before_persisting() {
+        let raw = ChatMessage::User {
+            content: "question".into(),
+        };
+        let mut request = vec![
+            ChatMessage::System {
+                content: "stable system".into(),
+            },
+            raw.clone(),
+        ];
+        fold_project_context_into_last_user(&mut request, "repo map body");
+        assert!(request[1]
+            .user_text()
+            .unwrap()
+            .contains(PROJECT_CONTEXT_HEADER));
+
+        restore_last_user_message(&mut request, &raw);
+        assert_eq!(request[1].user_text().unwrap(), "question");
+    }
+
+    #[test]
+    fn folding_project_context_without_user_message_is_a_noop() {
+        let mut messages = vec![ChatMessage::System {
+            content: "sys".into(),
+        }];
+        fold_project_context_into_last_user(&mut messages, "map");
+        match &messages[0] {
+            ChatMessage::System { content } => assert_eq!(content, "sys"),
+            other => panic!("unexpected mutation: {other:?}"),
+        }
     }
 
     #[test]

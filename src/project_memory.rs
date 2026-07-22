@@ -658,22 +658,47 @@ pub fn maybe_project_context(
     Some(map.content)
 }
 
+/// Header the prompt-focused repo map is injected under, whether it lives in
+/// the system prompt (one-shot/eval callers) or is folded below the cache
+/// boundary into the current user turn (the interactive loop).
+pub const PROJECT_CONTEXT_HEADER: &str = "Local project memory context:";
+
+fn append_project_prompt(out: &mut String, workspace_root: &str) {
+    if let Some(project_prompt) = load_project_prompt(workspace_root) {
+        out.push_str("\n\nProject-specific guidance (.small-harness/prompt.md):\n");
+        out.push_str(&project_prompt);
+    }
+}
+
+/// System prompt that stays byte-identical across turns within a session:
+/// base prompt plus the static `.small-harness/prompt.md` guidance.
+///
+/// It deliberately omits the prompt-focused repo map ([`maybe_project_context`]),
+/// which is re-ranked against every user message and so changes each turn.
+/// Keeping that volatile block out of the position-0 system message lets the
+/// cached prefix (system + tools + prior turns) survive across turns for both
+/// hosted prompt caching and local KV/prefix reuse. The interactive loop folds
+/// the map into the current user turn instead, below the cache boundary.
+pub fn render_stable_system_prompt(config: &AgentConfig, tools: &[String]) -> String {
+    let mut out = config.render_system_prompt_for_tools(tools);
+    append_project_prompt(&mut out, &config.workspace_root);
+    out
+}
+
 pub fn render_system_prompt_with_memory(
     config: &AgentConfig,
     backend: &BackendDescriptor,
     tools: &[String],
     prompt: &str,
 ) -> String {
-    let base = config.render_system_prompt_for_tools(tools);
-    let mut out = base;
+    let mut out = config.render_system_prompt_for_tools(tools);
     if let Some(context) = maybe_project_context(config, backend, prompt) {
-        out.push_str("\n\nLocal project memory context:\n");
+        out.push_str("\n\n");
+        out.push_str(PROJECT_CONTEXT_HEADER);
+        out.push('\n');
         out.push_str(&context);
     }
-    if let Some(project_prompt) = load_project_prompt(&config.workspace_root) {
-        out.push_str("\n\nProject-specific guidance (.small-harness/prompt.md):\n");
-        out.push_str(&project_prompt);
-    }
+    append_project_prompt(&mut out, &config.workspace_root);
     out
 }
 
@@ -1434,6 +1459,49 @@ mod tests {
             &cloud_backend(),
             "map this repo"
         ));
+    }
+
+    #[test]
+    fn stable_system_prompt_excludes_prompt_focused_map() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("parser.rs"), "pub fn parse_tokens() {}\n").unwrap();
+        fs::write(dir.path().join("render.rs"), "pub fn render_frame() {}\n").unwrap();
+        let config = config_for(dir.path());
+        build_project_index(&config).unwrap();
+        let backend = local_backend();
+        let tools = vec!["file_read".to_string()];
+
+        // The focused map exists and is a function of the current user prompt.
+        let ctx =
+            maybe_project_context(&config, &backend, "how does parse_tokens read code").unwrap();
+        assert!(ctx.contains("Focused map for"));
+
+        // One-shot callers still embed the map, so their prompt varies per turn
+        // — exactly what makes it unfit for the cache prefix.
+        let full_a = render_system_prompt_with_memory(
+            &config,
+            &backend,
+            &tools,
+            "how does parse_tokens read code",
+        );
+        let full_b = render_system_prompt_with_memory(
+            &config,
+            &backend,
+            &tools,
+            "explain render_frame in this code",
+        );
+        assert!(full_a.contains(PROJECT_CONTEXT_HEADER));
+        assert_ne!(
+            full_a, full_b,
+            "system prompt with the map embedded changes with the user prompt"
+        );
+
+        // The stable prefix carries neither the header nor any focused map, and
+        // is identical regardless of the turn's prompt.
+        let stable = render_stable_system_prompt(&config, &tools);
+        assert!(!stable.contains(PROJECT_CONTEXT_HEADER));
+        assert!(!stable.contains("Focused map for"));
+        assert_eq!(stable, render_stable_system_prompt(&config, &tools));
     }
 
     #[test]
