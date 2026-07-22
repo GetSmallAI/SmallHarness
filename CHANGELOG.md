@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.7] - 2026-07-21
+
+### Changed
+
+- **Stable prompt-cache prefixes and cache-hit reporting.** Interactive turns
+  keep the system prompt and static project instructions byte-stable while
+  injecting the prompt-focused repo map only into the current request. OpenAI
+  requests use a stable cache-routing key, compatible providers retain their
+  native caching behavior, and provider-reported cached input tokens appear in
+  the turn footer. Request-only project context is included in context-budget
+  and compaction decisions without leaking into persisted session history.
+
 ## [1.2.6] - 2026-07-21
 
 ### Added
